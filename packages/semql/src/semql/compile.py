@@ -125,6 +125,10 @@ def _find_join_path(
 
 
 _PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+# ``{ctx.X}`` — caller-context placeholders inside ``security_sql``.
+# Substituted with a bound parameter so the value never appears as a
+# SQL literal.
+_CTX_PLACEHOLDER_RE = re.compile(r"\{ctx\.([a-z_][a-z0-9_]*)\}")
 
 
 def _resolve_sql(
@@ -425,34 +429,62 @@ def compile_query(
     def parse(sql: str) -> exp.Expression:
         return _parse_fragment(resolve_in_ctx(sql), dialect)
 
-    def wrap_for_tenancy(cube: Cube, source: exp.Expression) -> exp.Expression:
-        """Wrap a cube's FROM source in a tenancy-scoped subquery.
+    def _resolve_security_sql(cube: Cube, raw: str) -> str:
+        """Substitute ``{alias}`` and ``{ctx.X}`` placeholders in a
+        ``security_sql`` fragment, binding ``{ctx.X}`` values as
+        parameters so they never appear as SQL literals."""
+        resolved = resolve_in_ctx(raw)
 
-        DISCRIMINATOR cubes share a physical table; the wrapper carries
-        ``WHERE <tenancy_column> = <bound_tenant>`` *inside* the alias
-        the outer query sees so a malformed outer ``OR`` predicate
-        can't smuggle in rows from another tenant. SCHEMA / NONE cubes
-        pass through unchanged."""
-        if cube.tenancy != "discriminator":
-            return source
-        if "tenant" not in ctx:
-            raise CompileError(
-                f"Cube {cube.name!r} declares tenancy='discriminator' but "
-                "no 'tenant' value was provided in compile context. "
-                "Pass context={'tenant': <tenant_id>, ...}."
-            )
-        assert cube.tenancy_column is not None
-        inner = (
-            exp.Select()
-            .select(exp.Star())
-            .from_(source)
-            .where(
+        def _ctx_repl(m: re.Match[str]) -> str:
+            key = "ctx." + m.group(1)
+            if key not in ctx:
+                raise CompileError(
+                    f"Cube {cube.name!r} security_sql references "
+                    f"{{{key}}} but no {key!r} value was provided in "
+                    "compile context."
+                )
+            return bind(ctx[key], "string").sql(dialect=dialect, normalize_functions=False)
+
+        return _CTX_PLACEHOLDER_RE.sub(_ctx_repl, resolved)
+
+    def wrap_for_tenancy(cube: Cube, source: exp.Expression) -> exp.Expression:
+        """Wrap a cube's FROM source in an isolation subquery.
+
+        Two predicates may apply: tenancy (DISCRIMINATOR cubes) and
+        ``security_sql`` (caller-attached RLS). Both live *inside* the
+        alias the outer query sees so a malformed outer ``OR``
+        predicate can't smuggle in rows the policy excludes. The
+        predicates AND-compose. SCHEMA / NONE cubes with no
+        ``security_sql`` pass through unchanged."""
+        predicates: list[exp.Expression] = []
+
+        if cube.tenancy == "discriminator":
+            if "tenant" not in ctx:
+                raise CompileError(
+                    f"Cube {cube.name!r} declares tenancy='discriminator' but "
+                    "no 'tenant' value was provided in compile context. "
+                    "Pass context={'tenant': <tenant_id>, ...}."
+                )
+            assert cube.tenancy_column is not None
+            predicates.append(
                 exp.EQ(
                     this=exp.column(cube.tenancy_column, table=cube.alias),
                     expression=bind(ctx["tenant"], "string"),
                 )
             )
-        )
+
+        if cube.security_sql:
+            resolved_sql = _resolve_security_sql(cube, cube.security_sql)
+            predicates.append(_parse_fragment(resolved_sql, dialect))
+
+        if not predicates:
+            return source
+
+        where_expr = predicates[0]
+        for p in predicates[1:]:
+            where_expr = exp.And(this=where_expr, expression=p)
+
+        inner = exp.Select().select(exp.Star()).from_(source).where(where_expr)
         return exp.Subquery(
             this=inner,
             alias=exp.TableAlias(this=exp.to_identifier(cube.alias)),

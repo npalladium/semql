@@ -137,6 +137,13 @@ class Cube(BaseModel):
     # mode. Required when ``tenancy == "discriminator"``; ignored
     # otherwise.
     tenancy_column: str | None = None
+    # Caller-attached row-level security predicate. AND-composes with
+    # the tenancy filter inside the isolation subquery, so an outer
+    # predicate the planner emits cannot bypass it. May contain
+    # ``{alias}`` placeholders (resolved to the cube's alias) and
+    # ``{ctx.X}`` placeholders (bound from the compile-time
+    # ``context`` dict, never inlined as a SQL literal).
+    security_sql: str | None = None
 
     @model_validator(mode="after")
     def _check_tenancy_consistency(self) -> Cube:
