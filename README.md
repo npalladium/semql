@@ -32,18 +32,48 @@ pip install semql-prompt  # + prompt builder
 ## Quick start
 
 ```python
-from semql import Cube, Catalog
+from semql import (
+    Backend,
+    Catalog,
+    Cube,
+    Dimension,
+    Measure,
+    SemanticQuery,
+)
 
 orders = Cube(
-    "orders",
+    name="orders",
+    backend=Backend.POSTGRES,
     table="orders",
-    dimensions=["region", "product"],
-    measures={"revenue": "sum(amount)", "orders": "count(*)"},
+    alias="o",
+    measures=[
+        Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency"),
+    ],
+    dimensions=[
+        Dimension(name="region", sql="{o}.region", type="string"),
+    ],
 )
 
 catalog = Catalog([orders])
-sql = catalog.query(cube="orders", dims=["region"], measures=["revenue"])
+compiled = catalog.compile(
+    SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+)
+sql = compiled.sql
 ```
+
+Cubes are Pydantic models — every field is keyword-only and typed. The
+`{o}` placeholder in `sql` is the cube's `alias`; the compiler resolves
+it (and `{schema}`-style context placeholders) at compile time so the
+emitted SQL is always alias-qualified.
+
+To surface the catalogue to a language model, render the prompt fragment:
+
+```python
+print(catalog.prompt())
+```
+
+That fragment describes the cube vocabulary and the `SemanticQuery`
+shape so a planner LLM can emit valid specs your code compiles to SQL.
 
 ## Status
 
