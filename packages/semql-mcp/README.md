@@ -87,6 +87,38 @@ Registered when `executor` is supplied:
 |---|---|
 | `query_execute(spec, context?)` | Compile + run. Returns the `query_semantic` shape plus `rows: list[dict]`. Errors carry the SQL we tried to run so callers can replay / inspect it. |
 
+### Auto-generated per-cube tools
+
+For each `expose_in_prompt=True` (non-META) cube, the server also
+registers a `query_<cube_name>` tool whose `measures`, `dimensions`,
+`order` (and `time_window.dimension`, when applicable) parameters are
+**`Literal`-typed enums** of the cube's actual fields. The planner
+sees a JSON Schema with explicit allowed values rather than the bare
+`list[str]` `query_semantic` accepts.
+
+Field names are **bare** (no cube prefix); the tool auto-qualifies as
+it builds the `SemanticQuery`:
+
+```jsonc
+// query_orders
+{
+  "measures": ["revenue"],
+  "dimensions": ["region"],
+  "filters": [{"dimension": "status", "op": "eq", "values": ["paid"]}],
+  "time_window": {
+    "dimension": "created_at",
+    "granularity": "day",
+    "range": ["2026-01-01", "2026-02-01"]
+  },
+  "limit": 100
+}
+```
+
+Multi-cube queries (joins across cubes) still go through
+`query_semantic` — the per-cube tools are scoped to a single cube by
+construction. When `executor` is configured, the per-cube tools
+return rows too.
+
 ## In-process testing
 
 FastMCP's `Client` connects to a `FastMCP` instance without a transport
@@ -111,5 +143,4 @@ asyncio.run(smoke())
 
 ## Status
 
-Early development. The tool surface is stable; auto-generated
-per-cube tools (`query_<cube>(...)`) are planned next.
+Early development. The tool surface is stable.
