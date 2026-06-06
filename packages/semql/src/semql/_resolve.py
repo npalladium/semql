@@ -10,15 +10,10 @@ from __future__ import annotations
 
 import re
 
+from semql.errors import ResolveError, UnknownIdentifierError, closest_match
 from semql.model import Cube, Dimension, Measure, TimeDimension
 
 _QUALIFIED_RE = re.compile(r"^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$", re.IGNORECASE)
-
-
-class ResolveError(Exception):
-    """Raised for malformed or unknown identifiers. `CompileError`
-    subclasses this so existing callers that catch `CompileError`
-    continue to work; pure-visualisation callers catch `ResolveError`."""
 
 
 def split(qualified: str) -> tuple[str, str]:
@@ -34,8 +29,15 @@ def resolve_field(
 ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
     cube_name, field_name = split(qualified)
     if cube_name not in catalog:
+        hint = closest_match(cube_name, catalog.keys())
         known = ", ".join(sorted(catalog))
-        raise ResolveError(f"Unknown cube: {cube_name!r}. Known cubes: {known}.")
+        suffix = f" Did you mean {hint!r}?" if hint else ""
+        raise UnknownIdentifierError(
+            f"Unknown cube: {cube_name!r}. Known cubes: {known}.{suffix}",
+            kind="cube",
+            name=cube_name,
+            hint=hint,
+        )
     cube = catalog[cube_name]
     for m in cube.measures:
         if m.name == field_name:
@@ -46,10 +48,16 @@ def resolve_field(
     for td in cube.time_dimensions:
         if td.name == field_name:
             return cube, td
+    hint = closest_match(field_name, cube.field_names())
     known = ", ".join(sorted(cube.field_names()))
-    raise ResolveError(
-        f"Unknown field {field_name!r} on cube {cube_name!r}. Known fields: {known}."
+    suffix = f" Did you mean {hint!r}?" if hint else ""
+    raise UnknownIdentifierError(
+        f"Unknown field {field_name!r} on cube {cube_name!r}. Known fields: {known}.{suffix}",
+        kind="field",
+        name=field_name,
+        cube=cube_name,
+        hint=hint,
     )
 
 
-__all__ = ["ResolveError", "split", "resolve_field"]
+__all__ = ["ResolveError", "UnknownIdentifierError", "split", "resolve_field"]

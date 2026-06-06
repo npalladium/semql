@@ -7,10 +7,11 @@ naming the offending field.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 FilterOp = Literal[
     "eq",
@@ -70,6 +71,17 @@ class Filter(BaseModel):
                     raise ValueError(
                         f"Filter on time dimension {self.dimension!r} got non-ISO-8601 value {v!r}."
                     ) from None
+            elif dim_type == "uuid":
+                if not isinstance(v, str):
+                    raise ValueError(
+                        f"Filter on uuid dimension {self.dimension!r} got non-string value {v!r}."
+                    )
+                try:
+                    _uuid.UUID(v)
+                except ValueError:
+                    raise ValueError(
+                        f"Filter on uuid dimension {self.dimension!r} got non-UUID value {v!r}."
+                    ) from None
             elif dim_type == "string" and not isinstance(v, str):
                 raise ValueError(
                     f"Filter on string dimension {self.dimension!r} got non-string value {v!r}."
@@ -94,6 +106,7 @@ class SemanticQuery(BaseModel):
     compare: CompareWindow | None = None
     order: list[tuple[str, Literal["asc", "desc"]]] = []
     limit: int | None = None
+    offset: Annotated[int, Field(ge=0)] | None = None
     # Row-listing mode (no GROUP BY). Incompatible with `measures`.
     ungrouped: bool = False
 

@@ -1,0 +1,138 @@
+"""Unit tests for the Catalog wrapper class."""
+
+from __future__ import annotations
+
+import pytest
+from semql.catalog import Catalog
+from semql.introspect import META_CUBES
+from semql.model import Backend, Cube, Dimension, Join, Measure
+from semql.spec import SemanticQuery
+
+
+def _orders() -> Cube:
+    return Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    )
+
+
+def _customers() -> Cube:
+    return Cube(
+        name="customers",
+        backend=Backend.POSTGRES,
+        table="customers",
+        alias="c",
+        dimensions=[Dimension(name="name", sql="{c}.name", type="string")],
+    )
+
+
+def test_catalog_auto_appends_meta_cubes() -> None:
+    cat = Catalog([_orders()])
+    cube_names = set(cat.as_dict().keys())
+    for meta in META_CUBES:
+        assert meta.name in cube_names
+
+
+def test_catalog_does_not_duplicate_meta_cubes_when_user_provides_them() -> None:
+    user_cubes = [_orders(), *META_CUBES]
+    cat = Catalog(user_cubes)
+    cube_names = list(cat.as_dict().keys())
+    # Each META cube appears exactly once.
+    for meta in META_CUBES:
+        assert cube_names.count(meta.name) == 1
+
+
+def test_catalog_rejects_duplicate_cube_names() -> None:
+    a = _orders()
+    b = _orders()
+    with pytest.raises(ValueError, match="duplicate"):
+        Catalog([a, b])
+
+
+def test_catalog_rejects_unknown_join_target() -> None:
+    orphan = Cube(
+        name="orphan",
+        backend=Backend.POSTGRES,
+        table="orphan",
+        alias="x",
+        joins=[Join(to="ghost", relationship="many_to_one", on="{x}.id = {g}.id")],
+        dimensions=[Dimension(name="id", sql="{x}.id", type="string")],
+    )
+    with pytest.raises(ValueError, match="ghost"):
+        Catalog([orphan])
+
+
+def test_catalog_accepts_resolvable_joins() -> None:
+    orders = _orders().model_copy(
+        update={
+            "joins": [
+                Join(to="customers", relationship="many_to_one", on="{o}.cust_id = {c}.id"),
+            ]
+        }
+    )
+    cat = Catalog([orders, _customers()])
+    assert "orders" in cat.as_dict()
+    assert "customers" in cat.as_dict()
+
+
+def test_catalog_compile_delegates() -> None:
+    cat = Catalog([_orders()])
+    out = cat.compile(SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]))
+    assert "SUM" in out.sql
+    assert "orders" in out.sql or "{o}" not in out.sql  # alias resolved
+
+
+def test_catalog_prompt_returns_fragment() -> None:
+    cat = Catalog([_orders()])
+    prompt = cat.prompt()
+    # Catalogue block must include the cube and its measure/dimension.
+    assert "orders" in prompt
+    assert "revenue" in prompt
+    assert "region" in prompt
+
+
+def test_catalog_prompt_only_exposed_default() -> None:
+    hidden = Cube(
+        name="hidden",
+        backend=Backend.POSTGRES,
+        table="hidden",
+        alias="h",
+        expose_in_prompt=False,
+        dimensions=[Dimension(name="x", sql="{h}.x", type="string")],
+    )
+    cat = Catalog([_orders(), hidden])
+    prompt = cat.prompt()
+    assert "orders" in prompt
+    # Hidden cubes don't appear by default.
+    assert "### hidden" not in prompt
+
+
+def test_catalog_compile_threads_context() -> None:
+    schema_orders = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    )
+    cat = Catalog([schema_orders])
+    out = cat.compile(
+        SemanticQuery(measures=["orders.count"]),
+        context={"schema": "prod"},
+    )
+    assert "prod.orders" in out.sql
+
+
+def test_catalog_iter_and_len() -> None:
+    """Convenience: a Catalog should report how many cubes it holds and
+    let you iterate over them."""
+    cat = Catalog([_orders()])
+    # 1 user cube + len(META_CUBES) meta cubes.
+    assert len(cat) == 1 + len(META_CUBES)
+    cube_names = {c.name for c in cat}
+    assert "orders" in cube_names

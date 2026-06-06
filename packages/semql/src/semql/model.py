@@ -32,7 +32,7 @@ class Backend(StrEnum):
 
 
 AggLiteral = Literal["sum", "count", "count_distinct", "avg", "min", "max"]
-DimTypeLiteral = Literal["string", "number", "time", "bool"]
+DimTypeLiteral = Literal["string", "number", "time", "bool", "uuid"]
 GranularityLiteral = Literal["hour", "day", "week", "month"]
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]

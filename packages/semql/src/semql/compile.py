@@ -29,19 +29,22 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from semql._resolve import ResolveError
 from semql._resolve import resolve_field as _resolve_field_raw
+from semql.errors import (
+    CompileError,
+    CrossBackendError,
+    FilterTypeError,
+    JoinPathError,
+    PhaseDeferredError,
+    PlaceholderError,
+    ResolveError,
+    UnknownIdentifierError,
+)
 from semql.introspect import build_meta_values
 from semql.model import Backend, Cube, Dimension, Join, Measure, TimeDimension
 from semql.spec import Filter, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
-
-
-class CompileError(ResolveError):
-    """Raised by `compile_query` with a deterministic, identifier-naming
-    message. Subclasses `ResolveError` so visualisation-side callers
-    that catch the base class still work."""
 
 
 @dataclass
@@ -58,6 +61,8 @@ def _resolve_field(
 ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
     try:
         return _resolve_field_raw(qualified, catalog)
+    except CompileError:
+        raise
     except ResolveError as exc:
         raise CompileError(str(exc)) from exc
 
@@ -86,9 +91,11 @@ def _find_join_path(
                 return new_path
             visited.add(j.to)
             queue.append((j.to, new_path))
-    raise CompileError(
+    raise JoinPathError(
         f"No join path from cube {root!r} to {target!r}. "
-        "Declare a Join in the catalogue or restructure the query."
+        "Declare a Join in the catalogue or restructure the query.",
+        root_cube=root,
+        target_cube=target,
     )
 
 
@@ -120,8 +127,10 @@ def _resolve_sql(
     def _repl(m: re.Match[str]) -> str:
         name = m.group(1)
         if name not in lookup:
-            raise CompileError(
-                f"Unknown placeholder {{{name}}} in catalogue SQL. Known: {sorted(lookup)}."
+            raise PlaceholderError(
+                f"Unknown placeholder {{{name}}} in catalogue SQL. Known: {sorted(lookup)}.",
+                placeholder=name,
+                known=sorted(lookup),
             )
         return lookup[name]
 
@@ -203,7 +212,12 @@ def _render_filter(
     try:
         f.validate_for_type(field_type)
     except ValueError as exc:
-        raise CompileError(str(exc)) from exc
+        raise FilterTypeError(
+            str(exc),
+            dimension=f.dimension,
+            op=f.op,
+            value=f.values[0] if f.values else None,
+        ) from exc
 
     placeholders: list[str] = []
     for v in f.values:
@@ -235,7 +249,7 @@ def _render_filter(
     if op == "not_in":
         return f"{field_sql} NOT IN ({', '.join(placeholders)})"
 
-    raise CompileError(f"Unsupported filter op: {op!r}")
+    raise CompileError(f"Unsupported filter op: {op!r}")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +294,16 @@ def compile_query(
     ctx = context or {}
 
     if q.compare is not None:
-        raise CompileError("compare windows are not yet supported by the compiler (Phase 2).")
+        raise PhaseDeferredError(
+            "compare windows are not yet supported by the compiler (Phase 2).",
+            feature="compare",
+        )
+
+    if q.offset is not None and q.offset > 0 and q.limit is None:
+        raise CompileError(
+            "SemanticQuery has offset set without limit. "
+            "OFFSET is only meaningful in combination with LIMIT."
+        )
 
     if q.ungrouped and (q.limit is None or q.limit > MAX_UNGROUPED_ROWS):
         raise CompileError(
@@ -352,9 +375,11 @@ def compile_query(
     # 2. Single-backend check.
     backends = {c.backend for c in touched}
     if len(backends) > 1:
-        raise CompileError(
+        backend_names = sorted(b.value for b in backends)
+        raise CrossBackendError(
             "Cross-backend queries are not yet supported (Phase 2). "
-            f"Touched backends: {sorted(b.value for b in backends)}."
+            f"Touched backends: {backend_names}.",
+            backends=backend_names,
         )
     backend = next(iter(backends))
 
@@ -485,11 +510,16 @@ def compile_query(
     if not q.ungrouped and not measure_fields:
         select_keyword = "SELECT DISTINCT"
 
-    # 9. HAVING.
+    # 9. HAVING. Accept either bare (`revenue`) or qualified (`orders.revenue`)
+    # measure references; the qualified form is split on '.' and the short
+    # name looked up in the alias map.
     having_terms: list[str] = []
     for hf in q.having:
-        if hf.dimension in measure_alias_map:
-            target = hf.dimension if having_alias else measure_alias_map[hf.dimension]
+        lookup_name = hf.dimension
+        if lookup_name not in measure_alias_map and "." in lookup_name:
+            lookup_name = lookup_name.rsplit(".", 1)[-1]
+        if lookup_name in measure_alias_map:
+            target = lookup_name if having_alias else measure_alias_map[lookup_name]
             having_terms.append(_render_filter(hf, target, "number", backend, params))
         else:
             raise CompileError(
@@ -526,8 +556,21 @@ def compile_query(
         parts.append("ORDER BY " + ", ".join(order_items))
     if q.limit is not None:
         parts.append(f"LIMIT {int(q.limit)}")
+    if q.offset is not None and q.offset > 0:
+        parts.append(f"OFFSET {int(q.offset)}")
 
     return Compiled(backend=backend, sql="\n".join(parts), params=params, columns=columns)
 
 
-__all__ = ["Compiled", "CompileError", "compile_query", "MAX_UNGROUPED_ROWS"]
+__all__ = [
+    "Compiled",
+    "CompileError",
+    "CrossBackendError",
+    "FilterTypeError",
+    "JoinPathError",
+    "MAX_UNGROUPED_ROWS",
+    "PhaseDeferredError",
+    "PlaceholderError",
+    "UnknownIdentifierError",
+    "compile_query",
+]

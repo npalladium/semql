@@ -37,8 +37,18 @@ def render_catalogue_block(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _human(display_name: str | None) -> str:
+    """Render the ``(human: ...)`` suffix when ``display_name`` is set.
+
+    The machine identifier stays as the primary label so the LLM still
+    knows what to reference; ``display_name`` rides along as the domain
+    label the planner can echo back to users."""
+    return f" (human: {display_name})" if display_name else ""
+
+
 def _render_cube(cube: Cube) -> list[str]:
-    out: list[str] = [f"### {cube.name} ({cube.backend.value})"]
+    header = f"### {cube.name} ({cube.backend.value}){_human(cube.display_name)}"
+    out: list[str] = [header]
     if cube.description:
         out.append(cube.description)
     if cube.required_filters:
@@ -51,14 +61,16 @@ def _render_cube(cube: Cube) -> list[str]:
         for m in cube.measures:
             unit = f" [{m.unit}]" if m.unit else ""
             desc = f" — {m.description}" if m.description else ""
-            out.append(f"  - `{cube.name}.{m.name}`{unit} `agg={m.agg}`{desc}")
+            human = _human(m.display_name)
+            out.append(f"  - `{cube.name}.{m.name}`{unit} `agg={m.agg}`{human}{desc}")
 
     if cube.dimensions:
         out.append("")
         out.append("**Dimensions:**")
         for d in cube.dimensions:
             desc = f" — {d.description}" if d.description else ""
-            out.append(f"  - `{cube.name}.{d.name}` `type={d.type}`{desc}")
+            human = _human(d.display_name)
+            out.append(f"  - `{cube.name}.{d.name}` `type={d.type}`{human}{desc}")
 
     if cube.time_dimensions:
         out.append("")
@@ -66,7 +78,8 @@ def _render_cube(cube: Cube) -> list[str]:
         for td in cube.time_dimensions:
             grans = "|".join(td.granularities)
             desc = f" — {td.description}" if td.description else ""
-            out.append(f"  - `{cube.name}.{td.name}` `granularities={grans}`{desc}")
+            human = _human(td.display_name)
+            out.append(f"  - `{cube.name}.{td.name}` `granularities={grans}`{human}{desc}")
 
     if cube.joins:
         out.append("")
@@ -109,7 +122,9 @@ Fields:
 - `filters: list[{dimension, op, values}]` — pre-aggregation predicates.
   Ops: eq, neq, in, not_in, gt, lt, gte, lte, contains, is_null, not_null.
 - `having: list[{dimension, op, values}]` — post-aggregation predicates;
-  `dimension` here must be one of the measures you also requested.
+  `dimension` must reference one of the measures you also requested
+  (either bare `revenue` or qualified `orders.revenue` — both resolve
+  to the same alias).
 - `order: list[(field, asc|desc)]` — refer to output column names.
 - `limit: int` — required when `ungrouped=True` (capped at 1000).
 - `ungrouped: bool` — row-listing mode (no GROUP BY).
@@ -192,7 +207,8 @@ def build_router_prompt_fragment(
                 continue
             blurb = cube.description.split(".")[0] if cube.description else ""
             blurb = f" — {blurb}." if blurb else "."
-            topics.append(f"  - `{cube.name}` ({cube.backend.value}){blurb}")
+            human = _human(cube.display_name)
+            topics.append(f"  - `{cube.name}` ({cube.backend.value}){human}{blurb}")
         parts.append("\n".join(topics))
     return "\n\n".join(parts) + "\n"
 
