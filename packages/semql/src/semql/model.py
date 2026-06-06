@@ -12,6 +12,12 @@ compiler accepts doesn't need to be in the planner's vocabulary. Cubes
 flagged `False` are reachable via joins from exposed cubes and still
 compile cleanly when the planner names them; they just don't appear in
 the catalogue rendering.
+
+`metadata` is a user-owned escape hatch (k8s-annotation flavoured): an
+opaque ``dict[str, str]`` SemQL never reads, validates, or surfaces.
+Callers can stash ownership tags, lineage IDs, presentation hints —
+anything the platform shouldn't know about. Round-trips through
+``model_copy``, ``model_dump`` / ``model_validate``, and serialisation.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Backend(StrEnum):
@@ -37,6 +43,10 @@ GranularityLiteral = Literal["hour", "day", "week", "month"]
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]
 
+# k8s-annotation style: opaque string→string map. SemQL never touches
+# the contents — the user owns the namespace and meaning.
+Metadata = dict[str, str]
+
 
 class Measure(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -47,6 +57,7 @@ class Measure(BaseModel):
     description: str = ""
     display_name: str | None = None
     format: FormatLiteral | None = None
+    metadata: Metadata = Field(default_factory=dict)
 
 
 class Dimension(BaseModel):
@@ -56,6 +67,7 @@ class Dimension(BaseModel):
     type: DimTypeLiteral
     description: str = ""
     display_name: str | None = None
+    metadata: Metadata = Field(default_factory=dict)
 
 
 class TimeDimension(BaseModel):
@@ -70,6 +82,7 @@ class TimeDimension(BaseModel):
     granularities: tuple[GranularityLiteral, ...] = ("hour", "day", "week", "month")
     description: str = ""
     display_name: str | None = None
+    metadata: Metadata = Field(default_factory=dict)
 
 
 class Join(BaseModel):
@@ -82,6 +95,7 @@ class Join(BaseModel):
     to: str
     relationship: Literal["one_to_one", "one_to_many", "many_to_one"]
     on: str
+    metadata: Metadata = Field(default_factory=dict)
 
 
 class Cube(BaseModel):
@@ -102,6 +116,7 @@ class Cube(BaseModel):
     description: str = ""
     display_name: str | None = None
     default_chart_type: ChartTypeLiteral | None = None
+    metadata: Metadata = Field(default_factory=dict)
 
     def field_names(self) -> set[str]:
         names: set[str] = set()
@@ -116,11 +131,12 @@ __all__ = [
     "Backend",
     "ChartTypeLiteral",
     "Cube",
-    "Dimension",
     "DimTypeLiteral",
+    "Dimension",
     "FormatLiteral",
     "GranularityLiteral",
     "Join",
     "Measure",
+    "Metadata",
     "TimeDimension",
 ]
