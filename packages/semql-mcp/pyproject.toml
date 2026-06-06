@@ -1,13 +1,14 @@
 [project]
 name = "semql-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server that wraps a semql Catalog — compile-only by default, opt-in row execution via a caller-provided executor."
 readme = "README.md"
 authors = [
     { name = "Nikhil Pallamreddy", email = "nikhil.pallamreddy+git@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "fastmcp>=3.4.2",
     "semql",
 ]
 

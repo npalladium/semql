@@ -1,2 +1,7 @@
-def hello() -> str:
-    return "Hello from semql-mcp!"
+"""Public surface of the semql-mcp package."""
+
+from __future__ import annotations
+
+from semql_mcp.server import Executor, MCPServer
+
+__all__ = ["Executor", "MCPServer"]
