@@ -1,0 +1,38 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = [
+    "griffe>=2.0.2",
+    "hypothesis>=6.155.2",
+    "mimesis>=19.1.0",
+    "mypy>=2.1.0",
+    "pointblank>=0.24.0",
+    "pre-commit>=4.6.0",
+    "pyright>=1.1.410",
+    "pytest>=9.0.3",
+    "ruff>=0.15.16",
+    "syrupy>=5.3.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = []
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["packages"]
