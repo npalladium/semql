@@ -22,7 +22,7 @@ from semql.errors import (
     closest_match,
 )
 from semql.model import Backend, Cube, Dimension, Join, Measure
-from semql.spec import CompareWindow, Filter, SemanticQuery
+from semql.spec import Filter, SemanticQuery
 
 
 def test_hierarchy_root_is_semqlerror() -> None:
@@ -93,17 +93,6 @@ def test_cross_backend_raises_structured_error(catalog: dict[str, Cube]) -> None
         compile_query(q, catalog)
     err = exc_info.value
     assert set(err.backends) == {"postgres", "clickhouse"}
-
-
-def test_compare_window_raises_phase_deferred(catalog: dict[str, Cube]) -> None:
-    q = SemanticQuery(
-        measures=["orders.revenue"],
-        time_dimension=None,
-        compare=CompareWindow(),
-    )
-    with pytest.raises(PhaseDeferredError) as exc_info:
-        compile_query(q, catalog)
-    assert exc_info.value.feature == "compare"
 
 
 def test_filter_type_mismatch_raises_filter_type_error(catalog: dict[str, Cube]) -> None:
