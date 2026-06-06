@@ -1,3 +1,4 @@
+# pyright: reportPrivateImportUsage=false
 """Per-strategy unit tests for the BackendStrategy Protocol.
 
 Strategies return sqlglot AST nodes; tests render them via ``.sql()``

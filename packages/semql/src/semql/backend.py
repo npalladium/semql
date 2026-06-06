@@ -1,3 +1,7 @@
+# pyright: reportPrivateImportUsage=false
+# sqlglot's ``Expression`` and friends live in ``sqlglot.expressions``
+# but aren't re-exported via ``__all__``. They're public by convention
+# and by sqlglot's own type stubs.
 """Per-backend strategy objects — the dialect-specific seam.
 
 The compiler stays dialect-agnostic for the parts it can: identifier

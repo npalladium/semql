@@ -1,3 +1,7 @@
+# pyright: reportPrivateImportUsage=false
+# sqlglot's AST types (Expression, Placeholder, ...) are imported via
+# ``from sqlglot import exp``; they aren't in ``sqlglot.expressions.__all__``
+# but are public by convention and by sqlglot's type stubs.
 """Pure compiler from `SemanticQuery` to backend SQL.
 
 The compiler has no I/O. It reads the catalogue, resolves identifiers,

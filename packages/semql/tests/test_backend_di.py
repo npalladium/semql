@@ -1,3 +1,4 @@
+# pyright: reportPrivateImportUsage=false
 """Strategy DI tests: prove that compile.py actually delegates, and
 that callers can swap in a custom strategy.
 
