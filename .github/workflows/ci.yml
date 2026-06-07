@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.5.x"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  check:
+    name: lint + types + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set Python version
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: ruff (lint)
+        run: uv run ruff check packages scripts
+
+      - name: ruff (format)
+        run: uv run ruff format --check packages scripts
+
+      - name: mypy
+        run: uv run mypy packages
+
+      - name: pyright
+        run: uv run pyright packages/semql/src packages/semql-mcp/src packages/semql-erd/src scripts
+
+      - name: pytest
+        run: uv run pytest packages
+
+  api-breakage:
+    name: API breakage diff
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Compare public API surface
+        run: uv run scripts/check_api_break.py --base ${{ github.event.pull_request.base.sha }}
+
+  build:
+    name: uv build smoke (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [semql, semql-mcp, semql-erd, semql-prompt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build
+        run: uv build --package ${{ matrix.package }}
