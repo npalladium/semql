@@ -243,6 +243,14 @@ class Cube(BaseModel):
     # cannot see. Static surface — for dynamic / programmable policy
     # use ``Catalog(policy=...)``.
     required_roles: list[str] = []
+    # Names a ``ScopeFn`` registered on the Catalog. When set and the
+    # caller passes a ``viewer``, the compiler calls the function and
+    # injects the returned ``ScopePredicate`` inside this cube's
+    # isolation subquery (alongside tenancy + security_sql) so it
+    # can't be bypassed by an outer ``OR``. Decouples the row-level
+    # rule from the cube definition — a single scope ("reportees of
+    # viewer") can apply to N cubes that name the same scope.
+    scope: str | None = None
 
     @model_validator(mode="after")
     def _check_drill_paths(self) -> Cube:
@@ -291,6 +299,25 @@ class Cube(BaseModel):
         names.update(d.name for d in self.dimensions)
         names.update(td.name for td in self.time_dimensions)
         return names
+
+
+class ScopePredicate(BaseModel):
+    """The output of a ``ScopeFn`` — a SQL predicate the compiler injects
+    inside a cube's tenancy/security wrapper so it can't be bypassed by
+    outer ``OR`` clauses.
+
+    ``sql`` uses the same ``{alias}`` / ``{ctx.X}`` placeholder convention
+    as ``security_sql``. ``{ctx.X}`` keys MUST appear in ``ctx_keys`` so
+    the compiler can validate the resolution context up front instead
+    of surfacing a placeholder error mid-emission.
+
+    Use ``ScopePredicate(sql="1=1", ctx_keys=[])`` (or just return None
+    from the ScopeFn) when the viewer should see every row of the cube.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    sql: str
+    ctx_keys: list[str] = Field(default_factory=list)
 
 
 class AuthContext(BaseModel):
@@ -377,6 +404,7 @@ __all__ = [
     "Join",
     "Measure",
     "Metadata",
+    "ScopePredicate",
     "Segment",
     "TenancyMode",
     "TimeDimension",

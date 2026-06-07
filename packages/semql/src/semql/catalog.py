@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
-from semql.introspect import META_CUBES, PolicyFn
+from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import AuthContext, BaseField, Cube, Join, View
 
 _T = TypeVar("_T", bound=BaseField)
@@ -39,6 +39,7 @@ class Catalog:
         *,
         views: list[View] | None = None,
         policy: PolicyFn | None = None,
+        scope_fns: dict[str, ScopeFn] | None = None,
     ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -159,12 +160,32 @@ class Catalog:
         self.views: dict[str, View] = {v.name: v for v in view_list}
         self._policy: PolicyFn | None = policy
 
+        # Validate scope_fns: every Cube.scope must resolve to a
+        # registered name. Catching it here means the compiler can
+        # trust the registry lookup later.
+        self._scope_fns: dict[str, ScopeFn] = dict(scope_fns or {})
+        for c in merged:
+            if c.scope is not None and c.scope not in self._scope_fns:
+                raise ValueError(
+                    f"Cube {c.name!r} declares scope={c.scope!r} but no "
+                    f"scope function is registered under that name. "
+                    f"Pass scope_fns={{'{c.scope}': fn, ...}} to the Catalog "
+                    f"constructor. Registered scopes: {sorted(self._scope_fns)}."
+                )
+
     @property
     def policy(self) -> PolicyFn | None:
         """The optional custom-visibility predicate registered at
         construction time. ``None`` means cube visibility is governed
         purely by ``Cube.required_roles``."""
         return self._policy
+
+    @property
+    def scope_fns(self) -> dict[str, ScopeFn]:
+        """The scope-function registry. Each entry maps a name a
+        ``Cube.scope`` field references to the callable that produces
+        the row-level predicate for a given (cube, viewer)."""
+        return dict(self._scope_fns)
 
     def as_dict(self) -> dict[str, Cube]:
         """Return ``{cube.name: Cube}`` — the shape ``compile_query`` consumes."""
@@ -196,6 +217,7 @@ class Catalog:
             views=self.views,
             viewer=viewer,
             policy=self._policy,
+            scope_fns=self._scope_fns,
         )
 
     def prompt(

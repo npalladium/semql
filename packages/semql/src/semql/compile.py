@@ -60,7 +60,7 @@ from semql.errors import (
     ResolveError,
     UnknownIdentifierError,
 )
-from semql.introspect import PolicyFn, viewer_sees
+from semql.introspect import PolicyFn, ScopeFn, viewer_sees
 from semql.model import (
     AuthContext,
     Backend,
@@ -68,6 +68,7 @@ from semql.model import (
     Dimension,
     Join,
     Measure,
+    ScopePredicate,
     Segment,
     TimeDimension,
     View,
@@ -317,6 +318,7 @@ def compile_query(
     views: dict[str, View] | None = None,
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
+    scope_fns: dict[str, ScopeFn] | None = None,
 ) -> Compiled:
     """Compile a SemanticQuery to a Compiled bundle.
 
@@ -338,6 +340,10 @@ def compile_query(
         ``security_sql`` referencing it gets a parameter.
     ``policy`` — optional custom-visibility predicate (cube, viewer) → bool.
         AND-composes with ``Cube.required_roles``.
+    ``scope_fns`` — registry of named ``ScopeFn`` callables. When a
+        ``Cube.scope`` names a key in this dict, the compiler calls the
+        function with ``(cube, viewer)`` and AND-injects the returned
+        ``ScopePredicate`` inside the cube's isolation subquery.
     """
     ctx = dict(context or {})
     if viewer is not None:
@@ -613,6 +619,26 @@ def compile_query(
         if cube.security_sql:
             resolved_sql = _resolve_security_sql(cube, cube.security_sql)
             predicates.append(_parse_fragment(resolved_sql, dialect))
+
+        # ScopeFn-injected row-level predicate. Lives inside the alias
+        # subquery alongside tenancy + security_sql so an outer OR can't
+        # bypass it. Only fires when both ``viewer`` and ``cube.scope``
+        # are set and a function is registered.
+        if viewer is not None and cube.scope is not None and scope_fns is not None:
+            fn = scope_fns.get(cube.scope)
+            if fn is not None:
+                pred: ScopePredicate | None = fn(cube, viewer)
+                if pred is not None:
+                    missing = [k for k in pred.ctx_keys if k not in ctx]
+                    if missing:
+                        raise CompileError(
+                            f"Cube {cube.name!r} scope {cube.scope!r} declares "
+                            f"ctx_keys={pred.ctx_keys!r} but the following are not in "
+                            f"the resolution context: {missing}."
+                        )
+                    predicates.append(
+                        _parse_fragment(_resolve_security_sql(cube, pred.sql), dialect)
+                    )
 
         if not predicates:
             return source

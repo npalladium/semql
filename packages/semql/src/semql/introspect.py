@@ -30,6 +30,7 @@ from semql.model import (
     Dimension,
     Join,
     Measure,
+    ScopePredicate,
     TimeDimension,
     View,
 )
@@ -39,6 +40,12 @@ PolicyFn = Callable[[Cube, AuthContext], bool]
 """Custom cube-visibility predicate. Returns True if the viewer may see
 the cube. Composes with the static ``Cube.required_roles`` check via
 AND — a cube has to pass both. Registered on ``Catalog(policy=...)``."""
+
+ScopeFn = Callable[[Cube, AuthContext], "ScopePredicate | None"]
+"""Returns the row-level predicate to inject inside ``cube``'s isolation
+subquery for ``viewer``. Returning ``None`` means "no scoping for this
+viewer" (e.g. an admin role sees everything). Registered as a value in
+``Catalog(scope_fns={...})`` and named by ``Cube.scope``."""
 
 CatalogLike = "Mapping[str, Cube] | Catalog | Iterable[Cube]"
 """Anything we can iterate cubes from. Concrete types: ``Catalog``
@@ -423,6 +430,7 @@ __all__ = [
     "META_CUBES",
     "PolicyFn",
     "ResolvedQuery",
+    "ScopeFn",
     "build_meta_values",
     "iter_cubes",
     "iter_fields",
