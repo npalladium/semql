@@ -12,3 +12,11 @@ TODOS.org
 docs/notes/
 docs/api/
 .hypothesis/
+
+# Token / secret material — both the plaintext source files and the
+# sops-encrypted intermediates stay out of git. Use `sops secrets.enc.yaml`
+# locally; share via a sealed channel, never via the repo.
+*-token.txt
+*-token.txt.enc
+secrets.enc.yaml
+secrets.yaml

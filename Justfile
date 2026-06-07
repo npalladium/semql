@@ -22,15 +22,23 @@ hooks:
 # Release: build + validate + publish
 # ---------------------------------------------------------------------------
 #
-# Token-based publish flow. Set credentials once per shell:
-#   export UV_PUBLISH_TOKEN=pypi-...      # for `just publish`
-#   export UV_PUBLISH_TOKEN=pypi-test-... # for `just publish-test`
+# Tokens live encrypted in ``secrets.enc.yaml`` (sops + age). The
+# publish recipes decrypt on demand using your age key at
+# ``~/.config/sops/age/keys.txt``. Generate one with ``age-keygen``,
+# then ``sops secrets.enc.yaml`` to drop your real ``test_pypi_token``
+# / ``pypi_token`` in.
 #
-# (uv reads UV_PUBLISH_TOKEN with username defaulting to __token__.)
+# Override via ``UV_PUBLISH_TOKEN=... just publish`` if you want to
+# bypass sops for a one-off.
+#
 # Recipes refuse to upload if `twine check` flags any metadata problem.
 # Order matters: publish `semql` before its dependents — dependents
 # resolve against the index, and PyPI takes a moment to advertise new
 # versions.
+
+# Path to the sops age key. Override if your key lives elsewhere.
+sops_age_key := env_var_or_default("SOPS_AGE_KEY_FILE", env_var("HOME") + "/.config/sops/age/keys.txt")
+secrets_file := "secrets.enc.yaml"
 
 # Clean ./dist
 clean-dist:
@@ -51,14 +59,32 @@ build *pkgs="semql semql-mcp semql-erd semql-validate-db": clean-dist
 check-dist:
     uvx twine check dist/*
 
-# Publish to TestPyPI. Run `just build` first.
-#   UV_PUBLISH_TOKEN=pypi-test-... just publish-test
+# Decrypt one token field from secrets.enc.yaml. Used by the publish
+# recipes; can also be called directly:
+#   just _token test_pypi_token | pbcopy
+_token field:
+    @SOPS_AGE_KEY_FILE={{sops_age_key}} sops -d --extract '["{{field}}"]' {{secrets_file}}
+
+# Publish to TestPyPI. Token decrypted from secrets.enc.yaml unless
+# UV_PUBLISH_TOKEN is already set in the environment.
 publish-test: check-dist
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
+      UV_PUBLISH_TOKEN=$(just _token test_pypi_token)
+      export UV_PUBLISH_TOKEN
+    fi
     uv publish --publish-url https://test.pypi.org/legacy/ dist/*
 
-# Publish to real PyPI. Run `just build` first.
-#   UV_PUBLISH_TOKEN=pypi-... just publish
+# Publish to real PyPI. Token decrypted from secrets.enc.yaml unless
+# UV_PUBLISH_TOKEN is already set in the environment.
 publish: check-dist
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
+      UV_PUBLISH_TOKEN=$(just _token pypi_token)
+      export UV_PUBLISH_TOKEN
+    fi
     uv publish dist/*
 
 # End-to-end: build everything, validate, publish to TestPyPI.
@@ -72,3 +98,101 @@ release: (build) check-dist publish
 stage pkg: clean-dist
     uv build --package {{pkg}}
     uvx twine check dist/*
+
+# ---------------------------------------------------------------------------
+# Staged release — semql first, wait for the index, then dependents.
+# ---------------------------------------------------------------------------
+#
+# Use the staged variants when you want to verify `semql` works on the
+# target index before its dependents go out. Faster path: `release-test`
+# / `release` (above) publish all four at once.
+
+# Read a package's version straight from its pyproject.toml.
+_pkg-version pkg:
+    @python3 -c "import tomllib; print(tomllib.loads(open('packages/{{pkg}}/pyproject.toml').read())['project']['version'])"
+
+# Poll TestPyPI's simple index until <pkg>=<version> is resolvable.
+# Fails after ~5 minutes if the package never appears.
+#   just wait-indexed-test semql
+wait-indexed-test pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=$(just _pkg-version {{pkg}})
+    echo "Polling TestPyPI simple index for {{pkg}}==$version..."
+    for i in $(seq 1 60); do
+      if curl -sf "https://test.pypi.org/simple/{{pkg}}/" 2>/dev/null \
+           | grep -q "{{pkg}}-${version}-"; then
+        echo "✓ {{pkg}}==$version indexed."
+        exit 0
+      fi
+      printf "."
+      sleep 5
+    done
+    echo
+    echo "ERROR: {{pkg}}==$version not on TestPyPI after 5 minutes." >&2
+    exit 1
+
+# Poll real PyPI's simple index until <pkg>=<version> is resolvable.
+wait-indexed pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=$(just _pkg-version {{pkg}})
+    echo "Polling PyPI simple index for {{pkg}}==$version..."
+    for i in $(seq 1 60); do
+      if curl -sf "https://pypi.org/simple/{{pkg}}/" 2>/dev/null \
+           | grep -q "{{pkg}}-${version}-"; then
+        echo "✓ {{pkg}}==$version indexed."
+        exit 0
+      fi
+      printf "."
+      sleep 5
+    done
+    echo
+    echo "ERROR: {{pkg}}==$version not on PyPI after 5 minutes." >&2
+    exit 1
+
+# Build + publish the three semql dependents to TestPyPI.
+# Assumes semql is already on TestPyPI (use wait-indexed-test before).
+publish-test-rest: clean-dist
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for pkg in semql-mcp semql-erd semql-validate-db; do
+      echo "── build $pkg ──"
+      uv build --package "$pkg"
+    done
+    uvx twine check dist/*
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
+      UV_PUBLISH_TOKEN=$(just _token test_pypi_token)
+      export UV_PUBLISH_TOKEN
+    fi
+    uv publish --publish-url https://test.pypi.org/legacy/ dist/*
+
+# Build + publish the three semql dependents to real PyPI.
+# Assumes semql is already on PyPI (use wait-indexed before).
+publish-rest: clean-dist
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for pkg in semql-mcp semql-erd semql-validate-db; do
+      echo "── build $pkg ──"
+      uv build --package "$pkg"
+    done
+    uvx twine check dist/*
+    if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
+      UV_PUBLISH_TOKEN=$(just _token pypi_token)
+      export UV_PUBLISH_TOKEN
+    fi
+    uv publish dist/*
+
+# Full staged TestPyPI release: semql → wait → dependents.
+release-test-staged:
+    just stage semql
+    just publish-test
+    just wait-indexed-test semql
+    just publish-test-rest
+
+# Full staged PyPI release: semql → wait → dependents.
+release-staged:
+    just stage semql
+    just publish
+    just wait-indexed semql
+    just publish-rest
