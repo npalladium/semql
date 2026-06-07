@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
 from semql.introspect import META_CUBES
-from semql.model import BaseField, Cube, Join
+from semql.model import BaseField, Cube, Join, View
 
 _T = TypeVar("_T", bound=BaseField)
 
@@ -33,7 +33,12 @@ class Catalog:
     """A validated collection of cubes plus the convenience surface
     (``compile``, ``prompt``, ``as_dict``) downstream code wants."""
 
-    def __init__(self, cubes: list[Cube]) -> None:
+    def __init__(
+        self,
+        cubes: list[Cube],
+        *,
+        views: list[View] | None = None,
+    ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
@@ -119,6 +124,39 @@ class Catalog:
         self._cubes: list[Cube] = merged
         self._by_name: dict[str, Cube] = {c.name: c for c in merged}
 
+        # Validate views: every field target must resolve to a real
+        # cube.field, and view names can't collide with cube names.
+        view_list: list[View] = list(views or [])
+        seen_view_names: set[str] = set()
+        for v in view_list:
+            if v.name in seen_view_names:
+                raise ValueError(f"Catalog has duplicate view name {v.name!r}.")
+            seen_view_names.add(v.name)
+            if v.name in self._by_name:
+                raise ValueError(
+                    f"View {v.name!r} collides with cube name {v.name!r}. "
+                    "View and cube names share a namespace; rename one."
+                )
+            for local, target_ref in v.fields.items():
+                cube_name, field_name = target_ref.split(".", 1)
+                if cube_name not in self._by_name:
+                    raise ValueError(
+                        f"View {v.name!r}, field {local!r}: target "
+                        f"cube {cube_name!r} not in the catalog. "
+                        f"Known cubes: {sorted(self._by_name)}."
+                    )
+                target_cube = self._by_name[cube_name]
+                cube_field_names = {f.name for f in target_cube.measures}
+                cube_field_names |= {f.name for f in target_cube.dimensions}
+                cube_field_names |= {f.name for f in target_cube.time_dimensions}
+                if field_name not in cube_field_names:
+                    raise ValueError(
+                        f"View {v.name!r}, field {local!r}: "
+                        f"{cube_name}.{field_name} is not a known measure "
+                        f"or dimension on cube {cube_name!r}."
+                    )
+        self.views: dict[str, View] = {v.name: v for v in view_list}
+
     def as_dict(self) -> dict[str, Cube]:
         """Return ``{cube.name: Cube}`` — the shape ``compile_query`` consumes."""
         return dict(self._by_name)
@@ -133,7 +171,7 @@ class Catalog:
         around ``semql.compile.compile_query``."""
         from semql.compile import compile_query
 
-        return compile_query(query, self._by_name, context=context)
+        return compile_query(query, self._by_name, context=context, views=self.views)
 
     def prompt(
         self,
@@ -149,6 +187,7 @@ class Catalog:
             self._by_name,
             only_exposed=only_exposed,
             include_introspection=include_introspection,
+            views=self.views,
         )
 
     def __iter__(self) -> Iterator[Cube]:

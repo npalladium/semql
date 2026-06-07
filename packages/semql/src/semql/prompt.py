@@ -12,7 +12,7 @@ system prompt alongside role description, data-source context, etc.
 
 from __future__ import annotations
 
-from semql.model import Cube
+from semql.model import Cube, View
 
 
 def render_catalogue_block(
@@ -172,11 +172,39 @@ Use these when the user asks meta questions like "what measures are
 available?" or "list available cubes" — same `SemanticQuery` shape."""
 
 
+def _render_view_block(views: dict[str, View]) -> str:
+    """Per-view markdown — each view lists its exposed field names and
+    the underlying ``cube.field`` targets. Planners can address fields
+    via the view; the compiler rewrites the references at compile time."""
+    if not views:
+        return ""
+    lines: list[str] = ["## VIEWS"]
+    lines.append(
+        "Curated facades over one or more cubes. Reference view fields "
+        "as `view.field`; the compiler maps them to the underlying cube."
+    )
+    lines.append("")
+    for v in views.values():
+        header = f"### {v.name}"
+        if v.display_name:
+            header += f" (human: {v.display_name})"
+        lines.append(header)
+        if v.description:
+            lines.append(v.description)
+        lines.append("")
+        lines.append("**Fields:**")
+        for local, target in v.fields.items():
+            lines.append(f"  - `{v.name}.{local}` → `{target}`")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def build_planner_prompt_fragment(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
     include_introspection: bool = False,
+    views: dict[str, View] | None = None,
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
@@ -187,8 +215,10 @@ def build_planner_prompt_fragment(
     parts: list[str] = [
         _SPEC_CONTRACT,
         render_catalogue_block(catalog, only_exposed=only_exposed).rstrip(),
-        _RAW_FALLBACK,
     ]
+    if views:
+        parts.append(_render_view_block(views).rstrip())
+    parts.append(_RAW_FALLBACK)
     if include_introspection:
         parts.append(_INTROSPECTION)
     return "\n\n".join(parts) + "\n"

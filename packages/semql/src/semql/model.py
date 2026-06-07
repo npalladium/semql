@@ -286,6 +286,50 @@ class Cube(BaseModel):
         return names
 
 
+class View(BaseModel):
+    """A curated catalogue facade.
+
+    A view exposes a renamed subset of measures / dimensions drawn
+    from one or more underlying cubes. Two practical uses:
+
+    - **Prompt trimming.** In a 30-cube catalog, expose a 5-field
+      view for a question shape and the planner prompt shrinks
+      proportionally.
+    - **Disambiguation.** When the same dim name (``identity_id``)
+      exists on multiple cubes, the view picks one explicitly.
+
+    ``fields`` maps the view's local name to a qualified
+    ``cube.field`` reference. Renaming is allowed — ``{"net_revenue":
+    "orders.revenue"}`` exposes the underlying ``revenue`` measure
+    as ``view.net_revenue``.
+
+    Views live in the ``Catalog`` alongside cubes; their names share
+    a namespace with cube names (no collisions allowed).
+    """
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    fields: dict[str, str]
+    description: str = ""
+    display_name: str | None = None
+    metadata: Metadata = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> View:
+        if not self.fields:
+            raise ValueError(
+                f"View {self.name!r}: fields cannot be empty. "
+                "A view must expose at least one cube.field reference."
+            )
+        for local, target in self.fields.items():
+            if "." not in target or target.count(".") != 1:
+                raise ValueError(
+                    f"View {self.name!r}, field {local!r}: target "
+                    f"{target!r} must be qualified as 'cube.field'."
+                )
+        return self
+
+
 __all__ = [
     "AggLiteral",
     "Backend",
@@ -302,4 +346,5 @@ __all__ = [
     "Segment",
     "TenancyMode",
     "TimeDimension",
+    "View",
 ]

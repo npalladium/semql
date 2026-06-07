@@ -60,7 +60,7 @@ from semql.errors import (
     ResolveError,
     UnknownIdentifierError,
 )
-from semql.model import Backend, Cube, Dimension, Join, Measure, Segment, TimeDimension
+from semql.model import Backend, Cube, Dimension, Join, Measure, Segment, TimeDimension, View
 from semql.spec import BoolExpr, Filter, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
@@ -303,6 +303,7 @@ def compile_query(
     group_by_alias: bool = True,
     having_alias: bool = False,
     strategies: dict[Backend, BackendStrategy] | None = None,
+    views: dict[str, View] | None = None,
 ) -> Compiled:
     """Compile a SemanticQuery to a Compiled bundle.
 
@@ -358,17 +359,41 @@ def compile_query(
             "or time_dimension is required."
         )
 
+    # 0. View-aware resolver. When ``view.X`` matches a known view, the
+    # ref rewrites to the underlying ``cube.field`` BUT the returned
+    # Field carries the view's local name so output column aliases
+    # come out as the view exposes them.
+    views_map: dict[str, View] = views or {}
+
+    def _resolve_with_views(
+        qualified: str,
+    ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
+        if "." in qualified:
+            prefix, local = qualified.split(".", 1)
+            if prefix in views_map:
+                view = views_map[prefix]
+                if local not in view.fields:
+                    raise CompileError(
+                        f"View {prefix!r} has no field {local!r}. "
+                        f"Known fields on this view: {sorted(view.fields)}."
+                    )
+                cube, fld = _resolve_field(view.fields[local], catalog)
+                # Re-alias the field so the SELECT output column matches
+                # the view's local name (e.g. view.net_revenue → AS net_revenue).
+                return cube, fld.model_copy(update={"name": local})
+        return _resolve_field(qualified, catalog)
+
     # 1. Resolve references; gather touched cubes.
     measure_fields: list[tuple[Cube, Measure]] = []
     for ref in q.measures:
-        cube, fld = _resolve_field(ref, catalog)
+        cube, fld = _resolve_with_views(ref)
         if not isinstance(fld, Measure):
             raise CompileError(f"{ref!r} is not a measure on cube {cube.name!r}.")
         measure_fields.append((cube, fld))
 
     dim_fields: list[tuple[Cube, Dimension]] = []
     for ref in q.dimensions:
-        cube, fld = _resolve_field(ref, catalog)
+        cube, fld = _resolve_with_views(ref)
         if not isinstance(fld, Dimension):
             raise CompileError(f"{ref!r} is not a dimension on cube {cube.name!r}.")
         dim_fields.append((cube, fld))
@@ -376,7 +401,7 @@ def compile_query(
     time_cube: Cube | None = None
     time_dim: TimeDimension | None = None
     if q.time_dimension is not None:
-        tcube, tfld = _resolve_field(q.time_dimension.dimension, catalog)
+        tcube, tfld = _resolve_with_views(q.time_dimension.dimension)
         if not isinstance(tfld, TimeDimension):
             raise CompileError(f"{q.time_dimension.dimension!r} is not a time dimension.")
         gran = q.time_dimension.granularity
@@ -396,7 +421,7 @@ def compile_query(
 
     filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]] = []
     for f in q.filters:
-        c, fld = _resolve_field(f.dimension, catalog)
+        c, fld = _resolve_with_views(f.dimension)
         filter_resolutions.append((f, c, fld))
         if c not in touched:
             touched.append(c)
@@ -408,7 +433,7 @@ def compile_query(
     where_leaves: list[Filter] = _walk_where_leaves(q.where) if q.where is not None else []
     where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]] = {}
     for leaf in where_leaves:
-        c, fld = _resolve_field(leaf.dimension, catalog)
+        c, fld = _resolve_with_views(leaf.dimension)
         where_leaf_resolutions[id(leaf)] = (c, fld)
         if c not in touched:
             touched.append(c)

@@ -43,6 +43,7 @@ from semql.model import (
     Measure,
     Segment,
     TimeDimension,
+    View,
 )
 from semql.prompt import (
     build_planner_prompt_fragment,
@@ -98,6 +99,7 @@ __all__ = [
     "TimeWindow",
     "UnknownIdentifierError",
     "ValidationError",
+    "View",
     "VizColumn",
     "VizDecision",
     "build_planner_prompt_fragment",
