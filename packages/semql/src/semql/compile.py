@@ -61,7 +61,7 @@ from semql.errors import (
     UnknownIdentifierError,
 )
 from semql.model import Backend, Cube, Dimension, Join, Measure, Segment, TimeDimension
-from semql.spec import Filter, SemanticQuery
+from semql.spec import BoolExpr, Filter, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
 
@@ -240,6 +240,36 @@ def _filter_node(
     raise CompileError(f"Unsupported filter op: {op!r}")  # pragma: no cover
 
 
+def _walk_where_leaves(expr: BoolExpr | Filter) -> list[Filter]:
+    """Return all ``Filter`` leaves from a where tree, depth-first."""
+    if isinstance(expr, Filter):
+        return [expr]
+    leaves: list[Filter] = []
+    for child in expr.children:
+        leaves.extend(_walk_where_leaves(child))
+    return leaves
+
+
+def _compile_where_tree(
+    expr: BoolExpr | Filter,
+    leaf_to_node: Callable[[Filter], exp.Expression],
+) -> exp.Expression:
+    """Build a sqlglot predicate node from a where tree.
+
+    ``leaf_to_node`` resolves each Filter leaf to its compiled AST
+    fragment (the caller owns the bind closure + type resolution)."""
+    if isinstance(expr, Filter):
+        return leaf_to_node(expr)
+    children_nodes = [_compile_where_tree(c, leaf_to_node) for c in expr.children]
+    if expr.op == "not":
+        return exp.Not(this=children_nodes[0])
+    combiner: type[exp.Expression] = exp.And if expr.op == "and" else exp.Or
+    result = children_nodes[0]
+    for n in children_nodes[1:]:
+        result = combiner(this=result, expression=n)
+    return result
+
+
 def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
     """Parse a catalogue SQL fragment into a sqlglot AST node.
 
@@ -362,6 +392,18 @@ def compile_query(
     for f in q.filters:
         c, fld = _resolve_field(f.dimension, catalog)
         filter_resolutions.append((f, c, fld))
+        if c not in touched:
+            touched.append(c)
+
+    # 1d. Resolve where-tree leaves up front so cubes referenced inside
+    # OR / NOT branches are added to ``touched`` and the join graph
+    # reaches them. The compiled predicate is built later in
+    # ``build_inner`` (per CTE in compare mode).
+    where_leaves: list[Filter] = _walk_where_leaves(q.where) if q.where is not None else []
+    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]] = {}
+    for leaf in where_leaves:
+        c, fld = _resolve_field(leaf.dimension, catalog)
+        where_leaf_resolutions[id(leaf)] = (c, fld)
         if c not in touched:
             touched.append(c)
 
@@ -597,6 +639,24 @@ def compile_query(
         # path as ``Join.on`` / ``base_predicate`` SQL fragments.
         for _seg_cube, segment in segment_resolutions:
             where_terms.append(parse(segment.sql))
+
+        # Boolean predicate tree — ANDs with the flat ``filters`` and
+        # segments. Leaves resolve through the shared bind closure so
+        # values get parameter-bound the same as flat-filter values.
+        if q.where is not None:
+
+            def _leaf_to_node(leaf: Filter) -> exp.Expression:
+                _cube, fld = where_leaf_resolutions[id(leaf)]
+                fld_node = parse(fld.sql)
+                if isinstance(fld, Dimension):
+                    fld_type = fld.type
+                elif isinstance(fld, TimeDimension):
+                    fld_type = "time"
+                else:
+                    fld_type = "string"
+                return _filter_node(leaf, fld_node, fld_type, strategy, bind)
+
+            where_terms.append(_compile_where_tree(q.where, _leaf_to_node))
 
         if time_dim is not None:
             where_terms.append(

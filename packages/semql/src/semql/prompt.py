@@ -130,6 +130,10 @@ Fields:
   date range, exclusive end. `granularity` truncates to hour/day/week/month.
 - `filters: list[{dimension, op, values}]` — pre-aggregation predicates.
   Ops: eq, neq, in, not_in, gt, lt, gte, lte, contains, is_null, not_null.
+- `where: BoolExpr | null` — boolean predicate tree for OR / NOT.
+  `{op: "and"|"or"|"not", children: [Filter | BoolExpr, ...]}`. Composes
+  with `filters` via implicit AND. Use only when `filters` (flat AND)
+  isn't expressive enough.
 - `having: list[{dimension, op, values}]` — post-aggregation predicates;
   `dimension` must reference one of the measures you also requested
   (either bare `revenue` or qualified `orders.revenue` — both resolve

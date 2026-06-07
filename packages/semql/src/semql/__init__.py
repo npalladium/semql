@@ -49,6 +49,7 @@ from semql.prompt import (
 )
 from semql.safe import is_safe_select
 from semql.spec import (
+    BoolExpr,
     CompareWindow,
     Filter,
     FilterOp,
@@ -61,6 +62,7 @@ from semql.visualize import VizColumn, VizDecision, decide_visualization
 __all__ = [
     "AggLiteral",
     "Backend",
+    "BoolExpr",
     "CATALOG_CUBES",
     "CATALOG_DIMENSIONS",
     "CATALOG_MEASURES",

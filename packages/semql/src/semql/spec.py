@@ -90,6 +90,29 @@ class Filter(BaseModel):
                 )
 
 
+class BoolExpr(BaseModel):
+    """Recursive boolean predicate tree over ``Filter`` leaves.
+
+    ``filters`` (the flat list on ``SemanticQuery``) is implicit-AND;
+    use ``BoolExpr`` when you need OR or NOT. Children are either
+    nested ``BoolExpr`` nodes or ``Filter`` leaves. ``not`` takes
+    exactly one child; ``and`` / ``or`` take two or more.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    op: Literal["and", "or", "not"]
+    children: list[BoolExpr | Filter]
+
+    @model_validator(mode="after")
+    def _check_arity(self) -> BoolExpr:
+        n = len(self.children)
+        if self.op == "not" and n != 1:
+            raise ValueError(f"BoolExpr(op='not') takes exactly one child; got {n}.")
+        if self.op in ("and", "or") and n < 2:
+            raise ValueError(f"BoolExpr(op={self.op!r}) requires at least two children; got {n}.")
+        return self
+
+
 class CompareWindow(BaseModel):
     """`previous_period` derives the prior window from the TimeWindow's
     range (same duration, immediately prior). `explicit` requires `range`."""
@@ -108,6 +131,9 @@ class SemanticQuery(BaseModel):
     # (qualified as ``cube.segment``). Compose with ``filters`` via AND.
     segments: list[str] = []
     filters: list[Filter] = []
+    # Boolean predicate tree — use when ``filters`` (implicit AND) isn't
+    # expressive enough (OR / NOT). Composes with ``filters`` via AND.
+    where: BoolExpr | None = None
     having: list[Filter] = []
     compare: CompareWindow | None = None
     order: list[tuple[str, Literal["asc", "desc"]]] = []
@@ -129,6 +155,7 @@ class SemanticQuery(BaseModel):
 
 
 __all__ = [
+    "BoolExpr",
     "CompareWindow",
     "Filter",
     "FilterOp",
