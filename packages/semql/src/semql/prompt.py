@@ -129,8 +129,11 @@ Fields:
   Aggregated automatically per the catalogue's `agg` field.
 - `dimensions: list[str]` — qualified names. Form the GROUP BY when
   measures are present; form the SELECT when ungrouped.
-- `time_dimension: {dimension, granularity?, range}` — pre-resolved ISO
-  date range, exclusive end. `granularity` truncates to hour/day/week/month.
+- `time_dimension: {dimension, granularity?, range, fill_nulls_with?}` —
+  pre-resolved ISO date range, exclusive end. `granularity` truncates
+  to hour/day/week/month. `fill_nulls_with: int` emits one row per
+  bucket in range and COALESCEs missing measures to the int — use it
+  for line charts that need an unbroken time axis.
 - `filters: list[{dimension, op, values}]` — pre-aggregation predicates.
   Ops: eq, neq, in, not_in, gt, lt, gte, lte, contains, is_null, not_null.
 - `where: BoolExpr | null` — boolean predicate tree for OR / NOT.

@@ -969,6 +969,71 @@ def compile_query(
             target_node = measure_alias_map[lookup_name].copy()
         select_node = select_node.having(_filter_node(hf, target_node, "number", strategy, bind))
 
+    # 8b. Time spine — wrap the aggregation in a CTE and LEFT JOIN a
+    # spine CTE so every bucket in [start, end) gets a row. Measure
+    # values fall back to ``fill_nulls_with`` via COALESCE.
+    fill_value: int | None = (
+        q.time_dimension.fill_nulls_with if q.time_dimension is not None else None
+    )
+    if fill_value is not None:
+        if not has_time_breakdown:
+            raise CompileError(
+                "TimeWindow.fill_nulls_with requires a granularity on the "
+                "time_dimension — the spine has nothing to step over otherwise."
+            )
+        if not measure_fields:
+            raise CompileError(
+                "TimeWindow.fill_nulls_with has no effect without measures — "
+                "the COALESCE wraps a measure value, and a query with no "
+                "measures has nothing to fill."
+            )
+        if dim_fields:
+            raise CompileError(
+                "TimeWindow.fill_nulls_with does not yet support non-time "
+                "dimensions (Phase B: spine × dimension cartesian fill). "
+                "Drop the non-time dimensions or run the query without fill."
+            )
+        if q.ungrouped:
+            raise CompileError(
+                "TimeWindow.fill_nulls_with is incompatible with ungrouped=True — "
+                "spine fill aggregates by definition."
+            )
+        assert time_range_for_query is not None
+        assert time_col_name is not None
+        granularity_val = q.time_dimension.granularity if q.time_dimension is not None else None
+        assert granularity_val is not None
+        start_ph = bind(time_range_for_query[0], "time")
+        end_ph = bind(time_range_for_query[1], "time")
+        spine_inner = strategy.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
+
+        outer = exp.Select()
+        outer = outer.with_("agg", select_node)
+        outer = outer.with_("spine", spine_inner)
+        outer = outer.select(exp.column(time_col_name, table="spine"))
+        for col_name in measure_col_names:
+            outer = outer.select(
+                exp.alias_(
+                    exp.Anonymous(
+                        this="COALESCE",
+                        expressions=[
+                            exp.column(col_name, table="agg"),
+                            exp.Literal.number(fill_value),
+                        ],
+                    ),
+                    col_name,
+                )
+            )
+        outer = outer.from_(exp.to_table("spine"))
+        outer = outer.join(
+            exp.to_table("agg"),
+            on=exp.EQ(
+                this=exp.column(time_col_name, table="spine"),
+                expression=exp.column(time_col_name, table="agg"),
+            ),
+            join_type="left",
+        )
+        select_node = outer
+
     # 9. ORDER BY.
     for ref, direction in q.order:
         if ref in measure_alias_map or ref in columns:

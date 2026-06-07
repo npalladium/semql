@@ -68,6 +68,13 @@ class BackendStrategy(Protocol):
         catalog: dict[str, Cube],
         resolve_sql: SqlResolver,
     ) -> exp.Expression: ...
+    def emit_time_spine(
+        self,
+        granularity: str,
+        start: exp.Expression,
+        end: exp.Expression,
+        bucket_alias: str,
+    ) -> exp.Expression: ...
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +141,34 @@ class _StdSqlStrategy:
     ) -> exp.Expression:
         return _aliased_table(cube, resolve_sql)
 
+    def emit_time_spine(
+        self,
+        granularity: str,
+        start: exp.Expression,
+        end: exp.Expression,
+        bucket_alias: str,
+    ) -> exp.Expression:
+        # Default spine for Postgres + DuckDB:
+        # generate_series(date_trunc(g, start), date_trunc(g, end - 1 step), 1 step)
+        # BigQuery and Snowflake override this with their own table-function shapes.
+        step = exp.Interval(
+            this=exp.Literal.number(1),
+            unit=exp.Var(this=granularity.upper()),
+        )
+        trunc_start = exp.Anonymous(
+            this="date_trunc", expressions=[exp.Literal.string(granularity), start]
+        )
+        end_minus_step = exp.Paren(this=exp.Sub(this=end, expression=step.copy()))
+        trunc_end = exp.Anonymous(
+            this="date_trunc", expressions=[exp.Literal.string(granularity), end_minus_step]
+        )
+        series = exp.Anonymous(
+            this="generate_series",
+            expressions=[trunc_start, trunc_end, step.copy()],
+        )
+        inner = exp.Select().select(exp.alias_(series, bucket_alias))
+        return inner
+
 
 class PostgresStrategy(_StdSqlStrategy):
     """Postgres convention. Placeholders render as ``%(name)s``."""
@@ -157,12 +192,90 @@ class BigQueryStrategy(_StdSqlStrategy):
 
     backend = Backend.BIGQUERY
 
+    def emit_time_spine(
+        self,
+        granularity: str,
+        start: exp.Expression,
+        end: exp.Expression,
+        bucket_alias: str,
+    ) -> exp.Expression:
+        # BigQuery has no ``generate_series`` — use
+        # ``UNNEST(GENERATE_DATE_ARRAY(...))`` to turn an array of dates
+        # into rows, then ``DATE_TRUNC`` each one to the requested grain.
+        # DISTINCT collapses duplicate week / month buckets.
+        one_day = exp.Interval(this=exp.Literal.number(1), unit=exp.Var(this="DAY"))
+        start_date = exp.Anonymous(this="DATE", expressions=[start])
+        end_minus_one = exp.Paren(this=exp.Sub(this=end, expression=one_day.copy()))
+        end_date = exp.Anonymous(this="DATE", expressions=[end_minus_one])
+        series = exp.Anonymous(
+            this="GENERATE_DATE_ARRAY",
+            expressions=[start_date, end_date, one_day.copy()],
+        )
+        bucket_col = exp.Column(this=exp.to_identifier("d"))
+        trunc_node = exp.Anonymous(
+            this="DATE_TRUNC",
+            expressions=[bucket_col, exp.Var(this=granularity.upper())],
+        )
+        inner = exp.Select(distinct=exp.Distinct())
+        inner = inner.select(exp.alias_(trunc_node, bucket_alias))
+        unnest = exp.Unnest(
+            expressions=[series],
+            alias=exp.TableAlias(this=exp.to_identifier("d")),
+        )
+        inner = inner.from_(unnest)
+        return inner
+
 
 class SnowflakeStrategy(_StdSqlStrategy):
     """Snowflake convention. Placeholders render as ``:name``. ``ILIKE``
     and ``date_trunc`` are native to Snowflake — no transpilation needed."""
 
     backend = Backend.SNOWFLAKE
+
+    def emit_time_spine(
+        self,
+        granularity: str,
+        start: exp.Expression,
+        end: exp.Expression,
+        bucket_alias: str,
+    ) -> exp.Expression:
+        # Snowflake uses ``TABLE(GENERATOR(ROWCOUNT => N))`` to materialise
+        # N rows and ``SEQ4()`` for the per-row 0..N-1 counter. The
+        # ``ROWCOUNT => ...`` named-arg syntax goes through ``exp.Kwarg``.
+        to_date_start = exp.Anonymous(this="TO_DATE", expressions=[start])
+        add_days = exp.Anonymous(
+            this="DATEADD",
+            expressions=[
+                exp.Literal.string("day"),
+                exp.Anonymous(this="SEQ4", expressions=[]),
+                to_date_start,
+            ],
+        )
+        bucket = exp.Anonymous(
+            this="DATE_TRUNC",
+            expressions=[exp.Literal.string(granularity), add_days],
+        )
+        day_diff = exp.Anonymous(
+            this="DATEDIFF",
+            expressions=[
+                exp.Literal.string("day"),
+                exp.Anonymous(this="TO_DATE", expressions=[start.copy()]),
+                exp.Anonymous(this="TO_DATE", expressions=[end]),
+            ],
+        )
+        generator = exp.Anonymous(
+            this="GENERATOR",
+            expressions=[
+                exp.Kwarg(
+                    this=exp.Column(this=exp.to_identifier("ROWCOUNT")),
+                    expression=day_diff,
+                ),
+            ],
+        )
+        table_func = exp.Anonymous(this="TABLE", expressions=[generator])
+        inner = exp.Select(distinct=exp.Distinct()).select(exp.alias_(bucket, bucket_alias))
+        inner = inner.from_(table_func)
+        return inner
 
 
 class ClickHouseStrategy:
@@ -195,6 +308,39 @@ class ClickHouseStrategy:
     ) -> exp.Expression:
         return _aliased_table(cube, resolve_sql)
 
+    def emit_time_spine(
+        self,
+        granularity: str,
+        start: exp.Expression,
+        end: exp.Expression,
+        bucket_alias: str,
+    ) -> exp.Expression:
+        # ClickHouse has no ``generate_series``. We expand a daily index
+        # via ``numbers(dateDiff('day', start, end))`` and truncate each
+        # day to ``toStartOf<Gran>(...)`` — DISTINCT collapses the
+        # duplicates that show up for week / month grains.
+        trunc_name = _CH_TRUNC[granularity]
+        add_days = exp.Anonymous(
+            this="addDays",
+            expressions=[
+                exp.Anonymous(this="toDate", expressions=[start.copy()]),
+                exp.Column(this=exp.to_identifier("number")),
+            ],
+        )
+        bucket = exp.Anonymous(this=trunc_name, expressions=[add_days])
+        day_diff = exp.Anonymous(
+            this="dateDiff",
+            expressions=[
+                exp.Literal.string("day"),
+                exp.Anonymous(this="toDate", expressions=[start.copy()]),
+                exp.Anonymous(this="toDate", expressions=[end.copy()]),
+            ],
+        )
+        inner = exp.Select(distinct=exp.Distinct())
+        inner = inner.select(exp.alias_(bucket, bucket_alias))
+        inner = inner.from_(exp.Anonymous(this="numbers", expressions=[day_diff]))
+        return inner
+
 
 class MetaStrategy:
     """Reflection cubes — materialised as a ``VALUES`` subquery at compile
@@ -223,6 +369,15 @@ class MetaStrategy:
         resolve_sql: SqlResolver,  # noqa: ARG002
     ) -> exp.Expression:
         return _meta_subquery(cube, catalog)
+
+    def emit_time_spine(
+        self,
+        granularity: str,  # noqa: ARG002
+        start: exp.Expression,  # noqa: ARG002
+        end: exp.Expression,  # noqa: ARG002
+        bucket_alias: str,  # noqa: ARG002
+    ) -> exp.Expression:
+        raise NotImplementedError("Time spine emission is not applicable to META reflection cubes.")
 
 
 # ---------------------------------------------------------------------------

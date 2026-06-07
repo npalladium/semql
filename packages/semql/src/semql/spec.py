@@ -33,6 +33,12 @@ class TimeWindow(BaseModel):
     dimension: str
     granularity: Literal["hour", "day", "week", "month"] | None = None
     range: tuple[str, str]
+    # When set, every measure in the query gets ``COALESCE(measure,
+    # fill_nulls_with)`` and the result has one row per truncated time
+    # bucket in ``range`` even where the underlying data has gaps.
+    # Requires ``granularity``; rejected when the query has any
+    # non-time dimensions (cartesian fill = Phase B).
+    fill_nulls_with: int | None = None
 
 
 class Filter(BaseModel):
