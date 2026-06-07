@@ -253,6 +253,27 @@ def build_planner_prompt_fragment(
     return "\n\n".join(parts) + "\n"
 
 
+_ROUTER_OUTPUT_SCHEMA = """\
+## Output
+
+Emit a `RouterDecision`:
+
+```
+{
+  "path": "semantic" | "raw",
+  "cubes": [cube_name, ...],   // empty when path = "raw"
+  "views": [view_name, ...],   // empty when path = "raw"
+  "reasoning": "<one short sentence>"
+}
+```
+
+When `path = "semantic"`, list ONLY the cubes / views the next stage
+will need (most questions need 1-3). The downstream Query Generator
+sees a catalogue trimmed to your picks, so being precise here shrinks
+its prompt and sharpens its output.
+"""
+
+
 def build_router_prompt_fragment(
     catalog: dict[str, Cube],
     *,
@@ -269,6 +290,9 @@ def build_router_prompt_fragment(
     When ``views`` is provided, a parallel one-liner list lets the
     router pick a curated facade instead of (or in addition to) the
     raw cubes.
+
+    Ends with the ``RouterDecision`` output schema so a typed-output
+    LLM client (pydantic-ai etc.) can parse the response directly.
     """
     router_header = _raw_triggers_block(
         "## Path routing — semantic vs raw SQL\n\n"
@@ -309,11 +333,239 @@ def build_router_prompt_fragment(
                 human = _human(v.display_name)
                 view_lines.append(f"  - `{v.name}`{human}{blurb}")
             parts.append("\n".join(view_lines))
+
+    parts.append(_ROUTER_OUTPUT_SCHEMA.rstrip())
+    return "\n\n".join(parts) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Query Generator
+# ---------------------------------------------------------------------------
+
+
+_GENERATOR_OUTPUT_SCHEMA = """\
+## Output
+
+Emit a `QueryPlan`:
+
+```
+{
+  "steps": [
+    {
+      "query": <SemanticQuery>,
+      "intent": "headline" | "breakdown" | "compare" | "context",
+      "label": "<one-line description, optional>"
+    },
+    ...
+  ],
+  "reasoning": "<one short sentence, optional>"
+}
+```
+
+Intent vocabulary:
+- `headline` — the primary number the user asked for.
+- `breakdown` — disaggregation alongside the headline.
+- `compare` — sibling number for context (prior period, baseline).
+- `context` — supporting data the answer references but doesn't feature.
+
+One headline per plan is the common case; emit 2-4 total steps when
+the question naturally decomposes ("revenue this quarter" → headline
++ prior-quarter compare). Empty `steps` means you can't formulate a
+query — return that rather than guessing."""
+
+
+def build_query_generator_prompt_fragment(
+    catalog: dict[str, Cube],
+    *,
+    scope_to: list[str] | None = None,
+    only_exposed: bool = True,
+    include_introspection: bool = False,
+    views: dict[str, View] | None = None,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
+) -> str:
+    """Fragment for the second stage of the prompt pipeline.
+
+    Given the Router's pick, this stage turns the question into a
+    ``QueryPlan`` (one or more ``QueryStep`` with typed intent).
+
+    ``scope_to`` is the retrieval-pass parameter: when set, the
+    rendered catalogue includes only the named cubes (and any views
+    in the provided ``views`` dict whose name appears in ``scope_to``).
+    Pair with the Router's ``cubes`` + ``views`` output to shrink the
+    Generator's prompt to the surface that question actually needs.
+    """
+    scoped_catalog: dict[str, Cube] = catalog
+    scoped_views: dict[str, View] | None = views
+    if scope_to is not None:
+        wanted = set(scope_to)
+        scoped_catalog = {n: c for n, c in catalog.items() if n in wanted}
+        if views is not None:
+            scoped_views = {n: v for n, v in views.items() if n in wanted}
+
+    parts: list[str] = [
+        _SPEC_CONTRACT,
+        render_catalogue_block(
+            scoped_catalog, only_exposed=only_exposed, viewer=viewer, policy=policy
+        ).rstrip(),
+    ]
+    if scoped_views:
+        parts.append(_render_view_block(scoped_views).rstrip())
+    parts.append(_RAW_FALLBACK)
+    if include_introspection:
+        parts.append(_INTROSPECTION)
+    parts.append(_GENERATOR_OUTPUT_SCHEMA.rstrip())
+    return "\n\n".join(parts) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Presenter
+# ---------------------------------------------------------------------------
+
+
+_PRESENTER_OUTPUT_SCHEMA = """\
+## Output
+
+Emit a `Presentation`:
+
+```
+{
+  "summary": "<one-paragraph user-facing answer>",
+  "highlights": ["<bullet>", ...],
+  "caveats": ["<bullet>", ...]
+}
+```
+
+- `summary` is what an executive reads first. Lead with the answer,
+  not the methodology. One paragraph; 1-3 sentences.
+- `highlights` (optional) call out what's worth noticing — outliers,
+  trends, surprising values. Skip when nothing's notable.
+- `caveats` (optional) flag small samples, missing data, ambiguous
+  comparisons, anything that would make a careful reader hedge.
+  Skip when the result is unambiguous."""
+
+
+def build_presenter_prompt_fragment(
+    *,
+    query_labels: list[str] | None = None,
+    result_summary: str | None = None,
+) -> str:
+    """Fragment for the third stage of the prompt pipeline.
+
+    ``query_labels`` — optional one-liners describing each query in
+    the plan (e.g. ``["Q4 revenue", "Q3 revenue", "Q4 by region"]``);
+    splice them in so the Presenter knows what data it received.
+
+    ``result_summary`` — optional caller-supplied prose summary of the
+    rows themselves (e.g. ``"3 rows, max=12_400, min=8_200"``).
+    The Presenter narrates, but you decide how much data lands inside
+    the prompt — pass small samples directly, or summarise large
+    results outside.
+
+    The chart-shape decision lives in ``decide_visualization``
+    (``semql.visualize``). The Presenter handles prose; the visualiser
+    handles chart selection. Keep them decoupled."""
+    parts: list[str] = [
+        "## Presenter\n\n"
+        "Turn query results into a user-facing answer. You receive one or "
+        "more `QueryStep`s with their intents (headline / breakdown / "
+        "compare / context) and the rows that resulted. Compose a coherent "
+        "narrative — headline first, then notable details, then caveats."
+    ]
+    if query_labels:
+        bullet_block = "\n".join(f"  - {label}" for label in query_labels)
+        parts.append("## Queries in this plan\n" + bullet_block)
+    if result_summary:
+        parts.append("## Result snapshot\n" + result_summary)
+    parts.append(_PRESENTER_OUTPUT_SCHEMA.rstrip())
+    return "\n\n".join(parts) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Deep drilldown
+# ---------------------------------------------------------------------------
+
+
+_DRILLDOWN_OUTPUT_SCHEMA = """\
+## Output
+
+Emit a `DrilldownSuggestions`:
+
+```
+{
+  "suggestions": [
+    {
+      "label": "<short clickable label>",
+      "query": <SemanticQuery>,
+      "rationale": "<optional one-line why>"
+    },
+    ...
+  ],
+  "focus": "<one-line description of the anchor row, optional>"
+}
+```
+
+3-5 suggestions is the sweet spot. Each must be a runnable
+`SemanticQuery` against this cube (or its joined neighbours).
+Favour drills the catalogue's `drill_paths` already suggests, but
+add cross-cube drills (via declared joins) when they'd be revealing."""
+
+
+def build_drilldown_prompt_fragment(
+    cube: Cube,
+    *,
+    focused_row: dict[str, str] | None = None,
+    drill_paths_hint: bool = True,
+) -> str:
+    """Fragment for the fourth stage of the prompt pipeline.
+
+    Anchored to one ``cube`` — the drilldown explores within / from
+    that cube. ``focused_row`` is the (dimension → value) mapping for
+    the row of interest; the suggestions should narrow to or expand
+    from it.
+
+    ``drill_paths_hint=True`` (default) renders the cube's declared
+    ``drill_paths`` inline as a suggestion baseline."""
+    parts: list[str] = [
+        f"## Drill down on `{cube.name}`\n\n"
+        "Propose follow-up queries an analyst might ask next, given the "
+        "focused row. Each suggestion is a clickable next-question — a "
+        "complete `SemanticQuery` plus a short label."
+    ]
+    if cube.description:
+        parts.append(f"### Cube: {cube.description}")
+
+    if focused_row:
+        row_block = "\n".join(f"  - `{k}`: {v!r}" for k, v in focused_row.items())
+        parts.append("## Focused row\n" + row_block)
+
+    if drill_paths_hint and cube.drill_paths:
+        path_block = "\n".join(f"  - {' → '.join(path)}" for path in cube.drill_paths)
+        parts.append(
+            "## Declared drill paths\n"
+            "These hierarchies are catalogue-blessed; prefer suggestions "
+            "that walk them:\n" + path_block
+        )
+
+    if cube.measures:
+        ms = ", ".join(f"`{cube.name}.{m.name}`" for m in cube.measures)
+        parts.append(f"## Available measures\n{ms}")
+    if cube.dimensions:
+        ds = ", ".join(f"`{cube.name}.{d.name}`" for d in cube.dimensions)
+        parts.append(f"## Available dimensions\n{ds}")
+    if cube.time_dimensions:
+        ts = ", ".join(f"`{cube.name}.{td.name}`" for td in cube.time_dimensions)
+        parts.append(f"## Available time dimensions\n{ts}")
+
+    parts.append(_DRILLDOWN_OUTPUT_SCHEMA.rstrip())
     return "\n\n".join(parts) + "\n"
 
 
 __all__ = [
+    "build_drilldown_prompt_fragment",
     "build_planner_prompt_fragment",
+    "build_presenter_prompt_fragment",
+    "build_query_generator_prompt_fragment",
     "build_router_prompt_fragment",
     "render_catalogue_block",
 ]

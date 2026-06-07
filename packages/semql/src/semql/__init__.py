@@ -64,7 +64,10 @@ from semql.plan import (
     RouterPath,
 )
 from semql.prompt import (
+    build_drilldown_prompt_fragment,
     build_planner_prompt_fragment,
+    build_presenter_prompt_fragment,
+    build_query_generator_prompt_fragment,
     build_router_prompt_fragment,
     render_catalogue_block,
 )
@@ -131,7 +134,10 @@ __all__ = [
     "View",
     "VizColumn",
     "VizDecision",
+    "build_drilldown_prompt_fragment",
     "build_planner_prompt_fragment",
+    "build_presenter_prompt_fragment",
+    "build_query_generator_prompt_fragment",
     "build_router_prompt_fragment",
     "compile_query",
     "decide_visualization",
