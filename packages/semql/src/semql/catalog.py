@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from semql.introspect import META_CUBES
-from semql.model import Cube
+from semql.model import Cube, Join
 
 if TYPE_CHECKING:
     from semql.compile import Compiled
@@ -47,6 +47,58 @@ class Catalog:
             if meta.name not in existing:
                 merged.append(meta)
                 existing.add(meta.name)
+
+        # Validate primary_key declarations — must name a real dimension.
+        for c in merged:
+            if c.primary_key is not None:
+                dim_names = {d.name for d in c.dimensions}
+                if c.primary_key not in dim_names:
+                    raise ValueError(
+                        f"Cube {c.name!r} declares primary_key="
+                        f"{c.primary_key!r} but the cube has no dimension "
+                        f"by that name. Declare it as a Dimension or pick "
+                        f"a different primary_key."
+                    )
+
+        # Auto-derive Join edges from Dimension.foreign_key declarations.
+        # An explicit Join with the same target wins — no duplicates.
+        by_name: dict[str, Cube] = {c.name: c for c in merged}
+        for cube in merged:
+            inferred: list[Join] = []
+            explicit_targets = {j.to for j in cube.joins}
+            for dim in cube.dimensions:
+                fk = dim.foreign_key
+                if fk is None:
+                    continue
+                if fk not in by_name:
+                    raise ValueError(
+                        f"Cube {cube.name!r}, dimension {dim.name!r}: "
+                        f"foreign_key={fk!r} names a cube not in the "
+                        f"catalog. Known cubes: {sorted(by_name)}."
+                    )
+                target = by_name[fk]
+                if target.primary_key is None:
+                    raise ValueError(
+                        f"Cube {cube.name!r}, dimension {dim.name!r}: "
+                        f"foreign_key={fk!r} requires the target cube "
+                        f"to declare a primary_key. Add primary_key="
+                        f"'<dim>' to cube {fk!r}."
+                    )
+                if fk in explicit_targets:
+                    continue  # explicit Join wins
+                inferred.append(
+                    Join(
+                        to=fk,
+                        relationship="many_to_one",
+                        on=f"{{{cube.alias}}}.{dim.name} = {{{target.alias}}}.{target.primary_key}",
+                    )
+                )
+            if inferred:
+                # Replace the cube with a copy carrying the augmented joins.
+                # Cube isn't frozen, but stay disciplined and use model_copy.
+                merged[merged.index(cube)] = cube.model_copy(
+                    update={"joins": [*cube.joins, *inferred]}
+                )
 
         known = {c.name for c in merged}
         for c in merged:

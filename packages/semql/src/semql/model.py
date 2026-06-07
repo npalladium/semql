@@ -138,6 +138,11 @@ class Dimension(BaseField):
     # tabular cell renders as "1h 23m" instead of "4980".
     unit: str | None = None
     format: FormatLiteral | None = None
+    # Names another cube whose ``primary_key`` this dimension references.
+    # The Catalog auto-derives a ``many_to_one`` Join from this cube's
+    # FK to the named cube's PK — saving the catalogue author the
+    # repetition. An explicit Join with the same ``to`` wins.
+    foreign_key: str | None = None
 
 
 class TimeDimension(BaseField):
@@ -214,6 +219,10 @@ class Cube(BaseModel):
     # ``{ctx.X}`` placeholders (bound from the compile-time
     # ``context`` dict, never inlined as a SQL literal).
     security_sql: str | None = None
+    # Names the dimension on *this* cube that uniquely identifies a row.
+    # Used by the Catalog to auto-derive ``many_to_one`` Joins from
+    # other cubes' ``Dimension.foreign_key`` declarations.
+    primary_key: str | None = None
 
     @model_validator(mode="after")
     def _check_tenancy_consistency(self) -> Cube:
