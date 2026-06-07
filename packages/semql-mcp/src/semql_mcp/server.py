@@ -34,6 +34,14 @@ Registered only when ``executor`` is supplied:
 - ``query_execute(spec, context?)`` — compile + run; returns the
   ``query_semantic`` shape plus ``rows: list[dict]``.
 
+Registered only when the catalog carries ``Lookup`` entries:
+- ``resolve_lookup(dimension, query, context?, viewer_id?, roles?)`` —
+  turn a free-text query into canonical dimension values via the
+  configured lookup's exact / substring / fuzzy resolver.
+- ``list_lookup_values(dimension, context?, viewer_id?, roles?)`` —
+  materialize a lookup's full value set (firing the loader for
+  dynamic lookups) so a planner can browse the vocabulary.
+
 Transports: stdio (FastMCP default) plus anything FastMCP supports
 out of the box. Use ``server.run(transport="stdio")`` for a
 CLI-launched process, or pass ``server.mcp`` to a custom transport.
@@ -47,7 +55,9 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from semql import Catalog
-from semql.model import Cube, Measure
+from semql.lookups import materialize as materialize_lookup
+from semql.lookups import resolve as resolve_lookup
+from semql.model import AuthContext, Cube, Measure, ResolutionContext
 from semql.spec import Filter, SemanticQuery, TimeWindow
 from semql.validate import ValidationError
 from semql.validate import validate as validate_query
@@ -82,6 +92,7 @@ class MCPServer:
         self.mcp = FastMCP(name=name)
         self._register_tools()
         self._register_per_cube_tools()
+        self._register_lookup_tools()
 
     def _register_tools(self) -> None:
         catalog = self.catalog
@@ -197,6 +208,97 @@ class MCPServer:
                     "rows": rows,
                 }
 
+    def _register_lookup_tools(self) -> None:
+        """Register ``resolve_lookup`` + ``list_lookup_values`` when the
+        catalog carries any :class:`semql.model.Lookup`.
+
+        Skipped on empty-lookup catalogs so a server with no resolvable
+        dimensions doesn't advertise misleading tools."""
+        catalog = self.catalog
+        if not catalog.lookups:
+            return
+
+        dim_keys = tuple(sorted(catalog.lookups))
+        dim_t = Literal[dim_keys]  # type: ignore[valid-type]
+
+        def resolve_lookup_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202 — signature attached via __annotations__ below
+            dimension,  # noqa: ANN001
+            query,  # noqa: ANN001
+            context=None,  # noqa: ANN001
+            viewer_id=None,  # noqa: ANN001
+            roles=None,  # noqa: ANN001
+            max_candidates=5,  # noqa: ANN001
+        ):
+            try:
+                ctx = _build_resolution_ctx(viewer_id, roles, context)
+                values = resolve_lookup(
+                    catalog,
+                    dimension,
+                    query,
+                    ctx=ctx,
+                    max_candidates=max_candidates,
+                )
+            except Exception as exc:
+                return _error_payload(exc)
+            return {"dimension": dimension, "query": query, "values": values}
+
+        resolve_lookup_fn.__name__ = "resolve_lookup"
+        resolve_lookup_fn.__doc__ = (
+            "Turn a free-text ``query`` into a list of canonical "
+            "values for ``dimension`` using the catalog's configured "
+            "Lookup. Resolution is exact-case-insensitive → substring "
+            "→ fuzzy. Pass ``context`` / ``viewer_id`` / ``roles`` for "
+            "dynamic lookups whose loader needs a ResolutionContext."
+            f"\n\nDimensions with lookups: {', '.join(dim_keys)}."
+        )
+        resolve_lookup_fn.__annotations__ = {
+            "dimension": dim_t,
+            "query": str,
+            "context": dict[str, str] | None,
+            "viewer_id": str | None,
+            "roles": list[str] | None,
+            "max_candidates": int,
+            "return": dict[str, Any],
+        }
+        self.mcp.add_tool(resolve_lookup_fn)
+
+        def list_lookup_values_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202 — signature attached via __annotations__ below
+            dimension,  # noqa: ANN001
+            context=None,  # noqa: ANN001
+            viewer_id=None,  # noqa: ANN001
+            roles=None,  # noqa: ANN001
+        ):
+            try:
+                lookup = catalog.lookups[dimension]
+                ctx = _build_resolution_ctx(viewer_id, roles, context)
+                materialized = materialize_lookup(lookup, ctx)
+            except Exception as exc:
+                return _error_payload(exc)
+            if materialized is None:
+                # Dynamic lookup, no context — signal "values resolved
+                # at runtime" rather than inventing an empty answer.
+                return {"dimension": dimension, "values": None, "labels": None}
+            values, labels = materialized
+            return {"dimension": dimension, "values": values, "labels": labels}
+
+        list_lookup_values_fn.__name__ = "list_lookup_values"
+        list_lookup_values_fn.__doc__ = (
+            "Return the full materialized value set of ``dimension``'s "
+            "Lookup. Static lookups return their declared tuple; dynamic "
+            "lookups fire the loader against the supplied context. "
+            "Returns ``{values: None}`` when a dynamic loader can't "
+            "run because no context was passed."
+            f"\n\nDimensions with lookups: {', '.join(dim_keys)}."
+        )
+        list_lookup_values_fn.__annotations__ = {
+            "dimension": dim_t,
+            "context": dict[str, str] | None,
+            "viewer_id": str | None,
+            "roles": list[str] | None,
+            "return": dict[str, Any],
+        }
+        self.mcp.add_tool(list_lookup_values_fn)
+
     def _register_per_cube_tools(self) -> None:
         """For each exposed, non-META cube, register a ``query_<cube>``
         tool whose ``measures`` / ``dimensions`` / ``time_window.dimension``
@@ -218,6 +320,24 @@ class MCPServer:
         speak JSON-RPC over its stdin/stdout. Forwards remaining kwargs
         to FastMCP."""
         self.mcp.run(transport=transport, **kwargs)
+
+
+def _build_resolution_ctx(
+    viewer_id: str | None,
+    roles: list[str] | None,
+    context: dict[str, str] | None,
+) -> ResolutionContext | None:
+    """Assemble a :class:`ResolutionContext` from the MCP tool inputs.
+
+    Returns ``None`` when none of ``viewer_id``, ``roles``, ``context``
+    are set — so static lookups don't allocate an empty envelope, and
+    dynamic loaders see the explicit "no context" signal."""
+    if viewer_id is None and not roles and not context:
+        return None
+    viewer = (
+        AuthContext(viewer_id=viewer_id, roles=list(roles or [])) if viewer_id is not None else None
+    )
+    return ResolutionContext(viewer=viewer, context=dict(context or {}))
 
 
 def _error_payload(exc: Exception) -> dict[str, Any]:
