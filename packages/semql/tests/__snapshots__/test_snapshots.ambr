@@ -1,0 +1,31 @@
+# serializer version: 1
+# name: test_snap_clickhouse_contains_filter
+  "SELECT COUNT(*) AS count FROM sessions AS s WHERE s.event_type = 'active' AND positionCaseInsensitive(s.app_name, {p0:String}) > 0"
+# ---
+# name: test_snap_clickhouse_time_truncation
+  "SELECT toStartOfHour(s.started_at) AS started_at_hour, COUNT(*) AS count FROM sessions AS s WHERE s.event_type = 'active' AND s.started_at >= {p0:DateTime} AND s.started_at < {p1:DateTime} GROUP BY started_at_hour"
+# ---
+# name: test_snap_compare_previous_period
+  'WITH current AS (SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p0)s AND o.created_at < %(p1)s GROUP BY region), prior AS (SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p2)s AND o.created_at < %(p3)s GROUP BY region) SELECT COALESCE(current.region, prior.region) AS region, current.revenue AS revenue_current, prior.revenue AS revenue_prior, COALESCE(current.revenue, 0) - COALESCE(prior.revenue, 0) AS revenue_delta, CASE WHEN prior.revenue > 0 THEN CAST((current.revenue - prior.revenue) * 100.0 AS DOUBLE PRECISION) / prior.revenue ELSE NULL END AS revenue_pct_change FROM current FULL OUTER JOIN prior ON current.region = prior.region'
+# ---
+# name: test_snap_count_distinct_non_additive_measure
+  "SELECT s.app_name AS app_name, COUNT(DISTINCT s.user_id) AS unique_users FROM sessions AS s WHERE s.event_type = 'active' GROUP BY app_name"
+# ---
+# name: test_snap_filtered_aggregation
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status IN (%(p0)s, %(p1)s) GROUP BY region'
+# ---
+# name: test_snap_join_with_having_and_order
+  'SELECT c.name AS name, SUM(o.amount) AS revenue FROM prod.orders AS o LEFT JOIN prod.customers AS c ON o.cust_id = c.id WHERE o.deleted_at IS NULL GROUP BY name HAVING SUM(o.amount) > %(p0)s ORDER BY revenue DESC NULLS LAST LIMIT 10'
+# ---
+# name: test_snap_simple_pg_aggregation
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_snap_tenancy_discriminator
+  'SELECT e.region AS region, COUNT(*) AS count FROM (SELECT * FROM events AS e WHERE e.tenant_id = %(p0)s AND e.team_id = %(p1)s) AS e GROUP BY region'
+# ---
+# name: test_snap_time_breakdown_with_granularity
+  "SELECT date_trunc('day', o.created_at) AS created_at_day, COUNT(*) AS count FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p0)s AND o.created_at < %(p1)s GROUP BY created_at_day"
+# ---
+# name: test_snap_ungrouped_row_listing
+  'SELECT o.region AS region, o.status AS status FROM prod.orders AS o WHERE o.deleted_at IS NULL LIMIT 50'
+# ---

@@ -679,13 +679,22 @@ def compile_query(
 
             # pct_change: divide-by-zero guard. CASE WHEN prior > 0 THEN
             # (current - prior) * 100.0 / prior ELSE NULL END.
+            # ``exp.Paren`` around the Sub is load-bearing — sqlglot's
+            # renderer doesn't infer precedence for binary ops, so
+            # ``Mul(Sub(a, b), 100)`` would render as ``a - b * 100``
+            # (parsed as ``a - (b*100)``) without the explicit paren.
             pct_expr = exp.Case(
                 ifs=[
                     exp.If(
                         this=exp.GT(this=pri_ref.copy(), expression=exp.Literal.number(0)),
                         true=exp.Div(
                             this=exp.Mul(
-                                this=exp.Sub(this=cur_ref.copy(), expression=pri_ref.copy()),
+                                this=exp.Paren(
+                                    this=exp.Sub(
+                                        this=cur_ref.copy(),
+                                        expression=pri_ref.copy(),
+                                    )
+                                ),
                                 expression=exp.Literal.number(100.0),
                             ),
                             expression=pri_ref.copy(),
