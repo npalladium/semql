@@ -11,7 +11,6 @@ members = [
     "semql",
     "semql-erd",
     "semql-mcp",
-    "semql-prompt",
 ]
 
 [manifest.dependency-groups]
@@ -1718,17 +1717,6 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.4.2" },
     { name = "semql", editable = "packages/semql" },
 ]
-
-[[package]]
-name = "semql-prompt"
-version = "0.1.0"
-source = { editable = "packages/semql-prompt" }
-dependencies = [
-    { name = "semql" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "semql", editable = "packages/semql" }]
 
 [[package]]
 name = "sortedcontainers"

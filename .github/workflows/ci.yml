@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [semql, semql-mcp, semql-erd, semql-prompt]
+        package: [semql, semql-mcp, semql-erd]
     steps:
       - uses: actions/checkout@v4
 

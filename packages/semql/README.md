@@ -7,8 +7,9 @@ correct, parameterised SQL for Postgres, ClickHouse, DuckDB and
 
 `semql` does **no I/O**: catalogues are Python data; the compiler
 returns SQL + bound params; running the SQL is the caller's job.
-Sibling packages add MCP exposure (`semql-mcp`), prompt rendering
-(`semql-prompt`), and ER diagrams (`semql-erd`).
+Prompt-fragment rendering for LLM planners ships in the core
+(`semql.prompt`). Sibling packages add MCP exposure (`semql-mcp`)
+and ER diagrams (`semql-erd`).
 
 ## Install
 

@@ -10,23 +10,24 @@ Organize them in a **catalog**. SemQL handles the rest.
 - **SQL generation** — turn a semantic spec into dialect-aware SQL
 - **MCP server** — exposes `query_semantic(spec)` plus auto-generated
   `query_<cube>()` tools so any MCP client can query your catalog
-- **Prompt builder** — generates a system-prompt fragment that teaches an LLM
-  your catalog schema so it routes queries through the semantic layer
+- **Prompt fragment** — `catalog.prompt()` renders a system-prompt
+  fragment that teaches an LLM your catalog schema so it can emit
+  `SemanticQuery` specs your code compiles to SQL
 
 ## Packages
 
 | Package | Description |
 |---|---|
-| `semql` | Core: cube definitions, catalog, SQL generation |
+| `semql` | Core: cube definitions, catalog, SQL generation, prompt rendering |
 | `semql-mcp` | MCP server wrapping a catalog |
-| `semql-prompt` | Prompt builder for LLM integration |
+| `semql-erd` | Graphviz ER-diagram generator for catalogues |
 
 ## Install
 
 ```sh
 pip install semql
 pip install semql-mcp     # + MCP server
-pip install semql-prompt  # + prompt builder
+pip install semql-erd     # + ER diagrams
 ```
 
 ## Quick start
