@@ -754,23 +754,383 @@ def _pick_single_backend(touched: list[Cube]) -> Backend:
     return next(iter(backends))
 
 
-def _emit_compare_query(
-    q: SemanticQuery,
-    *,
-    backend: Backend,
-    dialect: str,
-    params: dict[str, Any],
-    build_inner: Callable[[tuple[str, str]], exp.Select],
-    resolve_in_ctx: Callable[[str], str],
-    touched: list[Cube],
-    dim_fields: list[tuple[Cube, Dimension]],
-    measure_fields: list[tuple[Cube, Measure]],
-    dim_col_names: list[str],
-    measure_col_names: list[str],
-    time_dim: TimeDimension | None,
-    time_col_name: str | None,
-    has_time_breakdown: bool,
-) -> Compiled:
+class _CompileEnv:
+    """All state ``compile_query`` carries across its stages.
+
+    Built once after the prelude has resolved fields and the join
+    graph. Owns the parameter binder + memo, the placeholder /
+    resolver / parser methods (formerly closures), and the inner-SELECT
+    builders (``build_measure_expr``, ``build_inner``). Emission
+    helpers take a single env arg instead of fourteen positional
+    parameters; the closures-as-methods migration replaces the
+    shared-mutable-locals style of the old monolith.
+    """
+
+    def __init__(
+        self,
+        q: SemanticQuery,
+        catalog: dict[str, Cube],
+        *,
+        context: dict[str, str] | None,
+        group_by_alias: bool,
+        having_alias: bool,
+        strategies: dict[Backend, BackendStrategy] | None,
+        views: dict[str, View] | None,
+        viewer: AuthContext | None,
+        policy: PolicyFn | None,
+        scope_fns: dict[str, ScopeFn] | None,
+        allow_unbounded_ungrouped: bool,
+    ) -> None:
+        _validate_query_invariants(q, allow_unbounded_ungrouped=allow_unbounded_ungrouped)
+
+        self.q = q
+        self.catalog = catalog
+        self.group_by_alias = group_by_alias
+        self.having_alias = having_alias
+        self.strategies = strategies
+        self.viewer = viewer
+        self.policy = policy
+        self.scope_fns = scope_fns
+
+        # Compile context: caller-supplied substitutions + viewer
+        # auto-flattening for ``{ctx.viewer_id}``.
+        ctx = dict(context or {})
+        if viewer is not None:
+            ctx.setdefault("ctx.viewer_id", viewer.viewer_id)
+        self.ctx = ctx
+        self.views_map: dict[str, View] = views or {}
+
+        resolved = _resolve_query_fields(q, catalog, self.views_map)
+        self.measure_fields = resolved.measure_fields
+        self.dim_fields = resolved.dim_fields
+        self.time_cube = resolved.time_cube
+        self.time_dim = resolved.time_dim
+        self.filter_resolutions = resolved.filter_resolutions
+        self.where_leaf_resolutions = resolved.where_leaf_resolutions
+        self.segment_resolutions = resolved.segment_resolutions
+        self.touched = resolved.touched
+
+        _check_viewer_authorization(self.touched, viewer, policy)
+        _check_required_filters(self.touched, q)
+
+        self.backend = _pick_single_backend(self.touched)
+        self.cubes_in_from, self.join_edges = _build_join_graph(self.touched, catalog)
+        self.root = self.cubes_in_from[0]
+
+        self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
+        self.strategy = strategy_for(self.backend, strategies)
+        self.dialect = dialect_for(self.backend)
+
+        # Param binder state. Memoise ``(value, dim_type) → placeholder``
+        # so a filter value referenced in both compare-mode CTEs binds
+        # once — the database round-trip stays cheap and the planner's
+        # intent (one filter, one bound value) is preserved.
+        self.params: dict[str, Any] = {}
+        self._binds: dict[tuple[Any, str], str] = {}
+
+        # Output-column allocation. Collision-prefix any name that
+        # appears more than once across dims + measures so each output
+        # column is unique.
+        proposed: list[str] = [d.name for _, d in self.dim_fields]
+        proposed.extend(m.name for _, m in self.measure_fields)
+        counts = Counter(proposed)
+        self._collisions: set[str] = {n for n, c in counts.items() if c > 1}
+        self.dim_col_names: list[str] = [self._col_name(c, d.name) for c, d in self.dim_fields]
+        self.measure_col_names: list[str] = [
+            self._col_name(c, m.name) for c, m in self.measure_fields
+        ]
+
+        self.has_time_breakdown: bool = (
+            self.time_cube is not None
+            and self.time_dim is not None
+            and q.time_dimension is not None
+            and q.time_dimension.granularity is not None
+        )
+        self.time_col_name: str | None = None
+        if self.has_time_breakdown:
+            assert self.time_dim is not None and q.time_dimension is not None
+            granularity = q.time_dimension.granularity
+            assert granularity is not None
+            self.time_col_name = f"{self.time_dim.name}_{granularity}"
+
+    # ------------------------------------------------------------------
+    # Helpers — were inline closures inside ``compile_query`` before.
+    # ------------------------------------------------------------------
+
+    def _col_name(self, cube: Cube, field_name: str) -> str:
+        return f"{cube.name}_{field_name}" if field_name in self._collisions else field_name
+
+    def bind(self, value: Any, dim_type: str) -> exp.Placeholder:  # noqa: ANN401
+        """Allocate (or reuse) a parameter placeholder for ``value``."""
+        key = (value, dim_type)
+        if key in self._binds:
+            return self.strategy.placeholder(self._binds[key], dim_type)
+        name = f"p{len(self.params)}"
+        self.params[name] = value
+        self._binds[key] = name
+        return self.strategy.placeholder(name, dim_type)
+
+    def resolve_in_ctx(self, sql: str) -> str:
+        """Apply ``{alias}`` / ``{ctx.X}`` substitution to a raw SQL fragment."""
+        return _resolve_sql(sql, self.cube_aliases, self.ctx)
+
+    def parse(self, sql: str) -> exp.Expression:
+        """Resolve + parse a SQL fragment in the env's dialect."""
+        return _parse_fragment(self.resolve_in_ctx(sql), self.dialect)
+
+    def _resolve_security_sql(self, cube: Cube, raw: str) -> str:
+        """Substitute ``{alias}`` and ``{ctx.X}`` in a ``security_sql``
+        fragment; ``{ctx.X}`` values bind as parameters so they never
+        appear as SQL literals."""
+        resolved = self.resolve_in_ctx(raw)
+
+        def _ctx_repl(m: re.Match[str]) -> str:
+            key = "ctx." + m.group(1)
+            if key not in self.ctx:
+                raise CompileError(
+                    f"Cube {cube.name!r} security_sql references "
+                    f"{{{key}}} but no {key!r} value was provided in "
+                    "compile context."
+                )
+            return self.bind(self.ctx[key], "string").sql(
+                dialect=self.dialect, normalize_functions=False
+            )
+
+        return _CTX_PLACEHOLDER_RE.sub(_ctx_repl, resolved)
+
+    def wrap_for_tenancy(self, cube: Cube, source: exp.Expression) -> exp.Expression:
+        """Wrap a cube's FROM source in an isolation subquery.
+
+        Tenancy + ``security_sql`` + ScopeFn-injected predicates AND
+        compose *inside* the alias the outer query sees so a malformed
+        outer ``OR`` can't smuggle in rows the policy excludes."""
+        predicates: list[exp.Expression] = []
+
+        if cube.tenancy == "discriminator":
+            if "tenant" not in self.ctx:
+                raise CompileError(
+                    f"Cube {cube.name!r} declares tenancy='discriminator' but "
+                    "no 'tenant' value was provided in compile context. "
+                    "Pass context={'tenant': <tenant_id>, ...}."
+                )
+            assert cube.tenancy_column is not None
+            predicates.append(
+                exp.EQ(
+                    this=exp.column(cube.tenancy_column, table=cube.alias),
+                    expression=self.bind(self.ctx["tenant"], "string"),
+                )
+            )
+
+        if cube.security_sql:
+            resolved_sql = self._resolve_security_sql(cube, cube.security_sql)
+            predicates.append(_parse_fragment(resolved_sql, self.dialect))
+
+        # ScopeFn-injected row-level predicate. Only fires when both
+        # ``viewer`` and ``cube.scope`` are set and a function is
+        # registered under that scope name.
+        if self.viewer is not None and cube.scope is not None and self.scope_fns is not None:
+            fn = self.scope_fns.get(cube.scope)
+            if fn is not None:
+                pred: ScopePredicate | None = fn(cube, self.viewer)
+                if pred is not None:
+                    missing = [k for k in pred.ctx_keys if k not in self.ctx]
+                    if missing:
+                        raise CompileError(
+                            f"Cube {cube.name!r} scope {cube.scope!r} declares "
+                            f"ctx_keys={pred.ctx_keys!r} but the following are not in "
+                            f"the resolution context: {missing}."
+                        )
+                    predicates.append(
+                        _parse_fragment(self._resolve_security_sql(cube, pred.sql), self.dialect)
+                    )
+
+        if not predicates:
+            return source
+
+        where_expr = predicates[0]
+        for p in predicates[1:]:
+            where_expr = exp.And(this=where_expr, expression=p)
+
+        inner = exp.Select().select(exp.Star()).from_(source).where(where_expr)
+        return exp.Subquery(
+            this=inner,
+            alias=exp.TableAlias(this=exp.to_identifier(cube.alias)),
+        )
+
+    def build_measure_expr(self, cube_owner: Cube, m: Measure) -> exp.Expression:
+        """Compose the SELECT expression for one measure.
+
+        Ratio measures recurse into a Div over their numerator /
+        denominator (resolved by name on the same cube); everything
+        else flows through ``_agg_node`` with an optional ``FILTER``
+        wrapper for filtered measures."""
+        if m.agg == "ratio":
+            assert m.numerator is not None and m.denominator is not None
+            num_m = next(
+                (x for x in cube_owner.measures if x.name == m.numerator),
+                None,
+            )
+            if num_m is None:
+                raise CompileError(
+                    f"Measure {cube_owner.name}.{m.name}: ratio numerator "
+                    f"{m.numerator!r} is not a measure on cube {cube_owner.name!r}."
+                )
+            den_m = next(
+                (x for x in cube_owner.measures if x.name == m.denominator),
+                None,
+            )
+            if den_m is None:
+                raise CompileError(
+                    f"Measure {cube_owner.name}.{m.name}: ratio denominator "
+                    f"{m.denominator!r} is not a measure on cube {cube_owner.name!r}."
+                )
+            if num_m.agg == "ratio" or den_m.agg == "ratio":
+                raise CompileError(
+                    f"Measure {cube_owner.name}.{m.name}: ratio measures "
+                    "cannot reference another ratio measure. Use leaf "
+                    "(sum / count / avg / ...) measures as numerator "
+                    "and denominator."
+                )
+            num_node = self.build_measure_expr(cube_owner, num_m)
+            den_node = self.build_measure_expr(cube_owner, den_m)
+            return exp.Div(
+                this=num_node,
+                expression=exp.Anonymous(
+                    this="NULLIF",
+                    expressions=[den_node, exp.Literal.number(0)],
+                ),
+            )
+
+        if m.sql == "*":
+            inner: exp.Expression = exp.Star()
+        else:
+            inner = self.parse(m.sql)
+        agg = _agg_node(m, inner)
+        if m.filter:
+            agg = exp.Filter(
+                this=agg,
+                expression=exp.Where(this=self.parse(m.filter)),
+            )
+        return agg
+
+    def build_inner(self, time_range: tuple[str, str]) -> exp.Select:
+        """Build the inner aggregating Select.
+
+        Filter values bind via ``self.bind`` so they dedupe across the
+        current / prior compare-mode CTEs; only the per-CTE time-window
+        binds differ."""
+        q = self.q
+        sel = exp.Select()
+        sel = sel.from_(
+            self.wrap_for_tenancy(
+                self.root,
+                self.strategy.emit_source(self.root, self.catalog, self.resolve_in_ctx),
+            )
+        )
+        for _, tgt, j in self.join_edges:
+            tgt_strategy = strategy_for(tgt.backend, self.strategies)
+            target_source = self.wrap_for_tenancy(
+                tgt, tgt_strategy.emit_source(tgt, self.catalog, self.resolve_in_ctx)
+            )
+            sel = sel.join(target_source, on=self.parse(j.on), join_type="left")
+
+        for (_cube, dim), col_name in zip(self.dim_fields, self.dim_col_names, strict=True):
+            sel = sel.select(exp.alias_(self.parse(dim.sql), col_name))
+
+        if self.has_time_breakdown:
+            assert self.time_dim is not None and q.time_dimension is not None
+            granularity = q.time_dimension.granularity
+            assert granularity is not None
+            assert self.time_col_name is not None
+            trunc_node = self.strategy.trunc(granularity, self.parse(self.time_dim.sql))
+            sel = sel.select(exp.alias_(trunc_node, self.time_col_name))
+
+        for (cube_owner, m), col_name in zip(
+            self.measure_fields, self.measure_col_names, strict=True
+        ):
+            sel = sel.select(exp.alias_(self.build_measure_expr(cube_owner, m), col_name))
+
+        if not q.ungrouped and not self.measure_fields:
+            sel.set("distinct", exp.Distinct())
+
+        where_terms: list[exp.Expression] = []
+        for cube_w in self.cubes_in_from:
+            if cube_w.base_predicate and cube_w.backend is not Backend.META:
+                where_terms.append(self.parse(cube_w.base_predicate))
+
+        for f, _cube, fld in self.filter_resolutions:
+            fld_node = self.parse(fld.sql)
+            if isinstance(fld, Dimension):
+                fld_type = fld.type
+            elif isinstance(fld, TimeDimension):
+                fld_type = "time"
+            else:
+                fld_type = "string"
+            where_terms.append(_filter_node(f, fld_node, fld_type, self.strategy, self.bind))
+
+        for _seg_cube, segment in self.segment_resolutions:
+            where_terms.append(self.parse(segment.sql))
+
+        if q.where is not None:
+
+            def _leaf_to_node(leaf: Filter) -> exp.Expression:
+                _cube, fld = self.where_leaf_resolutions[id(leaf)]
+                fld_node = self.parse(fld.sql)
+                if isinstance(fld, Dimension):
+                    fld_type = fld.type
+                elif isinstance(fld, TimeDimension):
+                    fld_type = "time"
+                else:
+                    fld_type = "string"
+                return _filter_node(leaf, fld_node, fld_type, self.strategy, self.bind)
+
+            where_terms.append(_compile_where_tree(q.where, _leaf_to_node))
+
+        if self.time_dim is not None:
+            where_terms.append(
+                exp.GTE(
+                    this=self.parse(self.time_dim.sql),
+                    expression=self.bind(time_range[0], "time"),
+                )
+            )
+            where_terms.append(
+                exp.LT(
+                    this=self.parse(self.time_dim.sql),
+                    expression=self.bind(time_range[1], "time"),
+                )
+            )
+
+        if where_terms:
+            sel = sel.where(*where_terms)
+
+        if not q.ungrouped and self.measure_fields:
+            for i, (_cube, dim) in enumerate(self.dim_fields):
+                if self.group_by_alias:
+                    sel = sel.group_by(exp.column(self.dim_col_names[i]))
+                else:
+                    sel = sel.group_by(self.parse(dim.sql))
+            if self.has_time_breakdown:
+                assert self.time_dim is not None and q.time_dimension is not None
+                granularity = q.time_dimension.granularity
+                assert granularity is not None
+                assert self.time_col_name is not None
+                if self.group_by_alias:
+                    sel = sel.group_by(exp.column(self.time_col_name))
+                else:
+                    sel = sel.group_by(
+                        self.strategy.trunc(granularity, self.parse(self.time_dim.sql))
+                    )
+
+        return sel
+
+    def emit(self) -> Compiled:
+        """Dispatch to the compare or non-compare emission helper."""
+        if self.q.compare is not None:
+            return _emit_compare_query(self)
+        return _emit_simple_query(self)
+
+
+def _emit_compare_query(env: _CompileEnv) -> Compiled:
     """Compose the current/prior FULL OUTER JOIN compare-mode output.
 
     Two CTEs (``current`` / ``prior``) wrap the same inner select with
@@ -780,6 +1140,11 @@ def _emit_compare_query(
     grouping column. ``pct_change`` guards divide-by-zero via
     ``CASE WHEN prior > 0 THEN ... END``.
     """
+    q = env.q
+    dim_col_names = env.dim_col_names
+    measure_col_names = env.measure_col_names
+    time_col_name = env.time_col_name
+
     assert q.compare is not None and q.time_dimension is not None
     current_range = q.time_dimension.range
     if q.compare.mode == "previous_period":
@@ -794,8 +1159,8 @@ def _emit_compare_query(
         assert q.compare.range is not None
         prior_range = q.compare.range
 
-    current_inner = build_inner(current_range)
-    prior_inner = build_inner(prior_range)
+    current_inner = env.build_inner(current_range)
+    prior_inner = env.build_inner(prior_range)
 
     outer = exp.Select()
     outer = outer.with_("current", current_inner)
@@ -816,7 +1181,7 @@ def _emit_compare_query(
             )
         )
         outer_columns.append(col_name)
-    if has_time_breakdown:
+    if env.has_time_breakdown:
         assert time_col_name is not None
         outer = outer.select(
             exp.alias_(
@@ -921,69 +1286,52 @@ def _emit_compare_query(
     if q.offset is not None and q.offset > 0:
         outer = outer.offset(int(q.offset))
 
-    outer = _apply_with_clause(outer, _collect_hoisted_ctes(touched, resolve_in_ctx), backend)
-    sql = outer.sql(dialect=dialect, pretty=False, normalize_functions=False)
+    outer = _apply_with_clause(
+        outer, _collect_hoisted_ctes(env.touched, env.resolve_in_ctx), env.backend
+    )
+    sql = outer.sql(dialect=env.dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
         outer_columns,
-        dim_fields,
+        env.dim_fields,
         dim_col_names,
-        measure_fields,
+        env.measure_fields,
         measure_col_names,
-        time_dim,
+        env.time_dim,
         time_col_name,
         is_compare=True,
     )
     return Compiled(
-        backend=backend,
+        backend=env.backend,
         sql=sql,
-        params=params,
+        params=env.params,
         columns=outer_columns,
         column_meta=cm,
-        touched_cube_names=[c.name for c in touched],
-        derived_sources=_collect_derived_sources(touched, resolve_in_ctx),
+        touched_cube_names=[c.name for c in env.touched],
+        derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
     )
 
 
-def _emit_simple_query(
-    q: SemanticQuery,
-    *,
-    catalog: dict[str, Cube],
-    backend: Backend,
-    dialect: str,
-    strategy: BackendStrategy,
-    params: dict[str, Any],
-    bind: Callable[[Any, str], exp.Placeholder],
-    parse: Callable[[str], exp.Expression],
-    build_inner: Callable[[tuple[str, str]], exp.Select],
-    build_measure_expr: Callable[[Cube, Measure], exp.Expression],
-    resolve_in_ctx: Callable[[str], str],
-    having_alias: bool,
-    touched: list[Cube],
-    dim_fields: list[tuple[Cube, Dimension]],
-    measure_fields: list[tuple[Cube, Measure]],
-    dim_col_names: list[str],
-    measure_col_names: list[str],
-    time_dim: TimeDimension | None,
-    time_col_name: str | None,
-    has_time_breakdown: bool,
-) -> Compiled:
+def _emit_simple_query(env: _CompileEnv) -> Compiled:
     """Compose the single-SELECT (non-compare) output.
 
-    Builds the inner aggregating SELECT via ``build_inner``, applies
-    ``HAVING`` against a measure alias map, optionally wraps in a
-    time-spine LEFT JOIN for ``fill_nulls_with``, then layers
+    Builds the inner aggregating SELECT via ``env.build_inner``,
+    applies ``HAVING`` against a measure alias map, optionally wraps
+    in a time-spine LEFT JOIN for ``fill_nulls_with``, then layers
     ``ORDER BY`` / ``LIMIT`` / ``OFFSET`` / hoisted CTEs.
     """
-    assert q.time_dimension is None or time_dim is not None
+    q = env.q
+    dim_col_names = env.dim_col_names
+    measure_col_names = env.measure_col_names
+    time_col_name = env.time_col_name
+
+    assert q.time_dimension is None or env.time_dim is not None
     time_range_for_query: tuple[str, str] | None = (
         q.time_dimension.range if q.time_dimension is not None else None
     )
-    # If there's no time_dim, build_inner skips the time-window WHERE;
-    # the explicit tuple is only consulted when ``time_dim`` is set.
-    select_node = build_inner(time_range_for_query or ("", ""))
+    select_node = env.build_inner(time_range_for_query or ("", ""))
 
     columns: list[str] = list(dim_col_names)
-    if has_time_breakdown and time_col_name is not None:
+    if env.has_time_breakdown and time_col_name is not None:
         columns.append(time_col_name)
     columns.extend(measure_col_names)
 
@@ -993,13 +1341,12 @@ def _emit_simple_query(
     # Map every measure ref (bare and qualified) to its agg expression so
     # HAVING / ORDER BY can address them without re-resolving.
     measure_alias_map: dict[str, exp.Expression] = {}
-    for (cube_owner, m), col_name in zip(measure_fields, measure_col_names, strict=True):
-        agg_node = build_measure_expr(cube_owner, m)
+    for (cube_owner, m), col_name in zip(env.measure_fields, measure_col_names, strict=True):
+        agg_node = env.build_measure_expr(cube_owner, m)
         measure_alias_map[m.name] = agg_node
         if col_name != m.name:
             measure_alias_map[col_name] = agg_node
 
-    # HAVING — bare or qualified measure reference.
     for hf in q.having:
         lookup_name = hf.dimension
         if lookup_name not in measure_alias_map and "." in lookup_name:
@@ -1009,11 +1356,13 @@ def _emit_simple_query(
                 f"HAVING references {hf.dimension!r}, which is not a measure in this query."
             )
         target_node: exp.Expression
-        if having_alias:
+        if env.having_alias:
             target_node = exp.column(lookup_name)
         else:
             target_node = measure_alias_map[lookup_name].copy()
-        select_node = select_node.having(_filter_node(hf, target_node, "number", strategy, bind))
+        select_node = select_node.having(
+            _filter_node(hf, target_node, "number", env.strategy, env.bind)
+        )
 
     # Time spine — wrap the aggregation in a CTE and LEFT JOIN a
     # spine CTE so every bucket in [start, end) gets a row.
@@ -1021,18 +1370,18 @@ def _emit_simple_query(
         q.time_dimension.fill_nulls_with if q.time_dimension is not None else None
     )
     if fill_value is not None:
-        if not has_time_breakdown:
+        if not env.has_time_breakdown:
             raise CompileError(
                 "TimeWindow.fill_nulls_with requires a granularity on the "
                 "time_dimension — the spine has nothing to step over otherwise."
             )
-        if not measure_fields:
+        if not env.measure_fields:
             raise CompileError(
                 "TimeWindow.fill_nulls_with has no effect without measures — "
                 "the COALESCE wraps a measure value, and a query with no "
                 "measures has nothing to fill."
             )
-        if dim_fields:
+        if env.dim_fields:
             raise CompileError(
                 "TimeWindow.fill_nulls_with does not yet support non-time "
                 "dimensions (Phase B: spine × dimension cartesian fill). "
@@ -1047,9 +1396,9 @@ def _emit_simple_query(
         assert time_col_name is not None
         granularity_val = q.time_dimension.granularity if q.time_dimension is not None else None
         assert granularity_val is not None
-        start_ph = bind(time_range_for_query[0], "time")
-        end_ph = bind(time_range_for_query[1], "time")
-        spine_inner = strategy.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
+        start_ph = env.bind(time_range_for_query[0], "time")
+        end_ph = env.bind(time_range_for_query[1], "time")
+        spine_inner = env.strategy.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
 
         outer = exp.Select()
         outer = outer.with_("agg", select_node)
@@ -1079,19 +1428,18 @@ def _emit_simple_query(
         )
         select_node = outer
 
-    # ORDER BY.
     for ref, direction in q.order:
         if ref in measure_alias_map or ref in columns:
             order_target: exp.Expression = exp.column(ref)
         else:
             try:
-                _, fld = _resolve_field(ref, catalog)
+                _, fld = _resolve_field(ref, env.catalog)
             except CompileError as exc:
                 raise CompileError(
                     f"ORDER BY {ref!r}: must reference an output column or "
                     f"a known cube.field. ({exc})"
                 ) from exc
-            order_target = parse(fld.sql)
+            order_target = env.parse(fld.sql)
         select_node = select_node.order_by(
             exp.Ordered(this=order_target, desc=(direction == "desc"))
         )
@@ -1102,27 +1450,29 @@ def _emit_simple_query(
         select_node = select_node.offset(int(q.offset))
 
     select_node = _apply_with_clause(
-        select_node, _collect_hoisted_ctes(touched, resolve_in_ctx), backend
+        select_node,
+        _collect_hoisted_ctes(env.touched, env.resolve_in_ctx),
+        env.backend,
     )
-    sql = select_node.sql(dialect=dialect, pretty=False, normalize_functions=False)
+    sql = select_node.sql(dialect=env.dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
         columns,
-        dim_fields,
+        env.dim_fields,
         dim_col_names,
-        measure_fields,
+        env.measure_fields,
         measure_col_names,
-        time_dim,
+        env.time_dim,
         time_col_name,
         is_compare=False,
     )
     return Compiled(
-        backend=backend,
+        backend=env.backend,
         sql=sql,
-        params=params,
+        params=env.params,
         columns=columns,
         column_meta=cm,
-        touched_cube_names=[c.name for c in touched],
-        derived_sources=_collect_derived_sources(touched, resolve_in_ctx),
+        touched_cube_names=[c.name for c in env.touched],
+        derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
     )
 
 
@@ -1194,372 +1544,20 @@ def compile_query(
         function with ``(cube, viewer)`` and AND-injects the returned
         ``ScopePredicate`` inside the cube's isolation subquery.
     """
-    _validate_query_invariants(q, allow_unbounded_ungrouped=_allow_unbounded_ungrouped)
-
-    ctx = dict(context or {})
-    if viewer is not None:
-        # Auto-flatten the viewer's identity into the context so
-        # ``security_sql`` fragments declaring ``{ctx.viewer_id}`` resolve
-        # without callers having to wire it manually. Explicit caller-
-        # supplied ``ctx.viewer_id`` wins (the caller knows best).
-        ctx.setdefault("ctx.viewer_id", viewer.viewer_id)
-
-    views_map: dict[str, View] = views or {}
-    resolved = _resolve_query_fields(q, catalog, views_map)
-    measure_fields = resolved.measure_fields
-    dim_fields = resolved.dim_fields
-    time_cube = resolved.time_cube
-    time_dim = resolved.time_dim
-    filter_resolutions = resolved.filter_resolutions
-    where_leaf_resolutions = resolved.where_leaf_resolutions
-    segment_resolutions = resolved.segment_resolutions
-    touched = resolved.touched
-
-    _check_viewer_authorization(touched, viewer, policy)
-    _check_required_filters(touched, q)
-
-    backend = _pick_single_backend(touched)
-    cubes_in_from, join_edges = _build_join_graph(touched, catalog)
-    root = cubes_in_from[0]
-
-    # 4. Aliases, strategy, bind closure.
-    cube_aliases: dict[str, str] = {c.name: c.alias for c in cubes_in_from}
-    strategy = strategy_for(backend, strategies)
-    dialect = dialect_for(backend)
-    params: dict[str, Any] = {}
-    # Memoize ``(value, dim_type)`` → placeholder so a filter value
-    # referenced in both the current and prior CTEs binds once and the
-    # same placeholder is reused — the database round-trip stays cheap
-    # and the planner's intent (one filter, one bound value) is preserved.
-    _binds: dict[tuple[Any, str], str] = {}
-
-    def bind(value: Any, dim_type: str) -> exp.Placeholder:  # noqa: ANN401
-        key = (value, dim_type)
-        if key in _binds:
-            return strategy.placeholder(_binds[key], dim_type)
-        name = f"p{len(params)}"
-        params[name] = value
-        _binds[key] = name
-        return strategy.placeholder(name, dim_type)
-
-    def resolve_in_ctx(sql: str) -> str:
-        return _resolve_sql(sql, cube_aliases, ctx)
-
-    def parse(sql: str) -> exp.Expression:
-        return _parse_fragment(resolve_in_ctx(sql), dialect)
-
-    def _resolve_security_sql(cube: Cube, raw: str) -> str:
-        """Substitute ``{alias}`` and ``{ctx.X}`` placeholders in a
-        ``security_sql`` fragment, binding ``{ctx.X}`` values as
-        parameters so they never appear as SQL literals."""
-        resolved = resolve_in_ctx(raw)
-
-        def _ctx_repl(m: re.Match[str]) -> str:
-            key = "ctx." + m.group(1)
-            if key not in ctx:
-                raise CompileError(
-                    f"Cube {cube.name!r} security_sql references "
-                    f"{{{key}}} but no {key!r} value was provided in "
-                    "compile context."
-                )
-            return bind(ctx[key], "string").sql(dialect=dialect, normalize_functions=False)
-
-        return _CTX_PLACEHOLDER_RE.sub(_ctx_repl, resolved)
-
-    def wrap_for_tenancy(cube: Cube, source: exp.Expression) -> exp.Expression:
-        """Wrap a cube's FROM source in an isolation subquery.
-
-        Two predicates may apply: tenancy (DISCRIMINATOR cubes) and
-        ``security_sql`` (caller-attached RLS). Both live *inside* the
-        alias the outer query sees so a malformed outer ``OR``
-        predicate can't smuggle in rows the policy excludes. The
-        predicates AND-compose. SCHEMA / NONE cubes with no
-        ``security_sql`` pass through unchanged."""
-        predicates: list[exp.Expression] = []
-
-        if cube.tenancy == "discriminator":
-            if "tenant" not in ctx:
-                raise CompileError(
-                    f"Cube {cube.name!r} declares tenancy='discriminator' but "
-                    "no 'tenant' value was provided in compile context. "
-                    "Pass context={'tenant': <tenant_id>, ...}."
-                )
-            assert cube.tenancy_column is not None
-            predicates.append(
-                exp.EQ(
-                    this=exp.column(cube.tenancy_column, table=cube.alias),
-                    expression=bind(ctx["tenant"], "string"),
-                )
-            )
-
-        if cube.security_sql:
-            resolved_sql = _resolve_security_sql(cube, cube.security_sql)
-            predicates.append(_parse_fragment(resolved_sql, dialect))
-
-        # ScopeFn-injected row-level predicate. Lives inside the alias
-        # subquery alongside tenancy + security_sql so an outer OR can't
-        # bypass it. Only fires when both ``viewer`` and ``cube.scope``
-        # are set and a function is registered.
-        if viewer is not None and cube.scope is not None and scope_fns is not None:
-            fn = scope_fns.get(cube.scope)
-            if fn is not None:
-                pred: ScopePredicate | None = fn(cube, viewer)
-                if pred is not None:
-                    missing = [k for k in pred.ctx_keys if k not in ctx]
-                    if missing:
-                        raise CompileError(
-                            f"Cube {cube.name!r} scope {cube.scope!r} declares "
-                            f"ctx_keys={pred.ctx_keys!r} but the following are not in "
-                            f"the resolution context: {missing}."
-                        )
-                    predicates.append(
-                        _parse_fragment(_resolve_security_sql(cube, pred.sql), dialect)
-                    )
-
-        if not predicates:
-            return source
-
-        where_expr = predicates[0]
-        for p in predicates[1:]:
-            where_expr = exp.And(this=where_expr, expression=p)
-
-        inner = exp.Select().select(exp.Star()).from_(source).where(where_expr)
-        return exp.Subquery(
-            this=inner,
-            alias=exp.TableAlias(this=exp.to_identifier(cube.alias)),
-        )
-
-    # 5. Column name allocation (collision-prefix shared across compare CTEs).
-    proposed_names: list[str] = []
-    proposed_names.extend(d.name for _, d in dim_fields)
-    proposed_names.extend(m.name for _, m in measure_fields)
-    name_counts = Counter(proposed_names)
-    collisions = {n for n, c in name_counts.items() if c > 1}
-
-    def col_name_for(cube: Cube, field_name: str) -> str:
-        return f"{cube.name}_{field_name}" if field_name in collisions else field_name
-
-    dim_col_names: list[str] = [col_name_for(c, d.name) for c, d in dim_fields]
-    measure_col_names: list[str] = [col_name_for(c, m.name) for c, m in measure_fields]
-
-    has_time_breakdown = (
-        time_cube is not None
-        and time_dim is not None
-        and q.time_dimension is not None
-        and q.time_dimension.granularity is not None
-    )
-    time_col_name: str | None = None
-    if has_time_breakdown:
-        assert time_dim is not None and q.time_dimension is not None
-        granularity = q.time_dimension.granularity
-        assert granularity is not None
-        time_col_name = f"{time_dim.name}_{granularity}"
-
-    def build_measure_expr(cube_owner: Cube, m: Measure) -> exp.Expression:
-        """Compose the SELECT expression for one measure.
-
-        Routes ratio measures to a recursive division over their
-        numerator / denominator (resolved by name on the same cube);
-        everything else flows through ``_agg_node`` with an optional
-        ``FILTER (WHERE ...)`` wrapper for filtered measures.
-
-        Lifted outside ``build_inner`` so the HAVING / ORDER-BY alias
-        map below can reuse the same composition path."""
-        if m.agg == "ratio":
-            assert m.numerator is not None and m.denominator is not None
-            num_m = next(
-                (x for x in cube_owner.measures if x.name == m.numerator),
-                None,
-            )
-            if num_m is None:
-                raise CompileError(
-                    f"Measure {cube_owner.name}.{m.name}: ratio numerator "
-                    f"{m.numerator!r} is not a measure on cube {cube_owner.name!r}."
-                )
-            den_m = next(
-                (x for x in cube_owner.measures if x.name == m.denominator),
-                None,
-            )
-            if den_m is None:
-                raise CompileError(
-                    f"Measure {cube_owner.name}.{m.name}: ratio denominator "
-                    f"{m.denominator!r} is not a measure on cube {cube_owner.name!r}."
-                )
-            if num_m.agg == "ratio" or den_m.agg == "ratio":
-                raise CompileError(
-                    f"Measure {cube_owner.name}.{m.name}: ratio measures "
-                    "cannot reference another ratio measure. Use leaf "
-                    "(sum / count / avg / ...) measures as numerator "
-                    "and denominator."
-                )
-            num_node = build_measure_expr(cube_owner, num_m)
-            den_node = build_measure_expr(cube_owner, den_m)
-            # Div(num, NULLIF(den, 0)) — NULLIF returns NULL on zero
-            # denominator, propagating to a NULL result rather than
-            # raising. Matches the pct_change convention in the
-            # compare path.
-            return exp.Div(
-                this=num_node,
-                expression=exp.Anonymous(
-                    this="NULLIF",
-                    expressions=[den_node, exp.Literal.number(0)],
-                ),
-            )
-
-        if m.sql == "*":
-            inner: exp.Expression = exp.Star()
-        else:
-            inner = parse(m.sql)
-        agg = _agg_node(m, inner)
-        if m.filter:
-            # ``COUNT(*) FILTER (WHERE <pred>)`` — sqlglot renders
-            # natively on PG / CH / DuckDB / BigQuery and transpiles
-            # to ``COUNT(IFF(...))`` on Snowflake.
-            agg = exp.Filter(
-                this=agg,
-                expression=exp.Where(this=parse(m.filter)),
-            )
-        return agg
-
-    def build_inner(time_range: tuple[str, str]) -> exp.Select:
-        """Build the inner Select used as a query body or compare CTE.
-
-        Filter values bind via the shared closure so they're deduplicated
-        across the current/prior CTEs in compare mode; only the time
-        window bindings differ per call."""
-        sel = exp.Select()
-        sel = sel.from_(wrap_for_tenancy(root, strategy.emit_source(root, catalog, resolve_in_ctx)))
-        for _, tgt, j in join_edges:
-            tgt_strategy = strategy_for(tgt.backend, strategies)
-            target_source = wrap_for_tenancy(
-                tgt, tgt_strategy.emit_source(tgt, catalog, resolve_in_ctx)
-            )
-            sel = sel.join(target_source, on=parse(j.on), join_type="left")
-
-        for (_cube, dim), col_name in zip(dim_fields, dim_col_names, strict=True):
-            sel = sel.select(exp.alias_(parse(dim.sql), col_name))
-
-        if has_time_breakdown:
-            assert time_dim is not None and q.time_dimension is not None
-            granularity = q.time_dimension.granularity
-            assert granularity is not None
-            assert time_col_name is not None
-            trunc_node = strategy.trunc(granularity, parse(time_dim.sql))
-            sel = sel.select(exp.alias_(trunc_node, time_col_name))
-
-        for (cube_owner, m), col_name in zip(measure_fields, measure_col_names, strict=True):
-            sel = sel.select(exp.alias_(build_measure_expr(cube_owner, m), col_name))
-
-        if not q.ungrouped and not measure_fields:
-            sel.set("distinct", exp.Distinct())
-
-        where_terms: list[exp.Expression] = []
-        for cube_w in cubes_in_from:
-            if cube_w.base_predicate and cube_w.backend is not Backend.META:
-                where_terms.append(parse(cube_w.base_predicate))
-
-        for f, _cube, fld in filter_resolutions:
-            fld_node = parse(fld.sql)
-            if isinstance(fld, Dimension):
-                fld_type = fld.type
-            elif isinstance(fld, TimeDimension):
-                fld_type = "time"
-            else:
-                fld_type = "string"
-            where_terms.append(_filter_node(f, fld_node, fld_type, strategy, bind))
-
-        # Segment predicates AND-compose with filters. Same resolution
-        # path as ``Join.on`` / ``base_predicate`` SQL fragments.
-        for _seg_cube, segment in segment_resolutions:
-            where_terms.append(parse(segment.sql))
-
-        # Boolean predicate tree — ANDs with the flat ``filters`` and
-        # segments. Leaves resolve through the shared bind closure so
-        # values get parameter-bound the same as flat-filter values.
-        if q.where is not None:
-
-            def _leaf_to_node(leaf: Filter) -> exp.Expression:
-                _cube, fld = where_leaf_resolutions[id(leaf)]
-                fld_node = parse(fld.sql)
-                if isinstance(fld, Dimension):
-                    fld_type = fld.type
-                elif isinstance(fld, TimeDimension):
-                    fld_type = "time"
-                else:
-                    fld_type = "string"
-                return _filter_node(leaf, fld_node, fld_type, strategy, bind)
-
-            where_terms.append(_compile_where_tree(q.where, _leaf_to_node))
-
-        if time_dim is not None:
-            where_terms.append(
-                exp.GTE(this=parse(time_dim.sql), expression=bind(time_range[0], "time"))
-            )
-            where_terms.append(
-                exp.LT(this=parse(time_dim.sql), expression=bind(time_range[1], "time"))
-            )
-
-        if where_terms:
-            sel = sel.where(*where_terms)
-
-        if not q.ungrouped and measure_fields:
-            for i, (_cube, dim) in enumerate(dim_fields):
-                if group_by_alias:
-                    sel = sel.group_by(exp.column(dim_col_names[i]))
-                else:
-                    sel = sel.group_by(parse(dim.sql))
-            if has_time_breakdown:
-                assert time_dim is not None and q.time_dimension is not None
-                granularity = q.time_dimension.granularity
-                assert granularity is not None
-                assert time_col_name is not None
-                if group_by_alias:
-                    sel = sel.group_by(exp.column(time_col_name))
-                else:
-                    sel = sel.group_by(strategy.trunc(granularity, parse(time_dim.sql)))
-
-        return sel
-
-    if q.compare is not None:
-        return _emit_compare_query(
-            q,
-            backend=backend,
-            dialect=dialect,
-            params=params,
-            build_inner=build_inner,
-            resolve_in_ctx=resolve_in_ctx,
-            touched=touched,
-            dim_fields=dim_fields,
-            measure_fields=measure_fields,
-            dim_col_names=dim_col_names,
-            measure_col_names=measure_col_names,
-            time_dim=time_dim,
-            time_col_name=time_col_name,
-            has_time_breakdown=has_time_breakdown,
-        )
-
-    return _emit_simple_query(
+    env = _CompileEnv(
         q,
-        catalog=catalog,
-        backend=backend,
-        dialect=dialect,
-        strategy=strategy,
-        params=params,
-        bind=bind,
-        parse=parse,
-        build_inner=build_inner,
-        build_measure_expr=build_measure_expr,
-        resolve_in_ctx=resolve_in_ctx,
+        catalog,
+        context=context,
+        group_by_alias=group_by_alias,
         having_alias=having_alias,
-        touched=touched,
-        dim_fields=dim_fields,
-        measure_fields=measure_fields,
-        dim_col_names=dim_col_names,
-        measure_col_names=measure_col_names,
-        time_dim=time_dim,
-        time_col_name=time_col_name,
-        has_time_breakdown=has_time_breakdown,
+        strategies=strategies,
+        views=views,
+        viewer=viewer,
+        policy=policy,
+        scope_fns=scope_fns,
+        allow_unbounded_ungrouped=_allow_unbounded_ungrouped,
     )
+    return env.emit()
 
 
 __all__ = [
