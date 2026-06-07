@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from semql.catalog import Catalog
-from semql.model import Cube, Join
+from semql.introspect import iter_cubes, iter_fields, iter_joins
+from semql.model import Cube, Dimension, Join, Measure, TimeDimension
 
 DbValidationCode = Literal[
     "missing_table",
@@ -176,61 +177,39 @@ def _validate_cube(
         )
         return errors
 
-    for dim in cube.dimensions:
-        fragment = _resolve_placeholders(dim.sql, lookup)
-        ok, detail = _probe(connection, f"SELECT {fragment} FROM {table} AS {alias} LIMIT 0")
-        if not ok:
-            errors.append(
-                DbValidationError(
-                    code="missing_column",
-                    cube=cube.name,
-                    field=dim.name,
-                    message=(
-                        f"Cube {cube.name!r}, dimension {dim.name!r}: SQL "
-                        f"fragment {dim.sql!r} did not execute against the table."
-                    ),
-                    detail=detail,
-                )
-            )
-
-    for td in cube.time_dimensions:
-        fragment = _resolve_placeholders(td.sql, lookup)
-        ok, detail = _probe(connection, f"SELECT {fragment} FROM {table} AS {alias} LIMIT 0")
-        if not ok:
-            errors.append(
-                DbValidationError(
-                    code="missing_column",
-                    cube=cube.name,
-                    field=td.name,
-                    message=(
-                        f"Cube {cube.name!r}, time_dimension {td.name!r}: SQL "
-                        f"fragment {td.sql!r} did not execute against the table."
-                    ),
-                    detail=detail,
-                )
-            )
-
-    for m in cube.measures:
-        # ratio measures reference *other* measures by name — there's
-        # no raw SQL fragment to probe. The recursive measure references
-        # already get validated when we probe their underlying SQL.
-        if m.agg == "ratio":
+    # Walk every addressable field on the cube and probe its SQL
+    # fragment. ``iter_fields`` yields measures, dimensions, time
+    # dimensions, segments — we skip segments here (their fragments
+    # are predicates, not projections, and probe via base_predicate's
+    # path if needed). Ratio measures and ``count(*)`` are also
+    # skipped: ratio has no fragment of its own, ``count(*)`` is
+    # covered by the table probe.
+    for field in iter_fields(cube):
+        if isinstance(field, Measure):
+            if field.agg == "ratio":
+                continue
+            if field.agg == "count" and field.sql.strip() == "*":
+                continue
+            kind = "measure"
+        elif isinstance(field, TimeDimension):
+            kind = "time_dimension"
+        elif isinstance(field, Dimension):
+            kind = "dimension"
+        else:
+            # Segment — predicate, not projection; covered by
+            # base_predicate semantics. No fragment-as-SELECT probe.
             continue
-        # ``count`` over ``*`` is universal — skip; the table probe
-        # already covered it.
-        if m.agg == "count" and m.sql.strip() == "*":
-            continue
-        fragment = _resolve_placeholders(m.sql, lookup)
+        fragment = _resolve_placeholders(field.sql, lookup)
         ok, detail = _probe(connection, f"SELECT {fragment} FROM {table} AS {alias} LIMIT 0")
         if not ok:
             errors.append(
                 DbValidationError(
                     code="missing_column",
                     cube=cube.name,
-                    field=m.name,
+                    field=field.name,
                     message=(
-                        f"Cube {cube.name!r}, measure {m.name!r}: SQL "
-                        f"fragment {m.sql!r} did not execute against the table."
+                        f"Cube {cube.name!r}, {kind} {field.name!r}: SQL "
+                        f"fragment {field.sql!r} did not execute against the table."
                     ),
                     detail=detail,
                 )
@@ -319,24 +298,13 @@ def validate_against_db(
     """
     ctx = context or {}
     errors: list[DbValidationError] = []
-    real_cubes: list[Cube] = []
-    for cube in catalog:
-        if cube.backend.value == "meta":
-            continue
-        real_cubes.append(cube)
+    # ``iter_cubes`` skips META reflection cubes by default — they
+    # live in-memory and aren't real database tables.
+    for cube in iter_cubes(catalog):
         errors.extend(_validate_required_filters(cube))
         errors.extend(_validate_cube(cube, connection, ctx))
-
-    by_name = {c.name: c for c in real_cubes}
-    for cube in real_cubes:
-        for join in cube.joins:
-            target = by_name.get(join.to)
-            if target is None:
-                # Catalog construction already rejects this, but stay
-                # defensive — the caller could have edited the catalog.
-                continue
-            errors.extend(_validate_join(cube, join, target, connection, ctx))
-
+    for source, join, target in iter_joins(catalog):
+        errors.extend(_validate_join(source, join, target, connection, ctx))
     return errors
 
 

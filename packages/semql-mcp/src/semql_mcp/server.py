@@ -47,7 +47,7 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from semql import Catalog
-from semql.model import Backend, Cube
+from semql.model import Cube
 from semql.spec import Filter, SemanticQuery, TimeWindow
 from semql.validate import ValidationError
 from semql.validate import validate as validate_query
@@ -202,13 +202,11 @@ class MCPServer:
         fields. Hidden cubes (``expose_in_prompt=False``) and META
         reflection cubes are skipped — multi-cube and introspection
         queries go through ``query_semantic``."""
+        from semql import iter_cubes
+
         catalog = self.catalog
         executor = self.executor
-        for cube in catalog.as_dict().values():
-            if not cube.expose_in_prompt:
-                continue
-            if cube.backend is Backend.META:
-                continue
+        for cube in iter_cubes(catalog, only_exposed=True):
             self.mcp.add_tool(_make_query_cube_tool(cube, catalog, executor))
 
     def run(self, transport: Transport = "stdio", **kwargs: Any) -> None:  # noqa: ANN401

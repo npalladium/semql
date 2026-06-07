@@ -1,26 +1,36 @@
-"""Reflection cubes — expose the catalogue itself as queryable cubes.
+"""Catalogue introspection — two complementary surfaces.
 
-The semantic layer's catalogue is just Python data. With three thin
-`Backend.META` cubes we can ask "list cubes by backend", "which
-measures are seconds-typed", "which dimensions return strings" as
-ordinary `SemanticQuery` inputs — same spec, same compiler, same
-output shape.
+**SQL surface** (``META_CUBES`` and friends): the catalogue itself as
+queryable ``Backend.META`` cubes. ``_emit_cube_source`` in ``compile.py``
+materialises these as ``VALUES`` literals so a planner can ask
+"which measures are seconds-typed?" via an ordinary ``SemanticQuery``.
 
-`_emit_cube_source` in `compile.py` dispatches META cubes here;
-we materialise the catalogue snapshot as a SQL VALUES literal at
-compile time. The result is portable VALUES syntax with no tenant
-tables.
+**Python surface** (``iter_cubes``, ``iter_fields``, ``iter_joins``,
+``resolve_field``): walk the catalogue from Python. Every downstream
+tool (prompt rendering, MCP exposure, ER diagrams, live-DB validation)
+needs to filter META cubes, honour ``expose_in_prompt``, and iterate
+fields/joins. These primitives centralise the patterns so consumers
+share one definition of "what counts as a real cube" and "what fields
+live on this cube."
 
-Catalogue self-reference: `catalog_cubes` lists itself. The VALUES
-materialisation reads the catalogue dict at compile time, so adding
-or removing a cube changes future queries without code edits.
+Both surfaces reflect the same data; pick the one that matches the
+caller (SQL planner vs Python tool).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING
 
-from semql.model import Backend, Cube, Dimension, Measure
+from semql.model import Backend, BaseField, Cube, Dimension, Join, Measure, TimeDimension, View
+
+if TYPE_CHECKING:
+    pass
+
+CatalogLike = "Mapping[str, Cube] | Catalog | Iterable[Cube]"
+"""Anything we can iterate cubes from. Concrete types: ``Catalog``
+(iter yields cubes), ``dict[str, Cube]`` (values yield cubes), or any
+``Iterable[Cube]``. Use ``_iter_all_cubes`` to normalise."""
 
 
 def quote_literal(value: str | None) -> str:
@@ -163,11 +173,136 @@ CATALOG_DIMENSIONS = Cube(
 
 META_CUBES: list[Cube] = [CATALOG_CUBES, CATALOG_MEASURES, CATALOG_DIMENSIONS]
 
+
+# ---------------------------------------------------------------------------
+# Python introspection — iterate over a catalogue's shape
+# ---------------------------------------------------------------------------
+
+
+def _iter_all_cubes(catalog: object) -> Iterator[Cube]:
+    """Normalise any ``CatalogLike`` to an ``Iterator[Cube]``.
+
+    Accepts the public ``Catalog`` wrapper (iterable of Cube), a
+    ``dict[str, Cube]`` (compile_query's canonical shape), or any
+    ``Iterable[Cube]``. ``Mapping`` is checked first so a ``dict`` is
+    treated by its values, not its keys."""
+    if isinstance(catalog, Mapping):
+        yield from catalog.values()
+        return
+    # Catalog and arbitrary Iterable[Cube] both work via plain iteration.
+    yield from catalog  # type: ignore[misc]
+
+
+def iter_cubes(
+    catalog: object,
+    *,
+    include_meta: bool = False,
+    only_exposed: bool = False,
+) -> Iterator[Cube]:
+    """Yield cubes from a catalogue with consistent filtering.
+
+    ``include_meta=False`` (default) skips ``Backend.META`` reflection
+    cubes — the right default for any tool that walks real database
+    tables (validate-db, ERD, MCP). Set ``True`` to include them when
+    building prompt fragments that document reflection.
+
+    ``only_exposed=True`` skips cubes flagged ``expose_in_prompt=False`` —
+    the right default for LLM-facing surfaces (prompt rendering, MCP
+    auto-tools). Leave ``False`` to include hidden cubes (ERD,
+    validate-db).
+    """
+    for cube in _iter_all_cubes(catalog):
+        if not include_meta and cube.backend is Backend.META:
+            continue
+        if only_exposed and not cube.expose_in_prompt:
+            continue
+        yield cube
+
+
+def iter_fields(cube: Cube) -> Iterator[BaseField]:
+    """Yield every addressable field on a cube, in declaration order.
+
+    Order: measures, dimensions, time_dimensions, segments — the same
+    grouping the catalogue uses in its rendering and validation paths.
+    ``isinstance(f, Measure)`` etc. still narrows because ``BaseField``
+    is a structural supertype, not a discriminator."""
+    yield from cube.measures
+    yield from cube.dimensions
+    yield from cube.time_dimensions
+    yield from cube.segments
+
+
+def iter_joins(
+    catalog: object,
+    *,
+    include_meta: bool = False,
+) -> Iterator[tuple[Cube, Join, Cube]]:
+    """Yield ``(source, edge, target)`` triples for every Join in the catalog.
+
+    Targets are looked up by ``Join.to``; a Join whose target is missing
+    from the catalog is silently skipped (Catalog construction already
+    rejects this case, so missing targets in practice mean the caller
+    passed a hand-built dict; staying quiet is the friendliest behaviour).
+    """
+    cubes = list(iter_cubes(catalog, include_meta=include_meta))
+    by_name = {c.name: c for c in cubes}
+    for cube in cubes:
+        for join in cube.joins:
+            target = by_name.get(join.to)
+            if target is None:
+                continue
+            yield cube, join, target
+
+
+def resolve_field(
+    qualified: str,
+    catalog: object,
+    *,
+    views: Mapping[str, View] | None = None,
+) -> tuple[Cube, Measure | Dimension | TimeDimension]:
+    """Resolve a ``cube.field`` (or ``view.field``) reference.
+
+    Mirrors the compiler's resolution path so tools share one definition
+    of what's addressable. When ``views`` is provided and the qualifier
+    matches a view name, the returned ``Field`` carries the view's
+    *local* name (so SELECT aliases match the planner's reference).
+
+    Raises whatever the resolver raises on unknown identifiers — the
+    underlying ``ResolveError`` / ``UnknownIdentifierError`` hierarchy
+    from ``semql.errors``.
+    """
+    # Build the dict shape the underlying resolver wants. Local import
+    # keeps the module cycle-free at import time.
+    from semql._resolve import resolve_field as _resolve
+
+    by_name: dict[str, Cube] = {c.name: c for c in _iter_all_cubes(catalog)}
+    if views and "." in qualified:
+        prefix, local = qualified.split(".", 1)
+        if prefix in views:
+            view = views[prefix]
+            if local not in view.fields:
+                from semql.errors import ResolveError
+
+                raise ResolveError(
+                    f"View {prefix!r} has no field {local!r}. "
+                    f"Known fields on this view: {sorted(view.fields)}."
+                )
+            cube, fld = _resolve(view.fields[local], by_name)
+            # Carry the local name so callers building output columns
+            # match what the view exposes.
+            return cube, fld.model_copy(update={"name": local})
+    return _resolve(qualified, by_name)
+
+
 __all__ = [
     "CATALOG_CUBES",
-    "CATALOG_MEASURES",
     "CATALOG_DIMENSIONS",
+    "CATALOG_MEASURES",
     "META_CUBES",
     "build_meta_values",
+    "iter_cubes",
+    "iter_fields",
+    "iter_joins",
     "quote_literal",
+    "resolve_field",
 ]

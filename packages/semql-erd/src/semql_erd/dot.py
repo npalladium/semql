@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Literal
 
 from semql import Catalog
-from semql.model import Backend, Cube
+from semql.model import Cube
 
 RankDir = Literal["LR", "TB", "RL", "BT"]
 
@@ -96,14 +96,9 @@ def _cubes_in_scope(catalog: Catalog, *, only_exposed: bool) -> list[Cube]:
     the data model. ``only_exposed=True`` (default) also drops cubes
     flagged ``expose_in_prompt=False`` so the diagram matches what the
     planner sees."""
-    out: list[Cube] = []
-    for cube in catalog.as_dict().values():
-        if cube.backend is Backend.META:
-            continue
-        if only_exposed and not cube.expose_in_prompt:
-            continue
-        out.append(cube)
-    return out
+    from semql import iter_cubes
+
+    return list(iter_cubes(catalog, only_exposed=only_exposed))
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,10 @@ from semql.introspect import (
     CATALOG_DIMENSIONS,
     CATALOG_MEASURES,
     META_CUBES,
+    iter_cubes,
+    iter_fields,
+    iter_joins,
+    resolve_field,
 )
 from semql.model import (
     AggLiteral,
@@ -107,7 +111,11 @@ __all__ = [
     "compile_query",
     "decide_visualization",
     "is_safe_select",
+    "iter_cubes",
+    "iter_fields",
+    "iter_joins",
     "render_catalog_markdown",
     "render_catalogue_block",
+    "resolve_field",
     "validate",
 ]

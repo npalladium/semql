@@ -12,6 +12,7 @@ system prompt alongside role description, data-source context, etc.
 
 from __future__ import annotations
 
+from semql.introspect import iter_cubes
 from semql.model import Cube, View
 
 
@@ -20,7 +21,14 @@ def render_catalogue_block(
     *,
     only_exposed: bool = True,
 ) -> str:
-    cubes = [c for c in catalog.values() if c.expose_in_prompt or not only_exposed]
+    # ``include_meta=True`` here is deliberate: META reflection cubes
+    # historically appeared in the planner fragment when callers opted
+    # into introspection (downstream ``build_planner_prompt_fragment``
+    # gates the META section with ``include_introspection``, but the
+    # catalogue block itself stays inclusive — META cubes carry
+    # ``expose_in_prompt=False`` so ``only_exposed=True`` hides them
+    # by default anyway).
+    cubes = list(iter_cubes(catalog, include_meta=True, only_exposed=only_exposed))
     if not cubes:
         return ""
 
@@ -255,9 +263,7 @@ def build_router_prompt_fragment(
     parts: list[str] = [router_header]
     if include_topic_summary:
         topics: list[str] = ["## Catalogue topics"]
-        for cube in catalog.values():
-            if only_exposed and not cube.expose_in_prompt:
-                continue
+        for cube in iter_cubes(catalog, include_meta=True, only_exposed=only_exposed):
             blurb = cube.description.split(".")[0] if cube.description else ""
             blurb = f" — {blurb}." if blurb else "."
             human = _human(cube.display_name)
