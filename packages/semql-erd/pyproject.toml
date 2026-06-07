@@ -1,0 +1,26 @@
+[project]
+name = "semql-erd"
+version = "0.1.0"
+description = "Graphviz ER diagrams from a semql Catalog — cubes as nodes, joins as edges with crow's-foot arrowheads."
+readme = "README.md"
+authors = [
+    { name = "Nikhil Pallamreddy", email = "nikhil.pallamreddy+git@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "semql",
+]
+
+[project.optional-dependencies]
+# Required only for ``render_image`` (PNG/SVG output). ``render_dot``
+# (the DOT-source path) has no third-party dependencies.
+image = [
+    "graphviz>=0.20",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+semql = { workspace = true, editable = true }

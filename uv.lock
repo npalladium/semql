@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "semql",
+    "semql-erd",
     "semql-mcp",
     "semql-prompt",
 ]
@@ -551,6 +552,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1f/f9/f38573ed5844586db374d085911740a501ccfa373b455fc9413f09f85237/filelock-3.29.1.tar.gz", hash = "sha256:d97e6b1b9757569626c58caa07dc4beb1613f4a2938b1e8cc81afca398906c9e", size = 59335, upload-time = "2026-06-03T15:19:04.053Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4c/a0/614c5fe402fd88951df45f4dda2fa3b4e17a99ecd92340771929169b3b95/filelock-3.29.1-py3-none-any.whl", hash = "sha256:85199dfd706869641b72b2e8955d5416a4b2b7dc4b0e8e6d97b4cc1299a6983b", size = 40750, upload-time = "2026-06-03T15:19:02.959Z" },
+]
+
+[[package]]
+name = "graphviz"
+version = "0.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/b3/3ac91e9be6b761a4b30d66ff165e54439dcd48b83f4e20d644867215f6ca/graphviz-0.21.tar.gz", hash = "sha256:20743e7183be82aaaa8ad6c93f8893c923bd6658a04c32ee115edb3c8a835f78", size = 200434, upload-time = "2025-06-15T09:35:05.824Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/91/4c/e0ce1ef95d4000ebc1c11801f9b944fa5910ecc15b5e351865763d8657f8/graphviz-0.21-py3-none-any.whl", hash = "sha256:54f33de9f4f911d7e84e4191749cac8cc5653f815b06738c54db9a15ab8b1e42", size = 47300, upload-time = "2025-06-15T09:35:04.433Z" },
 ]
 
 [[package]]
@@ -1673,6 +1683,26 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlglot", specifier = ">=30.9.0" },
 ]
+
+[[package]]
+name = "semql-erd"
+version = "0.1.0"
+source = { editable = "packages/semql-erd" }
+dependencies = [
+    { name = "semql" },
+]
+
+[package.optional-dependencies]
+image = [
+    { name = "graphviz" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "graphviz", marker = "extra == 'image'", specifier = ">=0.20" },
+    { name = "semql", editable = "packages/semql" },
+]
+provides-extras = ["image"]
 
 [[package]]
 name = "semql-mcp"
