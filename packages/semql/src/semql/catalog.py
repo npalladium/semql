@@ -17,10 +17,12 @@ trust the input.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from semql.introspect import META_CUBES
-from semql.model import Cube, Join
+from semql.model import BaseField, Cube, Join
+
+_T = TypeVar("_T", bound=BaseField)
 
 if TYPE_CHECKING:
     from semql.compile import Compiled
@@ -47,6 +49,10 @@ class Catalog:
             if meta.name not in existing:
                 merged.append(meta)
                 existing.add(meta.name)
+
+        # Resolve ``extends`` chains — flatten inherited measures /
+        # dimensions / time_dimensions / segments by name. Detect cycles.
+        merged = _resolve_extends(merged)
 
         # Validate primary_key declarations — must name a real dimension.
         for c in merged:
@@ -153,6 +159,54 @@ class Catalog:
 
     def __contains__(self, name: object) -> bool:
         return isinstance(name, str) and name in self._by_name
+
+
+def _resolve_extends(cubes: list[Cube]) -> list[Cube]:
+    """Flatten ``Cube.extends`` chains into self-contained cubes.
+
+    Each child cube inherits the parent's measures / dimensions /
+    time_dimensions / segments by name. Child overrides win;
+    new items append. Other settings stay on the child.
+
+    Detects cycles and unknown parents."""
+    by_name = {c.name: c for c in cubes}
+
+    def _flatten(name: str, stack: tuple[str, ...]) -> Cube:
+        cube = by_name[name]
+        if cube.extends is None:
+            return cube
+        if cube.extends == name or cube.extends in stack:
+            chain = " -> ".join((*stack, name, cube.extends))
+            raise ValueError(f"Cube {name!r}: extends cycle detected ({chain}).")
+        if cube.extends not in by_name:
+            raise ValueError(
+                f"Cube {name!r}: extends={cube.extends!r} names a cube "
+                f"not in the catalog. Known cubes: {sorted(by_name)}."
+            )
+        parent = _flatten(cube.extends, (*stack, name))
+
+        def _merge_by_name(parent_list: list[_T], child_list: list[_T]) -> list[_T]:
+            by_field_name: dict[str, _T] = {f.name: f for f in parent_list}
+            for f in child_list:
+                by_field_name[f.name] = f
+            return list(by_field_name.values())
+
+        return cube.model_copy(
+            update={
+                "measures": _merge_by_name(parent.measures, cube.measures),
+                "dimensions": _merge_by_name(parent.dimensions, cube.dimensions),
+                "time_dimensions": _merge_by_name(parent.time_dimensions, cube.time_dimensions),
+                "segments": _merge_by_name(parent.segments, cube.segments),
+            }
+        )
+
+    resolved: list[Cube] = []
+    for c in cubes:
+        if c.extends is None:
+            resolved.append(c)
+        else:
+            resolved.append(_flatten(c.name, ()))
+    return resolved
 
 
 __all__ = ["Catalog"]

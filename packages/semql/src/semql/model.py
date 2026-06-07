@@ -223,6 +223,42 @@ class Cube(BaseModel):
     # Used by the Catalog to auto-derive ``many_to_one`` Joins from
     # other cubes' ``Dimension.foreign_key`` declarations.
     primary_key: str | None = None
+    # Ordered dimension hierarchies a UI consumer can offer as drill
+    # affordances. ``[["country", "state", "city"]]`` lets a frontend
+    # rendering a result grouped by ``country`` show a "drill to state"
+    # action. Multiple paths are allowed (alternate hierarchies). The
+    # compiler ignores this field — it's pure metadata.
+    drill_paths: list[list[str]] = []
+    # Inherit measures / dimensions / time_dimensions / segments by
+    # name from another cube in the same catalog. The child can
+    # override a parent field by redeclaring with the same name; new
+    # items append. Other settings (backend, table, alias,
+    # base_predicate, tenancy, joins) are cube-specific and do not
+    # inherit. Cycles raise at Catalog construction.
+    extends: str | None = None
+
+    @model_validator(mode="after")
+    def _check_drill_paths(self) -> Cube:
+        dim_names = {d.name for d in self.dimensions}
+        for i, path in enumerate(self.drill_paths):
+            if not path:
+                raise ValueError(
+                    f"Cube {self.name!r}, drill_paths[{i}]: empty path. "
+                    "Each drill path must list at least one dimension."
+                )
+            if len(set(path)) != len(path):
+                raise ValueError(
+                    f"Cube {self.name!r}, drill_paths[{i}]: duplicate "
+                    f"dimensions in path {path!r}. Hierarchies must be strict."
+                )
+            for dim in path:
+                if dim not in dim_names:
+                    raise ValueError(
+                        f"Cube {self.name!r}, drill_paths[{i}]: unknown "
+                        f"dimension {dim!r}. Known dimensions on this cube: "
+                        f"{sorted(dim_names)}."
+                    )
+        return self
 
     @model_validator(mode="after")
     def _check_tenancy_consistency(self) -> Cube:
