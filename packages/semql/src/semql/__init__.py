@@ -87,12 +87,22 @@ from semql.prompt import (
     render_catalogue_block,
     render_catalogue_segments,
 )
+from semql.rewrite import (
+    AddFilter,
+    ChangeGranularity,
+    ChangeTimeWindow,
+    Drilldown,
+    RemoveFilter,
+    RewriteOp,
+    rewrite,
+)
 from semql.safe import is_safe_select
 from semql.spec import (
     BoolExpr,
     CompareWindow,
     Filter,
     FilterOp,
+    SavedQuery,
     SemanticQuery,
     TimeWindow,
 )
@@ -147,8 +157,14 @@ __all__ = [
     "MAX_UNGROUPED_ROWS",
     "MergePlan",
     "META_CUBES",
+    "AddFilter",
+    "ChangeGranularity",
+    "ChangeTimeWindow",
+    "Drilldown",
     "Measure",
     "NamedCTE",
+    "RemoveFilter",
+    "RewriteOp",
     "PhaseDeferredError",
     "PlaceholderError",
     "Presentation",
@@ -157,6 +173,7 @@ __all__ = [
     "QueryStep",
     "Registry",
     "ResolutionContext",
+    "SavedQuery",
     "ResolveError",
     "ResolvedQuery",
     "RouterDecision",
@@ -195,6 +212,7 @@ __all__ = [
     "render_catalogue_segments",
     "resolve_field",
     "resolve_lookup",
+    "rewrite",
     "resolve_query",
     "validate",
 ]

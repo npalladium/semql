@@ -159,12 +159,54 @@ class SemanticQuery(BaseModel):
             )
         return self
 
+    def rewrite(self, op: object) -> SemanticQuery:
+        """Apply a :class:`semql.RewriteOp` and return a new query.
+
+        Convenience wrapper over :func:`semql.rewrite.rewrite`. ``op``
+        is typed as ``object`` here because importing the RewriteOp
+        union at module-load time would create a cycle
+        (rewrite.py → spec.py); the implementation in
+        :mod:`semql.rewrite` performs the dispatch and the static
+        type-checkers see the precise op type through the function
+        form ``rewrite(q, op)``."""
+        from semql.rewrite import rewrite as _rewrite
+
+        # Cast for mypy: the rewrite function is typed against the
+        # closed-enum RewriteOp union. Runtime dispatches via isinstance.
+        return _rewrite(self, op)  # type: ignore[arg-type]
+
+
+class SavedQuery(BaseModel):
+    """A pre-baked :class:`SemanticQuery` registered on a Catalog.
+
+    Saved queries cover the "give me the standard quarterly revenue
+    report" shape — the planner doesn't need to author one for a
+    recurring ask. An MCP server auto-exposes each visible saved
+    query as a zero-arg tool, so an LLM client just calls
+    ``saved_<name>()``.
+
+    Visibility follows ``required_roles`` the same ANY-match way
+    ``Cube.required_roles`` does — a viewer with at least one matching
+    role sees the query; an empty list means publicly accessible.
+
+    ``description`` is surfaced to MCP clients as the tool docstring;
+    a one-sentence "what this answers" is the right shape.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    query: SemanticQuery
+    description: str = ""
+    owner: str | None = None
+    required_roles: list[str] = []
+
 
 __all__ = [
     "BoolExpr",
     "CompareWindow",
     "Filter",
     "FilterOp",
+    "SavedQuery",
     "SemanticQuery",
     "TimeWindow",
 ]

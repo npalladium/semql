@@ -42,6 +42,12 @@ Registered only when the catalog carries ``Lookup`` entries:
   materialize a lookup's full value set (firing the loader for
   dynamic lookups) so a planner can browse the vocabulary.
 
+Registered when the catalog carries ``SavedQuery`` entries:
+- ``saved_<name>(context?)`` — one zero-arg tool per saved query.
+  Compiles the pre-baked ``SemanticQuery`` and (if an executor is
+  configured) runs it. Documentation comes from
+  ``SavedQuery.description``.
+
 Transports: stdio (FastMCP default) plus anything FastMCP supports
 out of the box. Use ``server.run(transport="stdio")`` for a
 CLI-launched process, or pass ``server.mcp`` to a custom transport.
@@ -93,6 +99,7 @@ class MCPServer:
         self._register_tools()
         self._register_per_cube_tools()
         self._register_lookup_tools()
+        self._register_saved_query_tools()
 
     def _register_tools(self) -> None:
         catalog = self.catalog
@@ -299,6 +306,25 @@ class MCPServer:
         }
         self.mcp.add_tool(list_lookup_values_fn)
 
+    def _register_saved_query_tools(self) -> None:
+        """For each ``SavedQuery`` on the catalog, register a zero-arg
+        ``saved_<name>`` MCP tool that compiles + (if an executor is
+        configured) executes the saved query.
+
+        Saved queries with non-empty ``required_roles`` aren't filtered
+        here — visibility is enforced per-call at compile time via the
+        catalog's policy / required_roles plumbing. The MCP server
+        exposes every registered saved query as a tool; whether the
+        viewer is *allowed* to call it surfaces as a structured error
+        when they try."""
+        catalog = self.catalog
+        executor = self.executor
+        if not catalog.saved_queries:
+            return
+
+        for sq in catalog.saved_queries.values():
+            self.mcp.add_tool(_make_saved_query_tool(sq, catalog, executor))
+
     def _register_per_cube_tools(self) -> None:
         """For each exposed, non-META cube, register a ``query_<cube>``
         tool whose ``measures`` / ``dimensions`` / ``time_window.dimension``
@@ -477,6 +503,57 @@ def _make_query_cube_tool(
         "return": dict[str, Any],
     }
     return query_cube_fn
+
+
+def _make_saved_query_tool(
+    sq: Any,  # noqa: ANN401 — semql.SavedQuery (imported below at runtime)
+    catalog: Catalog,
+    executor: Executor | None,
+) -> Callable[..., dict[str, Any]]:
+    """Build a zero-arg ``saved_<name>`` tool that compiles + executes
+    a pre-baked SemanticQuery.
+
+    Optional ``context`` kwarg threads through to ``catalog.compile``
+    for tenant / schema substitution — the saved query itself is
+    static but its tenancy still needs runtime binding. When the
+    server was constructed with an executor, the tool also returns
+    ``rows``; otherwise it's compile-only."""
+    saved_name = sq.name
+
+    def saved_query_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202 — signature attached via __annotations__ below
+        context=None,  # noqa: ANN001
+    ):
+        try:
+            compiled = catalog.compile(sq.query, context=context)
+        except Exception as exc:
+            return _error_payload(exc)
+        envelope: dict[str, Any] = {
+            "backend": compiled.backend.value,
+            "sql": compiled.sql,
+            "params": compiled.params,
+            "columns": compiled.columns,
+            "column_meta": [asdict(m) for m in compiled.column_meta],
+        }
+        if executor is None:
+            return envelope
+        try:
+            envelope["rows"] = executor(compiled.sql, compiled.params)
+        except Exception as exc:
+            return _error_payload(exc) | envelope
+        return envelope
+
+    saved_query_fn.__name__ = f"saved_{saved_name}"
+    base_doc = sq.description or f"Run the saved query named {saved_name!r}."
+    saved_query_fn.__doc__ = (
+        base_doc + "\n\nThis tool runs a pre-baked SemanticQuery — no measure / "
+        "dimension arguments needed. Pass ``context`` only if the "
+        "underlying cubes use tenancy / schema placeholders."
+    )
+    saved_query_fn.__annotations__ = {
+        "context": dict[str, str] | None,
+        "return": dict[str, Any],
+    }
+    return saved_query_fn
 
 
 def _prefix(name: str, cube_name: str) -> str:

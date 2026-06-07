@@ -646,6 +646,7 @@ __all__ = [
     "LookupValues",
     "Measure",
     "Metadata",
+    "NamedCTE",
     "ResolutionContext",
     "ScopePredicate",
     "Segment",

@@ -31,6 +31,7 @@ from semql.model import (
     ResolutionContext,
     View,
 )
+from semql.spec import SavedQuery
 from semql.units import DEFAULT_REGISTRY, Registry
 
 _T = TypeVar("_T", bound=BaseField)
@@ -51,6 +52,7 @@ class Catalog:
         *,
         views: list[View] | None = None,
         lookups: list[Lookup] | None = None,
+        saved_queries: list[SavedQuery] | None = None,
         policy: PolicyFn | None = None,
         scope_fns: dict[str, ScopeFn] | None = None,
         unit_registry: Registry | None = None,
@@ -257,6 +259,35 @@ class Catalog:
                     f"{target_dim.type!r}."
                 )
         self.lookups: dict[str, Lookup] = {lk.dimension: lk for lk in lookup_list}
+
+        # Saved queries — pre-baked SemanticQueries the MCP layer
+        # auto-exposes as zero-arg tools. Validate name uniqueness +
+        # name shape; a deeper compile-time validation of each query
+        # against the catalog is best-effort and gated behind
+        # ``validate_saved_queries`` so a half-built catalog at
+        # bootstrap time still loads.
+        saved_query_list: list[SavedQuery] = list(saved_queries or [])
+        seen_saved_names: set[str] = set()
+        for sq in saved_query_list:
+            if not sq.name or "." in sq.name or " " in sq.name:
+                raise ValueError(
+                    f"SavedQuery has invalid name {sq.name!r}: must be "
+                    "non-empty and contain no dots or spaces (it becomes "
+                    "part of an MCP tool name)."
+                )
+            if sq.name in seen_saved_names:
+                raise ValueError(
+                    f"Catalog has duplicate SavedQuery name {sq.name!r}. "
+                    "Each saved query's name must be unique."
+                )
+            if sq.name in self._by_name or sq.name in self.views:
+                raise ValueError(
+                    f"SavedQuery name {sq.name!r} collides with a cube "
+                    "or view of the same name. Saved-query / cube / view "
+                    "names share a namespace; rename one."
+                )
+            seen_saved_names.add(sq.name)
+        self.saved_queries: dict[str, SavedQuery] = {sq.name: sq for sq in saved_query_list}
 
         self._scope_fns: dict[str, ScopeFn] = dict(scope_fns or {})
         for c in merged:
