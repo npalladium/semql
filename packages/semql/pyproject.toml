@@ -1,7 +1,7 @@
 [project]
 name = "semql"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pure-Python compiler from a semantic spec to backend SQL — cubes, joins, compare windows, tenancy, RLS. No I/O."
 readme = "README.md"
 authors = [
     { name = "Nikhil Pallamreddy", email = "nikhil.pallamreddy+git@gmail.com" }

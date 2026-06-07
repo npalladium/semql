@@ -1,7 +1,7 @@
 [project]
 name = "semql-prompt"
 version = "0.1.0"
-description = "Add your description here"
+description = "Stub. Planned: LLM planner / composer that turns natural-language questions into SemanticQuery specs. For now use semql.prompt directly."
 readme = "README.md"
 authors = [
     { name = "Nikhil Pallamreddy", email = "nikhil.pallamreddy+git@gmail.com" }
