@@ -504,6 +504,281 @@ def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
 
 
 # ---------------------------------------------------------------------------
+# Compile stages — extracted from ``compile_query`` for testability and to
+# make the orchestration legible. Each stage is a pure function over its
+# inputs; ``compile_query`` glues them together. POSA "Pipes and Filters".
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ResolvedFields:
+    """Field-level resolution output: every ``cube.field`` reference in
+    the query mapped to a concrete ``(Cube, Field)`` pair, plus the
+    ordered list of cubes the query touches."""
+
+    measure_fields: list[tuple[Cube, Measure]]
+    dim_fields: list[tuple[Cube, Dimension]]
+    time_cube: Cube | None
+    time_dim: TimeDimension | None
+    filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]]
+    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]]
+    segment_resolutions: list[tuple[Cube, Segment]]
+    touched: list[Cube]
+
+
+def _validate_query_invariants(
+    q: SemanticQuery,
+    *,
+    allow_unbounded_ungrouped: bool,
+) -> None:
+    """Pre-flight checks that don't depend on the catalog.
+
+    Raises ``CompileError`` for compare-mode shape mismatches, lonely
+    ``offset`` without ``limit``, ungrouped queries above the row cap
+    (unless explicitly allowed), and empty queries."""
+    if q.compare is not None:
+        if q.time_dimension is None:
+            raise CompileError(
+                "compare requires a time_dimension on the query — the "
+                "current and prior windows are derived from it."
+            )
+        if not q.measures:
+            raise CompileError(
+                "compare requires at least one measure — without a "
+                "measure there is nothing to delta between current and prior."
+            )
+        if q.ungrouped:
+            raise CompileError(
+                "compare is incompatible with ungrouped=True — compare aggregates by definition."
+            )
+        if q.compare.mode == "explicit" and q.compare.range is None:
+            raise CompileError(
+                "compare(mode='explicit') requires a range. Pass "
+                "CompareWindow(mode='explicit', range=(start, end))."
+            )
+
+    if q.offset is not None and q.offset > 0 and q.limit is None:
+        raise CompileError(
+            "SemanticQuery has offset set without limit. "
+            "OFFSET is only meaningful in combination with LIMIT."
+        )
+
+    if (
+        q.ungrouped
+        and not allow_unbounded_ungrouped
+        and (q.limit is None or q.limit > MAX_UNGROUPED_ROWS)
+    ):
+        raise CompileError(
+            f"Ungrouped query requires limit <= {MAX_UNGROUPED_ROWS}. Got limit={q.limit}."
+        )
+
+    if not q.measures and not q.dimensions and q.time_dimension is None:
+        raise CompileError(
+            "SemanticQuery is empty — at least one measure, dimension, "
+            "or time_dimension is required."
+        )
+
+
+def _make_view_resolver(
+    catalog: dict[str, Cube],
+    views_map: dict[str, View],
+) -> Callable[[str], tuple[Cube, Measure | Dimension | TimeDimension]]:
+    """Build the per-call view-aware resolver.
+
+    Rewrites ``view.local_name`` references to the underlying
+    ``cube.field`` BUT re-aliases the returned field so the SELECT
+    output column uses the view's local name (not the underlying
+    field name)."""
+
+    def _resolve(
+        qualified: str,
+    ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
+        if "." in qualified:
+            prefix, local = qualified.split(".", 1)
+            if prefix in views_map:
+                view = views_map[prefix]
+                if local not in view.fields:
+                    raise CompileError(
+                        f"View {prefix!r} has no field {local!r}. "
+                        f"Known fields on this view: {sorted(view.fields)}."
+                    )
+                cube, fld = _resolve_field(view.fields[local], catalog)
+                return cube, fld.model_copy(update={"name": local})
+        return _resolve_field(qualified, catalog)
+
+    return _resolve
+
+
+def _resolve_query_fields(
+    q: SemanticQuery,
+    catalog: dict[str, Cube],
+    views_map: dict[str, View],
+) -> _ResolvedFields:
+    """Resolve every ``cube.field`` reference in ``q`` to its catalog
+    entry and collect the ordered set of touched cubes.
+
+    Also resolves segment references and where-tree leaves so all
+    referenced cubes land in ``touched`` (the join-graph builder
+    needs the full set up front)."""
+    resolve_with_views = _make_view_resolver(catalog, views_map)
+
+    measure_fields: list[tuple[Cube, Measure]] = []
+    for ref in q.measures:
+        cube, fld = resolve_with_views(ref)
+        if not isinstance(fld, Measure):
+            raise CompileError(f"{ref!r} is not a measure on cube {cube.name!r}.")
+        measure_fields.append((cube, fld))
+
+    dim_fields: list[tuple[Cube, Dimension]] = []
+    for ref in q.dimensions:
+        cube, fld = resolve_with_views(ref)
+        if not isinstance(fld, Dimension):
+            raise CompileError(f"{ref!r} is not a dimension on cube {cube.name!r}.")
+        dim_fields.append((cube, fld))
+
+    time_cube: Cube | None = None
+    time_dim: TimeDimension | None = None
+    if q.time_dimension is not None:
+        tcube, tfld = resolve_with_views(q.time_dimension.dimension)
+        if not isinstance(tfld, TimeDimension):
+            raise CompileError(f"{q.time_dimension.dimension!r} is not a time dimension.")
+        gran = q.time_dimension.granularity
+        if gran is not None and gran not in tfld.granularities:
+            raise CompileError(
+                f"Granularity {gran!r} not supported on {q.time_dimension.dimension!r}. "
+                f"Allowed: {tfld.granularities}."
+            )
+        time_cube, time_dim = tcube, tfld
+
+    touched: list[Cube] = []
+    for c, _ in [*measure_fields, *dim_fields]:
+        if c not in touched:
+            touched.append(c)
+    if time_cube is not None and time_cube not in touched:
+        touched.append(time_cube)
+
+    filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]] = []
+    for f in q.filters:
+        c, fld = resolve_with_views(f.dimension)
+        filter_resolutions.append((f, c, fld))
+        if c not in touched:
+            touched.append(c)
+
+    where_leaves: list[Filter] = _walk_where_leaves(q.where) if q.where is not None else []
+    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]] = {}
+    for leaf in where_leaves:
+        c, fld = resolve_with_views(leaf.dimension)
+        where_leaf_resolutions[id(leaf)] = (c, fld)
+        if c not in touched:
+            touched.append(c)
+
+    segment_resolutions: list[tuple[Cube, Segment]] = []
+    for seg_ref in q.segments:
+        if "." not in seg_ref:
+            raise CompileError(
+                f"Segment reference {seg_ref!r} must be qualified as 'cube.segment'."
+            )
+        cube_name, seg_name = seg_ref.rsplit(".", 1)
+        if cube_name not in catalog:
+            raise CompileError(f"Segment reference {seg_ref!r}: unknown cube {cube_name!r}.")
+        cube_obj = catalog[cube_name]
+        match = next((s for s in cube_obj.segments if s.name == seg_name), None)
+        if match is None:
+            known = ", ".join(s.name for s in cube_obj.segments) or "(none)"
+            raise CompileError(
+                f"Segment reference {seg_ref!r}: cube {cube_name!r} has no segment "
+                f"{seg_name!r}. Known segments: {known}."
+            )
+        segment_resolutions.append((cube_obj, match))
+        if cube_obj not in touched:
+            touched.append(cube_obj)
+
+    if not touched:
+        raise CompileError("Could not determine any cubes from the query.")
+
+    return _ResolvedFields(
+        measure_fields=measure_fields,
+        dim_fields=dim_fields,
+        time_cube=time_cube,
+        time_dim=time_dim,
+        filter_resolutions=filter_resolutions,
+        where_leaf_resolutions=where_leaf_resolutions,
+        segment_resolutions=segment_resolutions,
+        touched=touched,
+    )
+
+
+def _check_viewer_authorization(
+    touched: list[Cube],
+    viewer: AuthContext | None,
+    policy: PolicyFn | None,
+) -> None:
+    """Refuse queries that touch a cube the viewer can't see."""
+    if viewer is None:
+        return
+    forbidden = [c.name for c in touched if not viewer_sees(c, viewer, policy)]
+    if forbidden:
+        raise CompileError(
+            f"Query touches cubes the viewer is not authorised to see: "
+            f"{sorted(forbidden)}. Check Cube.required_roles or the "
+            "Catalog's policy override."
+        )
+
+
+def _check_required_filters(touched: list[Cube], q: SemanticQuery) -> None:
+    """Every ``Cube.required_filters`` must be referenced by a Filter
+    on the query — refuse early so the compiler doesn't have to emit
+    a query the cube author marked as unsafe-without-scope."""
+    filter_dims = {f.dimension for f in q.filters}
+    for cube in touched:
+        for req in cube.required_filters:
+            if f"{cube.name}.{req}" not in filter_dims:
+                raise CompileError(
+                    f"Cube {cube.name!r} requires a filter on {req!r}. "
+                    f"Add Filter(dimension='{cube.name}.{req}', op=..., values=[...])."
+                )
+
+
+def _pick_single_backend(touched: list[Cube]) -> Backend:
+    """Single-backend gate. Cross-backend queries route to
+    :func:`semql.compile_federated_query` — non-federated compile is
+    one-backend-only."""
+    backends = {c.backend for c in touched}
+    if len(backends) > 1:
+        backend_names = sorted(b.value for b in backends)
+        raise CrossBackendError(
+            "Cross-backend queries are not yet supported (Phase 2). "
+            f"Touched backends: {backend_names}.",
+            backends=backend_names,
+        )
+    return next(iter(backends))
+
+
+def _build_join_graph(
+    touched: list[Cube],
+    catalog: dict[str, Cube],
+) -> tuple[list[Cube], list[tuple[Cube, Cube, Join]]]:
+    """BFS the catalog's Join edges from the first touched cube to
+    every other touched cube. Returns ``(cubes_in_from, join_edges)``
+    in the order the FROM clause + JOINs should be emitted."""
+    root = touched[0]
+    join_edges: list[tuple[Cube, Cube, Join]] = []
+    cubes_in_from: list[Cube] = [root]
+    for c in touched:
+        if c is root:
+            continue
+        path = _find_join_path(root.name, c.name, catalog)
+        cursor = root
+        for j in path:
+            tgt = catalog[j.to]
+            if tgt not in cubes_in_from:
+                join_edges.append((cursor, tgt, j))
+                cubes_in_from.append(tgt)
+            cursor = tgt
+    return cubes_in_from, join_edges
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -547,6 +822,8 @@ def compile_query(
         function with ``(cube, viewer)`` and AND-injects the returned
         ``ScopePredicate`` inside the cube's isolation subquery.
     """
+    _validate_query_invariants(q, allow_unbounded_ungrouped=_allow_unbounded_ungrouped)
+
     ctx = dict(context or {})
     if viewer is not None:
         # Auto-flatten the viewer's identity into the context so
@@ -555,202 +832,23 @@ def compile_query(
         # supplied ``ctx.viewer_id`` wins (the caller knows best).
         ctx.setdefault("ctx.viewer_id", viewer.viewer_id)
 
-    if q.compare is not None:
-        if q.time_dimension is None:
-            raise CompileError(
-                "compare requires a time_dimension on the query — the "
-                "current and prior windows are derived from it."
-            )
-        if not q.measures:
-            raise CompileError(
-                "compare requires at least one measure — without a "
-                "measure there is nothing to delta between current and prior."
-            )
-        if q.ungrouped:
-            raise CompileError(
-                "compare is incompatible with ungrouped=True — compare aggregates by definition."
-            )
-        if q.compare.mode == "explicit" and q.compare.range is None:
-            raise CompileError(
-                "compare(mode='explicit') requires a range. Pass "
-                "CompareWindow(mode='explicit', range=(start, end))."
-            )
-
-    if q.offset is not None and q.offset > 0 and q.limit is None:
-        raise CompileError(
-            "SemanticQuery has offset set without limit. "
-            "OFFSET is only meaningful in combination with LIMIT."
-        )
-
-    if (
-        q.ungrouped
-        and not _allow_unbounded_ungrouped
-        and (q.limit is None or q.limit > MAX_UNGROUPED_ROWS)
-    ):
-        raise CompileError(
-            f"Ungrouped query requires limit <= {MAX_UNGROUPED_ROWS}. Got limit={q.limit}."
-        )
-
-    if not q.measures and not q.dimensions and q.time_dimension is None:
-        raise CompileError(
-            "SemanticQuery is empty — at least one measure, dimension, "
-            "or time_dimension is required."
-        )
-
-    # 0. View-aware resolver. When ``view.X`` matches a known view, the
-    # ref rewrites to the underlying ``cube.field`` BUT the returned
-    # Field carries the view's local name so output column aliases
-    # come out as the view exposes them.
     views_map: dict[str, View] = views or {}
+    resolved = _resolve_query_fields(q, catalog, views_map)
+    measure_fields = resolved.measure_fields
+    dim_fields = resolved.dim_fields
+    time_cube = resolved.time_cube
+    time_dim = resolved.time_dim
+    filter_resolutions = resolved.filter_resolutions
+    where_leaf_resolutions = resolved.where_leaf_resolutions
+    segment_resolutions = resolved.segment_resolutions
+    touched = resolved.touched
 
-    def _resolve_with_views(
-        qualified: str,
-    ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
-        if "." in qualified:
-            prefix, local = qualified.split(".", 1)
-            if prefix in views_map:
-                view = views_map[prefix]
-                if local not in view.fields:
-                    raise CompileError(
-                        f"View {prefix!r} has no field {local!r}. "
-                        f"Known fields on this view: {sorted(view.fields)}."
-                    )
-                cube, fld = _resolve_field(view.fields[local], catalog)
-                # Re-alias the field so the SELECT output column matches
-                # the view's local name (e.g. view.net_revenue → AS net_revenue).
-                return cube, fld.model_copy(update={"name": local})
-        return _resolve_field(qualified, catalog)
+    _check_viewer_authorization(touched, viewer, policy)
+    _check_required_filters(touched, q)
 
-    # 1. Resolve references; gather touched cubes.
-    measure_fields: list[tuple[Cube, Measure]] = []
-    for ref in q.measures:
-        cube, fld = _resolve_with_views(ref)
-        if not isinstance(fld, Measure):
-            raise CompileError(f"{ref!r} is not a measure on cube {cube.name!r}.")
-        measure_fields.append((cube, fld))
-
-    dim_fields: list[tuple[Cube, Dimension]] = []
-    for ref in q.dimensions:
-        cube, fld = _resolve_with_views(ref)
-        if not isinstance(fld, Dimension):
-            raise CompileError(f"{ref!r} is not a dimension on cube {cube.name!r}.")
-        dim_fields.append((cube, fld))
-
-    time_cube: Cube | None = None
-    time_dim: TimeDimension | None = None
-    if q.time_dimension is not None:
-        tcube, tfld = _resolve_with_views(q.time_dimension.dimension)
-        if not isinstance(tfld, TimeDimension):
-            raise CompileError(f"{q.time_dimension.dimension!r} is not a time dimension.")
-        gran = q.time_dimension.granularity
-        if gran is not None and gran not in tfld.granularities:
-            raise CompileError(
-                f"Granularity {gran!r} not supported on {q.time_dimension.dimension!r}. "
-                f"Allowed: {tfld.granularities}."
-            )
-        time_cube, time_dim = tcube, tfld
-
-    touched: list[Cube] = []
-    for c, _ in [*measure_fields, *dim_fields]:
-        if c not in touched:
-            touched.append(c)
-    if time_cube is not None and time_cube not in touched:
-        touched.append(time_cube)
-
-    filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]] = []
-    for f in q.filters:
-        c, fld = _resolve_with_views(f.dimension)
-        filter_resolutions.append((f, c, fld))
-        if c not in touched:
-            touched.append(c)
-
-    # 1d. Resolve where-tree leaves up front so cubes referenced inside
-    # OR / NOT branches are added to ``touched`` and the join graph
-    # reaches them. The compiled predicate is built later in
-    # ``build_inner`` (per CTE in compare mode).
-    where_leaves: list[Filter] = _walk_where_leaves(q.where) if q.where is not None else []
-    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]] = {}
-    for leaf in where_leaves:
-        c, fld = _resolve_with_views(leaf.dimension)
-        where_leaf_resolutions[id(leaf)] = (c, fld)
-        if c not in touched:
-            touched.append(c)
-
-    # 1c. Resolve segments — reusable named predicates declared on the
-    # cube. ``cube.segment`` syntax matches the rest of the spec; the
-    # predicate's SQL slots into the WHERE clause via ``build_inner``.
-    segment_resolutions: list[tuple[Cube, Segment]] = []
-    for seg_ref in q.segments:
-        if "." not in seg_ref:
-            raise CompileError(
-                f"Segment reference {seg_ref!r} must be qualified as 'cube.segment'."
-            )
-        cube_name, seg_name = seg_ref.rsplit(".", 1)
-        if cube_name not in catalog:
-            raise CompileError(f"Segment reference {seg_ref!r}: unknown cube {cube_name!r}.")
-        cube_obj = catalog[cube_name]
-        match = next((s for s in cube_obj.segments if s.name == seg_name), None)
-        if match is None:
-            known = ", ".join(s.name for s in cube_obj.segments) or "(none)"
-            raise CompileError(
-                f"Segment reference {seg_ref!r}: cube {cube_name!r} has no segment "
-                f"{seg_name!r}. Known segments: {known}."
-            )
-        segment_resolutions.append((cube_obj, match))
-        if cube_obj not in touched:
-            touched.append(cube_obj)
-
-    if not touched:
-        raise CompileError("Could not determine any cubes from the query.")
-
-    # 1a. Authorisation: refuse queries that touch a cube the viewer
-    # can't see. Static (``required_roles`` ANY-match) + dynamic
-    # (``policy``) — both AND-compose inside ``viewer_sees``.
-    if viewer is not None:
-        forbidden = [c.name for c in touched if not viewer_sees(c, viewer, policy)]
-        if forbidden:
-            raise CompileError(
-                f"Query touches cubes the viewer is not authorised to see: "
-                f"{sorted(forbidden)}. Check Cube.required_roles or the "
-                "Catalog's policy override."
-            )
-
-    # 1b. Required-filter enforcement.
-    filter_dims = {f.dimension for f in q.filters}
-    for cube in touched:
-        for req in cube.required_filters:
-            if f"{cube.name}.{req}" not in filter_dims:
-                raise CompileError(
-                    f"Cube {cube.name!r} requires a filter on {req!r}. "
-                    f"Add Filter(dimension='{cube.name}.{req}', op=..., values=[...])."
-                )
-
-    # 2. Single-backend check.
-    backends = {c.backend for c in touched}
-    if len(backends) > 1:
-        backend_names = sorted(b.value for b in backends)
-        raise CrossBackendError(
-            "Cross-backend queries are not yet supported (Phase 2). "
-            f"Touched backends: {backend_names}.",
-            backends=backend_names,
-        )
-    backend = next(iter(backends))
-
-    # 3. Pick root cube; BFS over joins to reach the rest.
-    root = touched[0]
-    join_edges: list[tuple[Cube, Cube, Join]] = []
-    cubes_in_from: list[Cube] = [root]
-    for c in touched:
-        if c is root:
-            continue
-        path = _find_join_path(root.name, c.name, catalog)
-        cursor = root
-        for j in path:
-            tgt = catalog[j.to]
-            if tgt not in cubes_in_from:
-                join_edges.append((cursor, tgt, j))
-                cubes_in_from.append(tgt)
-            cursor = tgt
+    backend = _pick_single_backend(touched)
+    cubes_in_from, join_edges = _build_join_graph(touched, catalog)
+    root = cubes_in_from[0]
 
     # 4. Aliases, strategy, bind closure.
     cube_aliases: dict[str, str] = {c.name: c.alias for c in cubes_in_from}
