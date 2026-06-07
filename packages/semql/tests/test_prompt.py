@@ -9,7 +9,7 @@ before it ships.
 
 from __future__ import annotations
 
-from semql.model import Backend, Cube, Dimension, Join, Measure, TimeDimension
+from semql.model import Backend, Cube, Dimension, Join, Measure, TimeDimension, View
 from semql.prompt import (
     build_planner_prompt_fragment,
     build_router_prompt_fragment,
@@ -281,6 +281,60 @@ def test_router_fragment_lists_raw_triggers() -> None:
     # rewrite that drops the bulleted list surfaces here.
     assert "Window" in rendered or "window" in rendered
     assert "Recursive" in rendered or "recursive" in rendered
+
+
+def test_router_fragment_omits_views_section_when_views_none() -> None:
+    rendered = build_router_prompt_fragment({"orders": _orders()})
+    assert "## Views" not in rendered
+
+
+def test_router_fragment_includes_views_section_when_views_provided() -> None:
+    views = {
+        "revenue_overview": View(
+            name="revenue_overview",
+            display_name="Revenue Overview",
+            description="Cross-cube revenue and region rollup.",
+            fields={
+                "revenue": "orders.revenue",
+                "region": "orders.region",
+            },
+        ),
+    }
+    rendered = build_router_prompt_fragment({"orders": _orders()}, views=views)
+    assert "## Views" in rendered
+    assert "`revenue_overview`" in rendered
+    assert "Revenue Overview" in rendered
+    assert "Cross-cube revenue and region rollup" in rendered
+
+
+def test_router_fragment_views_section_follows_topic_summary_toggle() -> None:
+    views = {
+        "revenue_overview": View(
+            name="revenue_overview",
+            fields={"revenue": "orders.revenue"},
+        ),
+    }
+    rendered = build_router_prompt_fragment(
+        {"orders": _orders()},
+        include_topic_summary=False,
+        views=views,
+    )
+    # When the topic summary is off, the view list (same catalogue-content
+    # signal) also disappears — the router stays pure routing rules.
+    assert "## Catalogue topics" not in rendered
+    assert "## Views" not in rendered
+
+
+def test_router_fragment_view_without_description_renders_cleanly() -> None:
+    views = {
+        "bare_view": View(
+            name="bare_view",
+            fields={"revenue": "orders.revenue"},
+        ),
+    }
+    rendered = build_router_prompt_fragment({"orders": _orders()}, views=views)
+    assert "`bare_view`" in rendered
+    assert "— ." not in rendered  # no double-em-dash with empty body
 
 
 # ---------------------------------------------------------------------------

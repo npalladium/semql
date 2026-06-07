@@ -229,11 +229,15 @@ def build_router_prompt_fragment(
     *,
     only_exposed: bool = True,
     include_topic_summary: bool = True,
+    views: dict[str, View] | None = None,
 ) -> str:
     """Fragment for the path-routing decision (semantic vs raw SQL).
 
     Optionally appends a one-liner per exposed cube so the router has a
     sense of what's catalogue-expressible without the full measures tree.
+    When ``views`` is provided, a parallel one-liner list lets the
+    router pick a curated facade instead of (or in addition to) the
+    raw cubes.
     """
     router_header = _raw_triggers_block(
         "## Path routing — semantic vs raw SQL\n\n"
@@ -256,6 +260,20 @@ def build_router_prompt_fragment(
             human = _human(cube.display_name)
             topics.append(f"  - `{cube.name}` ({cube.backend.value}){human}{blurb}")
         parts.append("\n".join(topics))
+
+        if views:
+            view_lines: list[str] = ["## Views"]
+            view_lines.append(
+                "Curated facades over one or more cubes. Reference view fields "
+                "as `view.field` — the compiler maps each reference back to "
+                "the underlying cube."
+            )
+            for v in views.values():
+                blurb = v.description.split(".")[0] if v.description else ""
+                blurb = f" — {blurb}." if blurb else ""
+                human = _human(v.display_name)
+                view_lines.append(f"  - `{v.name}`{human}{blurb}")
+            parts.append("\n".join(view_lines))
     return "\n\n".join(parts) + "\n"
 
 
