@@ -3,14 +3,32 @@ name = "semql-mcp"
 version = "0.1.0"
 description = "MCP server that wraps a semql Catalog — compile-only by default, opt-in row execution via a caller-provided executor."
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     { name = "Nikhil Pallamreddy", email = "nikhil.pallamreddy+git@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=3.4.2",
-    "semql",
+    "semql>=0.1.0,<0.2",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/npalladium/semql"
+Repository = "https://github.com/npalladium/semql"
+Issues = "https://github.com/npalladium/semql/issues"
 
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]
