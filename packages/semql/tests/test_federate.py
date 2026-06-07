@@ -395,3 +395,184 @@ def test_merge_plan_is_a_dataclass_with_sql_and_params() -> None:
     assert isinstance(plan.merge, MergePlan)
     assert isinstance(plan.merge.sql, str)
     assert isinstance(plan.merge.params, dict)
+
+
+# ---------------------------------------------------------------------------
+# Raw-row mode (P3) — lifts non-distributive aggs and having
+# ---------------------------------------------------------------------------
+
+
+def test_raw_rows_lifts_count_distinct_refusal() -> None:
+    """``count_distinct`` was refused in distributive mode (sum-of-counts
+    isn't a count of distinct values). Raw-row mode emits raw value
+    columns from the primary fragment and defers the COUNT(DISTINCT ...)
+    to the merge."""
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.distinct_customers"],
+        dimensions=["customers.region"],
+    )
+    plan = compile_federated_query(q, catalog, mode="raw_rows")
+    # Primary fragment is ungrouped — selects raw customer_id values.
+    primary = plan.fragments[0]
+    assert "customer_id" in primary.sql.lower()
+    # Merge re-aggregates with COUNT(DISTINCT ...).
+    assert "COUNT(DISTINCT" in plan.merge.sql.upper()
+    assert plan.columns == ["region", "distinct_customers"]
+
+
+def test_raw_rows_supports_min_and_max() -> None:
+    orders = _orders().model_copy(
+        update={
+            "measures": [
+                Measure(name="min_amount", sql="{o}.amount", agg="min"),
+                Measure(name="max_amount", sql="{o}.amount", agg="max"),
+            ]
+        }
+    )
+    catalog = _catalog(orders, _customers())
+    q = SemanticQuery(
+        measures=["orders.min_amount", "orders.max_amount"],
+        dimensions=["customers.region"],
+    )
+    plan = compile_federated_query(q, catalog, mode="raw_rows")
+    assert "MIN(" in plan.merge.sql.upper()
+    assert "MAX(" in plan.merge.sql.upper()
+
+
+def test_raw_rows_handles_count_star() -> None:
+    """COUNT(*) measures have no raw column — the merge emits
+    COUNT(*) directly over the joined rows."""
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.count"],
+        dimensions=["customers.region"],
+    )
+    plan = compile_federated_query(q, catalog, mode="raw_rows")
+    assert "COUNT(*)" in plan.merge.sql.upper()
+
+
+def test_raw_rows_lifts_having_refusal() -> None:
+    """Distributive mode refuses HAVING; raw-row mode applies it at
+    merge against the recomposed measure aliases."""
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.distinct_customers"],
+        dimensions=["customers.region"],
+        having=[
+            Filter(dimension="orders.distinct_customers", op="gte", values=[2]),
+        ],
+    )
+    plan = compile_federated_query(q, catalog, mode="raw_rows")
+    assert "HAVING" in plan.merge.sql.upper()
+    assert "distinct_customers" in plan.merge.sql
+
+
+def test_raw_rows_having_rejects_unknown_measure() -> None:
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.distinct_customers"],
+        dimensions=["customers.region"],
+        having=[Filter(dimension="orders.revenue", op="gt", values=[100])],
+    )
+    with pytest.raises(FederationError) as exc:
+        compile_federated_query(q, catalog, mode="raw_rows")
+    assert exc.value.reason == "having_unknown_measure"
+
+
+def test_distributive_mode_still_refuses_having() -> None:
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.revenue"],
+        dimensions=["customers.region"],
+        having=[Filter(dimension="orders.revenue", op="gt", values=[100])],
+    )
+    with pytest.raises(FederationError) as exc:
+        compile_federated_query(q, catalog)
+    assert exc.value.reason == "having_in_distributive_federated"
+
+
+def test_raw_rows_refuses_ratio_measure() -> None:
+    """Ratio measures are deferred in raw-row mode — the merge would
+    need to recursively expand numerator/denominator into raw cols."""
+    orders = _orders().model_copy(
+        update={
+            "measures": [
+                Measure(name="revenue", sql="{o}.amount", agg="sum"),
+                Measure(name="count", sql="*", agg="count"),
+                Measure(
+                    name="aov",
+                    sql="",
+                    agg="ratio",
+                    numerator="revenue",
+                    denominator="count",
+                ),
+            ]
+        }
+    )
+    catalog = _catalog(orders, _customers())
+    q = SemanticQuery(measures=["orders.aov"], dimensions=["customers.region"])
+    with pytest.raises(FederationError) as exc:
+        compile_federated_query(q, catalog, mode="raw_rows")
+    assert exc.value.reason == "ratio_in_raw_rows"
+
+
+def test_raw_rows_refuses_filtered_measure() -> None:
+    orders = _orders().model_copy(
+        update={
+            "measures": [
+                Measure(
+                    name="paid_revenue",
+                    sql="{o}.amount",
+                    agg="sum",
+                    filter="{o}.status = 'paid'",
+                )
+            ]
+        }
+    )
+    catalog = _catalog(orders, _customers())
+    q = SemanticQuery(measures=["orders.paid_revenue"], dimensions=["customers.region"])
+    with pytest.raises(FederationError) as exc:
+        compile_federated_query(q, catalog, mode="raw_rows")
+    assert exc.value.reason == "filtered_measure_in_raw_rows"
+
+
+def test_raw_rows_refuses_time_dimension() -> None:
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.distinct_customers"],
+        dimensions=["customers.region"],
+        time_dimension=TimeWindow(
+            dimension="orders.created_at",
+            granularity="day",
+            range=("2026-01-01", "2026-02-01"),
+        ),
+    )
+    with pytest.raises(FederationError) as exc:
+        compile_federated_query(q, catalog, mode="raw_rows")
+    assert exc.value.reason == "time_dimension_in_raw_rows"
+
+
+def test_raw_rows_single_backend_path_is_unchanged() -> None:
+    """Single-backend queries still delegate to compile_query
+    regardless of ``mode`` — the mode only kicks in when fragments
+    span backends."""
+    catalog = _catalog(_orders())
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"])
+    distributive = compile_federated_query(q, catalog, mode="distributive")
+    raw_rows = compile_federated_query(q, catalog, mode="raw_rows")
+    assert distributive.fragments[0].sql == raw_rows.fragments[0].sql
+
+
+def test_raw_rows_fragment_is_ungrouped_with_large_limit_ok() -> None:
+    """Sanity: the raw-row fragment compiles without the 1000-row
+    ``ungrouped`` cap tripping. (The flag is internal; verifying via
+    a compiled query that would otherwise have raised.)"""
+    catalog = _federated_catalog()
+    q = SemanticQuery(
+        measures=["orders.distinct_customers"],
+        dimensions=["customers.region"],
+    )
+    plan = compile_federated_query(q, catalog, mode="raw_rows")
+    # Fragment sql has no LIMIT clause — raw-row mode releases the cap.
+    assert "LIMIT" not in plan.fragments[0].sql.upper()

@@ -36,13 +36,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from semql.compile import ColumnMeta, Compiled, compile_query
 from semql.errors import FederationError
 from semql.introspect import resolve_query
-from semql.model import Backend, Cube, Join, Measure
+from semql.model import Backend, Cube, Dimension, Join, Measure
 from semql.spec import Filter, SemanticQuery, TimeWindow
+
+FederationMode = Literal["distributive", "raw_rows"]
+"""Federation compile-path selector.
+
+- ``"distributive"`` (default) — fragments aggregate locally (SUM /
+  COUNT / decomposed AVG); merge re-aggregates with SUM. Refuses
+  ``count_distinct`` / ``min`` / ``max`` / ``ratio`` because they
+  don't distribute under SUM.
+- ``"raw_rows"`` — fragments emit ungrouped rows; merge applies the
+  full aggregation. Lifts the non-distributive-agg restriction and
+  the ``having`` restriction. Costs more bytes (full join cardinality
+  on the wire) so callers should opt in deliberately.
+"""
 
 if TYPE_CHECKING:
     from semql.backend import BackendStrategy
@@ -624,6 +637,486 @@ def _emit_merge_sql(
 
 
 # ---------------------------------------------------------------------------
+# Raw-row mode — lifts non-distributive aggregations and having
+# ---------------------------------------------------------------------------
+
+
+# Synthetic-dim name prefix for a measure's raw source SQL in raw_rows mode.
+# Picked so it can't collide with a user-declared dimension under semql's
+# ``[a-z_][a-z0-9_]*`` naming rules.
+_RAW_MEASURE_PREFIX = "__rm_"
+
+
+def _raw_measure_col(measure_name: str) -> str:
+    """Output-column name carrying a measure's raw source value."""
+    return _RAW_MEASURE_PREFIX + measure_name
+
+
+@dataclass
+class _RawRowPartitionPlan:
+    """Per-backend sub-query for raw-row federation.
+
+    Mirrors :class:`_PartitionPlan` but the sub-query is ``ungrouped=True``
+    — no aggregation in the fragment — and the merge step does all the
+    work. ``raw_measure_columns`` maps each original measure ref to the
+    column name + aggregator the merge SQL should apply.
+    """
+
+    backend: Backend
+    cubes: list[Cube]
+    sub_query: SemanticQuery
+    # Map measure ref ("orders.revenue") to (raw_col_name, agg). When
+    # ``raw_col_name`` is empty the merge should use ``COUNT(*)``
+    # rather than aggregating a column (the case for ``COUNT(*)``
+    # measures that have no underlying column).
+    raw_measure_columns: dict[str, tuple[str, str]]
+    dim_columns: dict[str, str]
+    bridge_columns: dict[str, str]
+
+
+def _build_partition_sub_query_raw_rows(
+    q: SemanticQuery,
+    catalog: dict[str, Cube],
+    partition_cubes: list[Cube],
+    primary_partition: Backend,
+    bridges: list[_Bridge],
+) -> _RawRowPartitionPlan:
+    """Construct an ungrouped per-partition fragment for raw-row mode.
+
+    Selects: every output dim this partition owns + every bridge key
+    that touches a partition cube + a synthetic dimension exposing
+    each measure's raw source SQL. The compiler runs with
+    ``_allow_unbounded_ungrouped=True`` because raw-row federation
+    inherently produces fragment-cardinality rows.
+
+    Refuses (in raw-row mode): ratio measures (would need recursive
+    expansion of numerator/denominator into raw cols — follow-up),
+    filtered measures (would need NULL-projection over the filter
+    predicate — follow-up).
+    """
+    partition_names = {c.name for c in partition_cubes}
+    backend = partition_cubes[0].backend
+    is_primary = backend is primary_partition
+
+    raw_measure_columns: dict[str, tuple[str, str]] = {}
+    synthetic_dims: dict[str, list[Dimension]] = {}
+
+    for ref in q.measures:
+        owner = _resolve_field_to_cube(ref, catalog)
+        if owner.name not in partition_names:
+            if is_primary:
+                raise FederationError(
+                    f"Measure {ref!r} resolves to cube {owner.name!r} on "
+                    f"backend {owner.backend.value!r}, which is not the "
+                    f"primary measure partition {primary_partition.value!r}. "
+                    f"All measures must live on one backend; the engine "
+                    f"can't cross-source-join row-level measure values "
+                    f"yet.",
+                    reason="measure_on_non_primary_partition",
+                )
+            continue
+        m_name = ref.rsplit(".", 1)[1]
+        m = next(x for x in owner.measures if x.name == m_name)
+        if m.agg == "ratio":
+            raise FederationError(
+                f"Measure {ref!r} uses agg='ratio' which is not yet "
+                "supported in raw_rows federation mode. Use distributive "
+                "mode (if numerator+denominator are sum/count) or expand "
+                "the ratio in the SemanticQuery and combine client-side.",
+                reason="ratio_in_raw_rows",
+            )
+        if m.filter:
+            raise FederationError(
+                f"Measure {ref!r} declares ``filter=...`` which is not "
+                "yet supported in raw_rows federation mode.",
+                reason="filtered_measure_in_raw_rows",
+            )
+        if m.agg == "count" and m.sql.strip() == "*":
+            # COUNT(*) — no raw column; merge emits COUNT(*) over the
+            # joined rows.
+            raw_measure_columns[ref] = ("", "count")
+            continue
+        raw_col = _raw_measure_col(m_name)
+        raw_dim = Dimension(name=raw_col, sql=m.sql, type="number")
+        synthetic_dims.setdefault(owner.name, []).append(raw_dim)
+        raw_measure_columns[ref] = (raw_col, m.agg)
+
+    if synthetic_dims:
+        for cube in list(partition_cubes):
+            extra = synthetic_dims.get(cube.name)
+            if not extra:
+                continue
+            patched = cube.model_copy(update={"dimensions": [*cube.dimensions, *extra]})
+            partition_cubes[partition_cubes.index(cube)] = patched
+
+    sub_dimensions: list[str] = []
+    dim_columns: dict[str, str] = {}
+    for ref in q.dimensions:
+        owner = _resolve_field_to_cube(ref, catalog)
+        if owner.name in partition_names:
+            sub_dimensions.append(ref)
+            dim_columns[ref] = ref.rsplit(".", 1)[1]
+
+    if q.time_dimension is not None:
+        td_cube = _resolve_field_to_cube(q.time_dimension.dimension, catalog)
+        if td_cube.name in partition_names:
+            raise FederationError(
+                "raw_rows federation mode does not yet support "
+                "time_dimension — the merge step would need to apply "
+                "the granularity bucket to raw timestamps, which is a "
+                "follow-up. Use distributive mode, or pre-bucket the "
+                "time column as a Dimension.",
+                reason="time_dimension_in_raw_rows",
+            )
+
+    sub_filters: list[Filter] = []
+    for f in q.filters:
+        owner = _resolve_field_to_cube(f.dimension, catalog)
+        if owner.name in partition_names:
+            sub_filters.append(f)
+
+    bridge_columns: dict[str, str] = {}
+    for b in bridges:
+        if b.left_cube.name in partition_names:
+            ref = f"{b.left_cube.name}.{b.left_dim}"
+            if ref not in sub_dimensions:
+                sub_dimensions.append(ref)
+            bridge_columns[ref] = b.left_dim
+        if b.right_cube.name in partition_names:
+            ref = f"{b.right_cube.name}.{b.right_dim}"
+            if ref not in sub_dimensions:
+                sub_dimensions.append(ref)
+            bridge_columns[ref] = b.right_dim
+
+    # Project synthetic raw-measure dims (skip the synthetic-less
+    # COUNT(*) cases).
+    for ref, (col, _agg) in raw_measure_columns.items():
+        if not col:
+            continue
+        owner = _resolve_field_to_cube(ref, catalog)
+        sub_dimensions.append(f"{owner.name}.{col}")
+
+    sub_query = SemanticQuery(
+        measures=[],
+        dimensions=sub_dimensions,
+        filters=sub_filters,
+        ungrouped=True,
+        order=[],
+    )
+    return _RawRowPartitionPlan(
+        backend=backend,
+        cubes=partition_cubes,
+        sub_query=sub_query,
+        raw_measure_columns=raw_measure_columns,
+        dim_columns=dim_columns,
+        bridge_columns=bridge_columns,
+    )
+
+
+def _emit_merge_sql_raw_rows(
+    q: SemanticQuery,
+    catalog: dict[str, Cube],
+    primary_partition: Backend,
+    partitions: list[_RawRowPartitionPlan],
+    bridges: list[_Bridge],
+    output_columns: list[str],
+) -> str:
+    """Generate the DuckDB merge SQL for raw-row federation.
+
+    Structure: FROM primary fragment LEFT JOIN satellites on bridge
+    columns, GROUP BY output dims, SELECT dims + per-measure
+    aggregation expression. ``having`` (if any) lives at this layer
+    against the recomposed measure aliases — that's how raw-row mode
+    lifts the v1 ``having`` refusal.
+    """
+    by_backend: dict[Backend, tuple[int, _RawRowPartitionPlan]] = {
+        p.backend: (i, p) for i, p in enumerate(partitions)
+    }
+    primary_idx, _primary_plan = by_backend[primary_partition]
+
+    def frag_alias(idx: int) -> str:
+        return f"f{idx}"
+
+    cube_to_idx: dict[str, int] = {}
+    for i, p in enumerate(partitions):
+        for c in p.cubes:
+            cube_to_idx[c.name] = i
+
+    select_exprs: list[str] = []
+    for ref in q.dimensions:
+        owner = _resolve_field_to_cube(ref, catalog)
+        idx = cube_to_idx[owner.name]
+        plan = partitions[idx]
+        col = plan.dim_columns[ref]
+        alias = ref.rsplit(".", 1)[1]
+        select_exprs.append(f"{frag_alias(idx)}.{_quote_ident(col)} AS {_quote_ident(alias)}")
+
+    # Per-measure aggregation in the merge — the heart of raw-row mode.
+    for ref in q.measures:
+        owner = _resolve_field_to_cube(ref, catalog)
+        idx = cube_to_idx[owner.name]
+        plan = partitions[idx]
+        m_name = ref.rsplit(".", 1)[1]
+        col, agg = plan.raw_measure_columns[ref]
+        if not col:
+            # COUNT(*) over the joined rows.
+            expr = "COUNT(*)"
+        else:
+            ref_col = f"{frag_alias(idx)}.{_quote_ident(col)}"
+            if agg == "sum":
+                expr = f"SUM({ref_col})"
+            elif agg == "count":
+                expr = f"COUNT({ref_col})"
+            elif agg == "count_distinct":
+                expr = f"COUNT(DISTINCT {ref_col})"
+            elif agg == "avg":
+                expr = f"AVG({ref_col})"
+            elif agg == "min":
+                expr = f"MIN({ref_col})"
+            elif agg == "max":
+                expr = f"MAX({ref_col})"
+            else:
+                # Defensive — partition builder refuses the rest.
+                raise FederationError(
+                    f"Measure {ref!r} uses agg={agg!r} which is not implemented in raw_rows merge.",
+                    reason=f"unimplemented_agg_in_raw_rows:{agg}",
+                )
+        select_exprs.append(f"{expr} AS {_quote_ident(m_name)}")
+
+    # FROM + LEFT JOIN chain — identical shape to the distributive path.
+    from_clause = f"frag_{primary_idx} AS {frag_alias(primary_idx)}"
+    joins_sql: list[str] = []
+    joined: set[int] = {primary_idx}
+    pending = list(bridges)
+    while pending:
+        progress = False
+        remaining: list[_Bridge] = []
+        for b in pending:
+            left_idx = cube_to_idx[b.left_cube.name]
+            right_idx = cube_to_idx[b.right_cube.name]
+            if left_idx in joined and right_idx not in joined:
+                new_idx = right_idx
+                left_alias = frag_alias(left_idx)
+                right_alias = frag_alias(new_idx)
+                left_col = partitions[left_idx].bridge_columns[f"{b.left_cube.name}.{b.left_dim}"]
+                right_col = partitions[new_idx].bridge_columns[f"{b.right_cube.name}.{b.right_dim}"]
+            elif right_idx in joined and left_idx not in joined:
+                new_idx = left_idx
+                left_alias = frag_alias(right_idx)
+                right_alias = frag_alias(new_idx)
+                left_col = partitions[right_idx].bridge_columns[
+                    f"{b.right_cube.name}.{b.right_dim}"
+                ]
+                right_col = partitions[new_idx].bridge_columns[f"{b.left_cube.name}.{b.left_dim}"]
+            else:
+                remaining.append(b)
+                continue
+            joins_sql.append(
+                f"LEFT JOIN frag_{new_idx} AS {right_alias} "
+                f"ON {left_alias}.{_quote_ident(left_col)} = "
+                f"{right_alias}.{_quote_ident(right_col)}"
+            )
+            joined.add(new_idx)
+            progress = True
+        pending = remaining
+        if not progress and pending:
+            unreached = [f"{b.left_cube.name}<->{b.right_cube.name}" for b in pending]
+            raise FederationError(
+                "Federated plan has disconnected backend partitions — "
+                "the bridge join graph is not a connected tree rooted at "
+                f"the primary partition. Unreached bridges: {unreached}.",
+                reason="disconnected_partitions",
+            )
+
+    n_group = len(q.dimensions)
+    group_by = ", ".join(str(i + 1) for i in range(n_group))
+
+    sql = f"SELECT {', '.join(select_exprs)} FROM {from_clause}"
+    if joins_sql:
+        sql += " " + " ".join(joins_sql)
+    if q.measures and n_group > 0:
+        sql += f" GROUP BY {group_by}"
+
+    # HAVING — raw-row mode applies it at merge against the recomposed
+    # measure aliases. Each Filter's ``dimension`` must name one of the
+    # measure refs in ``q.measures``; we resolve to the output alias.
+    if q.having:
+        having_terms: list[str] = []
+        for hf in q.having:
+            if hf.dimension not in q.measures:
+                raise FederationError(
+                    f"HAVING dimension {hf.dimension!r} in raw_rows mode "
+                    "must reference one of the query's measures by "
+                    f"qualified name. Known measures: {q.measures}.",
+                    reason="having_unknown_measure",
+                )
+            alias = hf.dimension.rsplit(".", 1)[1]
+            having_terms.append(_emit_having_term(alias, hf))
+        sql += f" HAVING {' AND '.join(having_terms)}"
+
+    if q.order:
+        order_terms: list[str] = []
+        for ref, direction in q.order:
+            alias = ref.rsplit(".", 1)[-1] if "." in ref else ref
+            if alias not in output_columns:
+                raise FederationError(
+                    f"ORDER BY {ref!r}: not in the federated output columns {output_columns}.",
+                    reason="order_by_unknown_column",
+                )
+            order_terms.append(f"{_quote_ident(alias)} {'DESC' if direction == 'desc' else 'ASC'}")
+        sql += f" ORDER BY {', '.join(order_terms)}"
+
+    if q.limit is not None:
+        sql += f" LIMIT {int(q.limit)}"
+    if q.offset is not None and q.offset > 0:
+        sql += f" OFFSET {int(q.offset)}"
+
+    return sql
+
+
+def _emit_having_term(alias: str, f: Filter) -> str:
+    """Render a single HAVING predicate in DuckDB dialect.
+
+    Used by raw_rows mode; the alias references a measure output column
+    on the merge SELECT. Values inline because the merge SQL is a
+    single string with no separate params envelope — and the values
+    come from the user-supplied SemanticQuery's HAVING filters which
+    were validated upstream."""
+    col = _quote_ident(alias)
+    op = f.op
+    vals = list(f.values)
+    if op == "gt":
+        return f"{col} > {_lit(vals[0])}"
+    if op == "gte":
+        return f"{col} >= {_lit(vals[0])}"
+    if op == "lt":
+        return f"{col} < {_lit(vals[0])}"
+    if op == "lte":
+        return f"{col} <= {_lit(vals[0])}"
+    if op == "eq":
+        return f"{col} = {_lit(vals[0])}"
+    if op == "neq":
+        return f"{col} <> {_lit(vals[0])}"
+    raise FederationError(
+        f"HAVING operator {op!r} is not yet supported in raw_rows federation mode.",
+        reason=f"unsupported_having_op:{op}",
+    )
+
+
+def _lit(v: object) -> str:
+    """Emit a literal in DuckDB dialect — numeric or single-quoted string."""
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v).replace("'", "''")
+    return f"'{s}'"
+
+
+def _compile_raw_rows(
+    q: SemanticQuery,
+    catalog: dict[str, Cube],
+    grouped: dict[Backend, list[Cube]],
+    backend_order: list[Backend],
+    primary_partition: Backend,
+    bridges: list[_Bridge],
+    *,
+    context: dict[str, str] | None,
+    group_by_alias: bool,
+    having_alias: bool,
+    strategies: dict[Backend, BackendStrategy] | None,
+    viewer: AuthContext | None,
+    policy: PolicyFn | None,
+    scope_fns: dict[str, ScopeFn] | None,
+) -> FederatedPlan:
+    """Multi-backend raw-row compile path.
+
+    Each partition emits an ungrouped fragment (raw rows + bridge keys
+    + synthetic raw-measure dims); the merge step joins them and
+    applies the final aggregation (including non-distributive aggs and
+    ``having``)."""
+    partitions: list[_RawRowPartitionPlan] = []
+    for backend in backend_order:
+        plan = _build_partition_sub_query_raw_rows(
+            q, catalog, list(grouped[backend]), primary_partition, bridges
+        )
+        partitions.append(plan)
+
+    fragments: list[Compiled] = []
+    for plan in partitions:
+        scoped = _scoped_catalog(plan.cubes)
+        c = compile_query(
+            plan.sub_query,
+            scoped,
+            context=context,
+            group_by_alias=group_by_alias,
+            having_alias=having_alias,
+            strategies=strategies,
+            views=None,
+            viewer=viewer,
+            policy=policy,
+            scope_fns=scope_fns,
+            _allow_unbounded_ungrouped=True,
+        )
+        fragments.append(c)
+
+    output_columns: list[str] = []
+    output_column_meta: list[ColumnMeta] = []
+    cube_to_idx: dict[str, int] = {}
+    for i, p in enumerate(partitions):
+        for cube in p.cubes:
+            cube_to_idx[cube.name] = i
+
+    def _meta_for_dim(ref: str) -> ColumnMeta:
+        owner = _resolve_field_to_cube(ref, catalog)
+        idx = cube_to_idx[owner.name]
+        plan = partitions[idx]
+        col = plan.dim_columns[ref]
+        for cm in fragments[idx].column_meta:
+            if cm.name == col:
+                return ColumnMeta(
+                    name=ref.rsplit(".", 1)[1],
+                    kind=cm.kind,
+                    display_name=cm.display_name,
+                    unit=cm.unit,
+                    display_unit=cm.display_unit,
+                    format=cm.format,
+                )
+        return ColumnMeta(name=ref.rsplit(".", 1)[1], kind="dimension")
+
+    def _meta_for_measure(ref: str) -> ColumnMeta:
+        owner = _resolve_field_to_cube(ref, catalog)
+        m_name = ref.rsplit(".", 1)[1]
+        m = next(x for x in owner.measures if x.name == m_name)
+        return ColumnMeta(
+            name=m_name,
+            kind="measure",
+            display_name=m.display_name or m_name.replace("_", " ").title(),
+            unit=m.unit,
+            display_unit=m.display_unit,
+            format=m.format,
+        )
+
+    for ref in q.dimensions:
+        output_columns.append(ref.rsplit(".", 1)[1])
+        output_column_meta.append(_meta_for_dim(ref))
+
+    for ref in q.measures:
+        output_columns.append(ref.rsplit(".", 1)[1])
+        output_column_meta.append(_meta_for_measure(ref))
+
+    merge_sql = _emit_merge_sql_raw_rows(
+        q, catalog, primary_partition, partitions, bridges, output_columns
+    )
+    return FederatedPlan(
+        fragments=fragments,
+        merge=MergePlan(sql=merge_sql),
+        columns=output_columns,
+        column_meta=output_column_meta,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -640,6 +1133,7 @@ def compile_federated_query(
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
     scope_fns: dict[str, ScopeFn] | None = None,
+    mode: FederationMode = "distributive",
 ) -> FederatedPlan:
     """Compile a query whose touched cubes span multiple backends.
 
@@ -675,13 +1169,14 @@ def compile_federated_query(
             "the segment's predicate as a flat Filter on the same cube.",
             reason="segments_in_federated",
         )
-    if q.having:
+    if q.having and mode == "distributive":
         raise FederationError(
-            "Federated queries cannot use HAVING in v1 — the having "
-            "predicate would have to run against re-aggregated measures "
-            "at the merge step, which the in-process executor handles "
-            "but sans-io won't until a follow-up.",
-            reason="having_in_federated",
+            "Federated queries cannot use HAVING in distributive mode "
+            "— the having predicate would have to run against "
+            "re-aggregated measures at the merge step, which raw_rows "
+            'mode now lifts. Pass ``mode="raw_rows"`` to '
+            "compile_federated_query.",
+            reason="having_in_distributive_federated",
         )
 
     touched = _touched(q, catalog)
@@ -755,6 +1250,24 @@ def compile_federated_query(
     # comes first — the merge SQL FROMs the primary and LEFT JOINs the
     # satellites.
     backend_order = [primary_partition] + [b for b in grouped if b is not primary_partition]
+
+    if mode == "raw_rows":
+        return _compile_raw_rows(
+            q,
+            catalog,
+            grouped,
+            backend_order,
+            primary_partition,
+            bridges,
+            context=context,
+            group_by_alias=group_by_alias,
+            having_alias=having_alias,
+            strategies=strategies,
+            viewer=viewer,
+            policy=policy,
+            scope_fns=scope_fns,
+        )
+
     partitions: list[_PartitionPlan] = []
     for backend in backend_order:
         plan = _build_partition_sub_query(
@@ -847,6 +1360,7 @@ def compile_federated_query(
 __all__ = [
     "FederatedPlan",
     "FederationError",
+    "FederationMode",
     "MergePlan",
     "compile_federated_query",
 ]

@@ -520,6 +520,7 @@ def compile_query(
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
     scope_fns: dict[str, ScopeFn] | None = None,
+    _allow_unbounded_ungrouped: bool = False,
 ) -> Compiled:
     """Compile a SemanticQuery to a Compiled bundle.
 
@@ -581,7 +582,11 @@ def compile_query(
             "OFFSET is only meaningful in combination with LIMIT."
         )
 
-    if q.ungrouped and (q.limit is None or q.limit > MAX_UNGROUPED_ROWS):
+    if (
+        q.ungrouped
+        and not _allow_unbounded_ungrouped
+        and (q.limit is None or q.limit > MAX_UNGROUPED_ROWS)
+    ):
         raise CompileError(
             f"Ungrouped query requires limit <= {MAX_UNGROUPED_ROWS}. Got limit={q.limit}."
         )

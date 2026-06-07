@@ -334,6 +334,123 @@ def test_engine_repeatable_runs_dont_leak_state(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Raw-row federation (P3) — non-distributive aggs end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_engine_runs_raw_rows_plan_with_count_distinct(
+    pg_con: duckdb.DuckDBPyConnection,
+    bq_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """In raw-row mode the primary fragment emits row-level
+    customer_ids; the merge DuckDB step does the
+    ``COUNT(DISTINCT ...)`` after the cross-source join. Distributive
+    mode would refuse this query."""
+    orders_with_distinct = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        primary_key="id",
+        measures=[
+            Measure(
+                name="distinct_customers",
+                sql="{o}.customer_id",
+                agg="count_distinct",
+            ),
+        ],
+        dimensions=[
+            Dimension(name="id", sql="{o}.id", type="number"),
+            Dimension(
+                name="customer_id",
+                sql="{o}.customer_id",
+                type="number",
+                foreign_key="customers",
+            ),
+            Dimension(name="status", sql="{o}.status", type="string"),
+        ],
+        joins=[
+            Join(to="customers", relationship="many_to_one", on="{o}.customer_id = {c}.id"),
+        ],
+    )
+    catalog = _catalog(orders_with_distinct, _customers_cube())
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.distinct_customers"],
+            dimensions=["customers.region"],
+        ),
+        catalog,
+        mode="raw_rows",
+    )
+
+    engine = Engine()
+    engine.register(Backend.POSTGRES, _DialectTranslatingAdapter(pg_con))
+    engine.register(Backend.BIGQUERY, _DialectTranslatingAdapter(bq_con))
+
+    result = engine.run(plan)
+    rows = {r[0]: r[1] for r in result.rows}
+    # EU customer_ids in the dataset: {10, 12} (two distinct).
+    # US customer_ids in the dataset: {11}        (one distinct).
+    assert rows == {"EU": 2, "US": 1}
+
+
+def test_engine_runs_raw_rows_plan_with_having(
+    pg_con: duckdb.DuckDBPyConnection,
+    bq_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """HAVING applied at the merge step against the recomposed
+    aggregate filters out regions whose distinct customer count is
+    below the threshold."""
+    orders_with_distinct = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        primary_key="id",
+        measures=[
+            Measure(
+                name="distinct_customers",
+                sql="{o}.customer_id",
+                agg="count_distinct",
+            ),
+        ],
+        dimensions=[
+            Dimension(name="id", sql="{o}.id", type="number"),
+            Dimension(
+                name="customer_id",
+                sql="{o}.customer_id",
+                type="number",
+                foreign_key="customers",
+            ),
+        ],
+        joins=[
+            Join(to="customers", relationship="many_to_one", on="{o}.customer_id = {c}.id"),
+        ],
+    )
+    catalog = _catalog(orders_with_distinct, _customers_cube())
+    from semql.spec import Filter
+
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.distinct_customers"],
+            dimensions=["customers.region"],
+            having=[Filter(dimension="orders.distinct_customers", op="gte", values=[2])],
+        ),
+        catalog,
+        mode="raw_rows",
+    )
+
+    engine = Engine()
+    engine.register(Backend.POSTGRES, _DialectTranslatingAdapter(pg_con))
+    engine.register(Backend.BIGQUERY, _DialectTranslatingAdapter(bq_con))
+
+    result = engine.run(plan)
+    rows = {r[0]: r[1] for r in result.rows}
+    # Only EU (2 distinct) survives the HAVING >= 2.
+    assert rows == {"EU": 2}
+
+
 def test_merge_plan_has_required_attributes() -> None:
     catalog = _catalog(_orders_cube())
     q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"])
