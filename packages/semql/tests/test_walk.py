@@ -149,7 +149,7 @@ def test_resolve_field_returns_cube_and_field() -> None:
 
 
 def test_resolve_field_handles_time_dimension() -> None:
-    cube, fld = resolve_field("orders.created_at", _catalog())
+    _cube, fld = resolve_field("orders.created_at", _catalog())
     assert isinstance(fld, TimeDimension)
 
 

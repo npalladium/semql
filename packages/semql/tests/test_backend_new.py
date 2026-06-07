@@ -22,6 +22,7 @@ from semql.backend import (
     BigQueryStrategy,
     DuckDBStrategy,
     SnowflakeStrategy,
+    SqlResolver,
     render,
     strategy_for,
 )
@@ -145,7 +146,8 @@ def test_duckdb_emit_contains_uses_native_ilike() -> None:
 )
 def test_emit_source_renders_aliased_table(strategy_cls: type, backend: Backend) -> None:
     cube = _orders()
-    out = render(strategy_cls().emit_source(cube, {"orders": cube}, lambda x: x), backend)
+    identity: SqlResolver = lambda x: x  # noqa: E731 -- inline identity resolver; named def is overkill for a one-line test fixture
+    out = render(strategy_cls().emit_source(cube, {"orders": cube}, identity), backend)
     # All three dialects emit ``public.orders AS o`` (possibly quoted on BQ).
     assert "orders" in out and "o" in out
 

@@ -15,7 +15,9 @@ from semql.__main__ import main
 
 
 @pytest.fixture(autouse=True)
-def _make_test_catalog_importable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _make_test_catalog_importable(  # pyright: ignore[reportUnusedFunction] -- autouse fixture; pytest reads it via the decorator, pyright can't see that
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
     """Drop a temp catalog module on sys.path so --catalog can find it."""
     catalog_module = tmp_path / "_semql_cli_test_catalog.py"
     catalog_module.write_text(
@@ -34,7 +36,7 @@ default = Catalog([
 ])
 """
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.syspath_prepend(str(tmp_path))  # pyright: ignore[reportUnknownMemberType] -- pytest's MonkeyPatch.syspath_prepend lacks complete type info upstream
     # Ensure a re-import each test, so the catalog hangs off this tmp dir.
     sys.modules.pop("_semql_cli_test_catalog", None)
     return tmp_path
@@ -127,7 +129,7 @@ def test_cli_rejects_missing_attribute() -> None:
 def test_cli_rejects_non_catalog_attribute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """If the resolved attribute isn't a Catalog, fail clearly."""
     (tmp_path / "_semql_cli_test_catalog2.py").write_text("default = 'not a catalog'")
-    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.syspath_prepend(str(tmp_path))  # pyright: ignore[reportUnknownMemberType] -- pytest's MonkeyPatch.syspath_prepend lacks complete type info upstream
     sys.modules.pop("_semql_cli_test_catalog2", None)
 
     with pytest.raises(SystemExit, match=r"not semql.Catalog"):
