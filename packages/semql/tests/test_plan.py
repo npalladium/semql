@@ -1,0 +1,105 @@
+"""Smoke tests for the prompt-pipeline output models.
+
+These models are the contract between the four prompt roles and
+their callers. Each test pins one shape so a planner emitting valid
+JSON gets parsed correctly, and an invalid shape (wrong literal,
+missing required field) fails at the validator boundary.
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+from semql import (
+    DrilldownSuggestion,
+    DrilldownSuggestions,
+    Presentation,
+    QueryPlan,
+    QueryStep,
+    RouterDecision,
+    SemanticQuery,
+)
+
+
+def test_router_decision_semantic_path_carries_cubes_views() -> None:
+    d = RouterDecision(
+        path="semantic",
+        cubes=["orders"],
+        views=["revenue_overview"],
+        reasoning="The question asks for revenue rollup.",
+    )
+    assert d.path == "semantic"
+    assert d.cubes == ["orders"]
+    assert d.views == ["revenue_overview"]
+
+
+def test_router_decision_raw_path_has_empty_surfaces() -> None:
+    d = RouterDecision(path="raw")
+    assert d.cubes == []
+    assert d.views == []
+
+
+def test_router_decision_rejects_unknown_path() -> None:
+    with pytest.raises(ValidationError):
+        RouterDecision(path="hybrid")  # type: ignore[arg-type]
+
+
+def test_router_decision_is_frozen() -> None:
+    d = RouterDecision(path="semantic")
+    with pytest.raises(ValidationError):
+        d.path = "raw"
+
+
+def test_query_step_intent_is_closed_literal() -> None:
+    q = SemanticQuery(measures=["orders.revenue"])
+    QueryStep(query=q, intent="headline")
+    QueryStep(query=q, intent="breakdown")
+    QueryStep(query=q, intent="compare")
+    QueryStep(query=q, intent="context")
+    with pytest.raises(ValidationError):
+        QueryStep(query=q, intent="bespoke")  # type: ignore[arg-type]
+
+
+def test_query_plan_carries_ordered_steps() -> None:
+    q = SemanticQuery(measures=["orders.revenue"])
+    plan = QueryPlan(
+        steps=[
+            QueryStep(query=q, intent="headline", label="Total"),
+            QueryStep(query=q, intent="breakdown", label="By region"),
+        ],
+    )
+    assert len(plan.steps) == 2
+    assert plan.steps[0].intent == "headline"
+
+
+def test_empty_query_plan_is_legal() -> None:
+    """An empty plan means the Generator could not formulate a query —
+    callers handle it as "ask the user to rephrase," not as success."""
+    plan = QueryPlan()
+    assert plan.steps == []
+
+
+def test_presentation_summary_required_others_optional() -> None:
+    p = Presentation(summary="Revenue up 12%.")
+    assert p.highlights == []
+    assert p.caveats == []
+
+
+def test_drilldown_suggestion_carries_ready_to_run_query() -> None:
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"])
+    s = DrilldownSuggestion(label="Break down by region", query=q)
+    assert s.query is q
+    assert s.rationale is None
+
+
+def test_drilldown_suggestions_collection_holds_suggestions() -> None:
+    q = SemanticQuery(measures=["orders.revenue"])
+    coll = DrilldownSuggestions(
+        suggestions=[
+            DrilldownSuggestion(label="By region", query=q),
+            DrilldownSuggestion(label="By product", query=q),
+        ],
+        focus="Q4 revenue spike",
+    )
+    assert len(coll.suggestions) == 2
+    assert coll.focus == "Q4 revenue spike"
