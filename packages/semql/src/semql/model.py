@@ -94,6 +94,14 @@ class Measure(BaseField):
     # so the planner LLM doesn't naively ask for rollups; compiler
     # refusal lands with the rollup work.
     non_additive: bool = False
+    # Optional row-level predicate scoping this measure's aggregation:
+    # ``COUNT(*) FILTER (WHERE <filter>)``. Same ``{alias}`` placeholder
+    # convention as ``Segment.sql`` / ``base_predicate`` / ``Join.on``.
+    # Lets one query ask "paid revenue vs pending revenue" without
+    # three round-trips. sqlglot renders FILTER natively on PG / CH /
+    # DuckDB / BigQuery and transpiles to ``COUNT(IFF(...))`` on
+    # Snowflake.
+    filter: str | None = None
 
 
 class Dimension(BaseField):

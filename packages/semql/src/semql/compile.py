@@ -615,7 +615,16 @@ def compile_query(
                 inner_expr: exp.Expression = exp.Star()
             else:
                 inner_expr = parse(m.sql)
-            sel = sel.select(exp.alias_(_agg_node(m, inner_expr), col_name))
+            agg_expr = _agg_node(m, inner_expr)
+            if m.filter:
+                # ``COUNT(*) FILTER (WHERE <pred>)`` — sqlglot renders
+                # natively on PG / CH / DuckDB / BigQuery and transpiles
+                # to ``COUNT(IFF(...))`` on Snowflake.
+                agg_expr = exp.Filter(
+                    this=agg_expr,
+                    expression=exp.Where(this=parse(m.filter)),
+                )
+            sel = sel.select(exp.alias_(agg_expr, col_name))
 
         if not q.ungrouped and not measure_fields:
             sel.set("distinct", exp.Distinct())
