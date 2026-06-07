@@ -52,10 +52,10 @@ secrets_file := "secrets.enc.yaml"
 clean-dist:
     rm -rf dist
 
-# Build wheels + sdists for one or all packages. Defaults to all.
-#   just build           # all four
+# Build wheels + sdists for one or all packages. Defaults to all six.
+#   just build           # all six
 #   just build semql     # just semql
-build *pkgs="semql semql-mcp semql-erd semql-validate-db": clean-dist
+build *pkgs="semql semql-mcp semql-erd semql-validate-db semql-engine semql-introspect": clean-dist
     #!/usr/bin/env bash
     set -euo pipefail
     for pkg in {{pkgs}}; do
@@ -159,12 +159,12 @@ wait-indexed pkg:
     echo "ERROR: {{pkg}}==$version not on PyPI after 5 minutes." >&2
     exit 1
 
-# Build + publish the three semql dependents to TestPyPI.
+# Build + publish the semql dependents to TestPyPI.
 # Assumes semql is already on TestPyPI (use wait-indexed-test before).
 publish-test-rest: clean-dist
     #!/usr/bin/env bash
     set -euo pipefail
-    for pkg in semql-mcp semql-erd semql-validate-db; do
+    for pkg in semql-mcp semql-erd semql-validate-db semql-engine semql-introspect; do
       echo "── build $pkg ──"
       uv build --package "$pkg"
     done
@@ -175,12 +175,12 @@ publish-test-rest: clean-dist
     fi
     uv publish --publish-url https://test.pypi.org/legacy/ dist/*
 
-# Build + publish the three semql dependents to real PyPI.
+# Build + publish the semql dependents to real PyPI.
 # Assumes semql is already on PyPI (use wait-indexed before).
 publish-rest: clean-dist
     #!/usr/bin/env bash
     set -euo pipefail
-    for pkg in semql-mcp semql-erd semql-validate-db; do
+    for pkg in semql-mcp semql-erd semql-validate-db semql-engine semql-introspect; do
       echo "── build $pkg ──"
       uv build --package "$pkg"
     done

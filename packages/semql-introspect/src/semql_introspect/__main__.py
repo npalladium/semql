@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import Any, cast
 
 from semql.model import Backend
 
@@ -26,15 +26,17 @@ def _connect(backend_name: str, conn_string: str) -> Any:  # noqa: ANN401
     one backend's driver is installed. Connection-string syntax is
     driver-native (DSNs for psycopg, file paths for DuckDB)."""
     if backend_name == "postgres":
+        # psycopg lacks py.typed; cast the module so attribute access yields Any.
         import psycopg  # type: ignore[import-not-found]
 
-        return psycopg.connect(conn_string)
+        return cast(Any, psycopg).connect(conn_string)
     if backend_name == "duckdb":
         import duckdb
 
-        return duckdb.connect(conn_string)
+        return cast(Any, duckdb).connect(conn_string)
     if backend_name == "snowflake":
-        import snowflake.connector  # type: ignore[import-not-found]
+        # snowflake-connector-python lacks py.typed.
+        from snowflake import connector as sf_connector  # type: ignore[import-not-found]
 
         # Snowflake takes kwargs; expect a key=value;... string.
         kwargs: dict[str, str] = {}
@@ -43,7 +45,7 @@ def _connect(backend_name: str, conn_string: str) -> Any:  # noqa: ANN401
                 continue
             k, _, v = pair.partition("=")
             kwargs[k.strip()] = v.strip()
-        return snowflake.connector.connect(**kwargs)
+        return cast(Any, sf_connector).connect(**kwargs)
     raise SystemExit(
         f"semql-introspect: no driver wired up for backend {backend_name!r}. "
         "Supported via the CLI: postgres, duckdb, snowflake. For other "

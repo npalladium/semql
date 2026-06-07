@@ -10,10 +10,11 @@ emits the expected cubes / annotations.
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import cast
 
 import duckdb
 import pytest
-from semql.model import Backend
+from semql.model import Backend, Cube
 from semql_introspect import (
     InformationSchemaProbe,
     introspect,
@@ -234,7 +235,8 @@ def test_emitted_python_imports_and_compiles(conn: duckdb.DuckDBPyConnection) ->
     exec(compile(src, "<introspected>", "exec"), ns)
     cubes = ns["CUBES"]
     assert isinstance(cubes, list)
-    assert {c.name for c in cubes} == {"orders", "customers"}
+    cubes_typed = cast(list[Cube], cubes)
+    assert {c.name for c in cubes_typed} == {"orders", "customers"}
 
 
 def test_emitted_python_carries_todo_comments(conn: duckdb.DuckDBPyConnection) -> None:
