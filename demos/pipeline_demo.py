@@ -7,7 +7,7 @@ the full data flow — fragment in, structured value out, compiled SQL,
 narrative back — without needing an API key. Drop in pydantic-ai
 Agents to make it real.
 
-Run with: ``uv run scripts/pipeline_demo.py``
+Run with: ``uv run demos/pipeline_demo.py``
 """
 
 from __future__ import annotations

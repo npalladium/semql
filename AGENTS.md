@@ -8,20 +8,68 @@ SemQL itself.
 
 ```
 packages/
-  semql/             # core: model, Cube, Catalog, compile_query, prompt rendering
+  semql/             # core: catalog, compiler, auth, introspection, prompt pipeline
   semql-mcp/         # FastMCP-backed MCPServer exposing a Catalog
   semql-erd/         # graphviz ER-diagram generator for catalogues
   semql-validate-db/ # pre-deploy drift check (LIMIT 0 probes per cube/join)
+demos/
+  pipeline_demo.py    # end-to-end Router → Generator → Compile → Presenter → Drilldown
 scripts/
   gen_api_docs.py     # griffe → docs/api/*.md
   check_api_break.py  # griffe-driven public-surface diff
 .github/workflows/    # CI (lint, types, tests, breakage, build)
-skills/               # installable Claude Code skills
+skills/
+  semql-requirement-discovery.md  # interview → requirements doc
+  semql-cube.md                   # requirements doc → Cube definitions
 docs/notes/           # source material (gitignored)
 docs/api/             # generated API reference (gitignored)
 PHILOSOPHY.md         # design invariants — read this before changing scope
 TODOS.org             # open work, DAG, ribbon (gitignored)
 ```
+
+## Core architecture
+
+The `semql` package is organised around three layers:
+
+1. **Model layer** (`model.py`, `spec.py`, `plan.py`) — frozen Pydantic
+   value types. Catalogue types (Cube/Measure/Dimension/...), spec
+   types (SemanticQuery/Filter/TimeWindow/...), and prompt-pipeline
+   output types (RouterDecision/QueryPlan/Presentation/...).
+2. **Compiler layer** (`compile.py`, `backend.py`, `dialect.py`) —
+   pure `SemanticQuery + Catalog → Compiled(sql, params, columns)`.
+   Per-backend strategies own dialect quirks. Auth (viewer + roles +
+   ScopeFn) injects predicates inside the isolation subquery.
+3. **Discovery layer** (`introspect.py`) — walk-the-catalog primitives
+   that downstream tools share: `iter_cubes`, `iter_fields`,
+   `iter_joins`, `resolve_field`, `resolve_query`. Honour
+   `viewer + policy` so prompt rendering and MCP tool registration
+   shrink to the viewer's authorised surface.
+
+The four-role prompt pipeline (Router / Query Generator / Presenter /
+Drilldown) pairs prompt-fragment builders in `prompt.py` with typed
+Pydantic outputs in `plan.py`. Bring your own LLM client; the schema
+is the contract.
+
+## Authorisation
+
+`AuthContext(viewer_id, roles, metadata)` is the request-scoped
+identity. Threading it through:
+
+- **Discovery surfaces** (prompt fragments, MCP, ERD) filter cubes
+  via `viewer_sees(cube, viewer, policy)`: ANY-match on
+  `Cube.required_roles` + optional `Catalog.policy` override.
+- **Compiler** refuses queries that touch unauthorised cubes (loud
+  CompileError, not silent filtering — silent filtering lets an
+  attacker probe the surface).
+- **Row-level scope** — `Cube.scope` names a function in
+  `Catalog.scope_fns: dict[str, ScopeFn]`. When a viewer is present,
+  the compiler calls the function and injects the returned
+  `ScopePredicate` *inside* the cube's alias subquery, alongside
+  tenancy and `security_sql`. Outer `OR`s can't bypass it.
+
+`viewer.viewer_id` auto-flattens to `ctx.viewer_id` in the resolution
+context so cubes can declare `security_sql="{t}.owner_id = {ctx.viewer_id}"`
+without caller plumbing.
 
 Each package is a uv workspace member declared in the top-level
 `pyproject.toml`. There is no monorepo tooling beyond `uv` itself.
@@ -51,8 +99,8 @@ real bugs. (Item #59 in `TODOS.org` is to revisit this trade-off.)
 ### Testing
 
 Red / Green TDD is the default cadence — write a failing test first,
-then make it pass. The existing 568-test suite acts as the regression
-guard for refactors.
+then make it pass. The test suite (756+ as of the auth + pipeline
+landing) acts as the regression guard for refactors.
 
 Per-module unit-tests live next to the package they target
 (`packages/semql/tests/test_<module>.py`). Hypothesis property tests

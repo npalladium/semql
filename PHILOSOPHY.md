@@ -13,8 +13,26 @@ Compile errors are better than runtime errors.
 Runtime errors are better than wrong results.
 Wrong results are the only unacceptable outcome.
 
-`expose_in_prompt` is a hint to language models, not an access control mechanism.
-Authorization lives above the compiler.
+The compiler has no I/O.
+Catalogs are Python data; the compiler returns SQL + bound params;
+running the SQL is the caller's job.
+
+## Authorisation
+
+Identity is the caller's. Authorisation is the compiler's.
+The caller knows who is asking; the compiler enforces what they may see.
+
+`AuthContext` is request-scoped, never global.
+A `Catalog` without a viewer compiles in the unscoped mode.
+A `Catalog` with a viewer refuses queries touching unauthorised cubes
+and injects row-level predicates inside the alias subquery.
+
+Bypass-proof beats convenient. Scope predicates live where outer `OR`s
+cannot reach them. Identity values bind as parameters, never as literals.
+
+`expose_in_prompt` is a hint to language models — what to surface.
+`required_roles` and `ScopeFn` are access control — what to allow.
+Two flags, two purposes.
 
 ## SQL
 
