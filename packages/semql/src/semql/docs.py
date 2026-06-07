@@ -95,8 +95,8 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
     if cube.measures:
         out.append("### Measures")
         out.append("")
-        out.append("| Name | Agg | Unit | Format | Filter | Description |")
-        out.append("| --- | --- | --- | --- | --- | --- |")
+        out.append("| Name | Agg | Unit | Display unit | Format | Filter | Description |")
+        out.append("| --- | --- | --- | --- | --- | --- | --- |")
         for m in cube.measures:
             agg_label: str = m.agg
             if m.agg == "ratio":
@@ -112,6 +112,7 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
                         f"`{m.name}`",
                         agg_cell,
                         m.unit or "—",
+                        m.display_unit or "—",
                         m.format or "—",
                         f"`{m.filter}`" if m.filter else "—",
                         m.description or "—",
@@ -124,8 +125,8 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
     if cube.dimensions:
         out.append("### Dimensions")
         out.append("")
-        out.append("| Name | Type | Unit | Format | Description |")
-        out.append("| --- | --- | --- | --- | --- |")
+        out.append("| Name | Type | Unit | Display unit | Format | Description |")
+        out.append("| --- | --- | --- | --- | --- | --- |")
         for d in cube.dimensions:
             out.append(
                 "| "
@@ -134,6 +135,7 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
                         f"`{d.name}`",
                         f"`{d.type}`",
                         d.unit or "—",
+                        d.display_unit or "—",
                         d.format or "—",
                         d.description or "—",
                     ]

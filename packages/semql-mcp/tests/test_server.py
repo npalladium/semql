@@ -104,10 +104,17 @@ def test_query_semantic_returns_compiled_shape() -> None:
     assert "sql" in out
     assert "params" in out
     assert "columns" in out
+    assert "column_meta" in out
     assert "backend" in out
     assert out["backend"] == "postgres"
     assert "SUM" in out["sql"].upper()
     assert out["columns"] == ["region", "revenue"]
+    # column_meta lines up 1:1 with columns and carries kind+unit info
+    # so a consuming LLM knows how to render each value.
+    assert [m["name"] for m in out["column_meta"]] == ["region", "revenue"]
+    kinds = {m["name"]: m["kind"] for m in out["column_meta"]}
+    assert kinds["region"] == "dimension"
+    assert kinds["revenue"] == "measure"
 
 
 def test_query_semantic_on_unknown_field_returns_error_payload() -> None:

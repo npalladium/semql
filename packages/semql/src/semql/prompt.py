@@ -77,7 +77,15 @@ def _render_cube(cube: Cube) -> list[str]:
         out.append("")
         out.append("**Measures:**")
         for m in cube.measures:
-            unit = f" [{m.unit}]" if m.unit else ""
+            # Surface display_unit alongside storage unit so the planner
+            # doesn't invent its own conversion (e.g. ``/3600`` to read
+            # seconds-stored watch_time in hours).
+            if m.unit and m.display_unit and m.display_unit != m.unit:
+                unit = f" [{m.unit} → {m.display_unit}]"
+            elif m.unit:
+                unit = f" [{m.unit}]"
+            else:
+                unit = ""
             desc = f" — {m.description}" if m.description else ""
             human = _human(m.display_name)
             flags = " `non-additive`" if m.non_additive else ""

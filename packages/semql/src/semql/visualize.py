@@ -1,15 +1,18 @@
-"""Deterministic visualization decision from a `SemanticQuery`.
+"""Deterministic visualization decision from a `Compiled` bundle.
 
-Given a compiled query result, we know:
-  - Whether a time dimension was requested (and at what granularity).
-  - Each measure's unit and explicit display name.
-  - Each dimension's type and explicit display name.
-  - How many rows the query produced (passed in as `n_rows`).
-  - Whether the cube has a `default_chart_type` override.
+Given a compiled query, we know:
+  - Per-output-column kind, display name, unit, display_unit, format
+    (from ``Compiled.column_meta``).
+  - Which cubes the query touched (from ``Compiled.touched_cube_names``)
+    so we can apply any ``Cube.default_chart_type`` override.
+  - How many rows the query produced (passed in as ``n_rows``).
+  - The originating ``SemanticQuery`` for shape facts the compiler
+    doesn't surface (``ungrouped`` flag, granularity).
 
-That's enough to pick chart type, axes, formats, and labels in code.
-The function returns a `VizDecision`; callers can serialise it as a
-hint for a presenter LLM or apply it directly.
+That's enough to pick chart type, axes, formats, and labels without
+re-resolving the query against the catalogue. The function returns a
+``VizDecision``; callers can serialise it as a hint for a presenter
+LLM or apply it directly.
 """
 
 from __future__ import annotations
@@ -17,14 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from semql.model import (
-    ChartTypeLiteral,
-    Cube,
-    Dimension,
-    FormatLiteral,
-    Measure,
-    TimeDimension,
-)
+from semql.compile import ColumnMeta, Compiled
+from semql.model import ChartTypeLiteral, Cube, FormatLiteral
 from semql.spec import SemanticQuery
 
 PIE_MAX_SLICES = 10
@@ -33,13 +30,22 @@ BAR_MAX_BARS = 30
 
 @dataclass
 class VizColumn:
-    """Per-output-column presentation metadata. Order matches `Compiled.columns`."""
+    """Per-output-column presentation metadata. Order matches `Compiled.columns`.
+
+    ``unit`` is the storage unit (e.g. ``"seconds"``) and ``display_unit``
+    is the unit the value should be rendered in (e.g. ``"hours"``). The
+    visualizer doesn't convert values — it only surfaces the pair so a
+    downstream renderer can call ``catalog.unit_registry.factor(unit,
+    display_unit)`` and apply the multiplier to row data.
+    """
 
     name: str
     display_name: str
     format: FormatLiteral
     is_measure: bool
     is_time: bool
+    unit: str | None = None
+    display_unit: str | None = None
 
 
 @dataclass
@@ -61,25 +67,47 @@ def _humanize(name: str) -> str:
     return name.replace("_", " ").title()
 
 
-def _infer_format(measure: Measure) -> FormatLiteral:
-    if measure.format is not None:
-        return measure.format
-    unit = (measure.unit or "").lower()
-    if unit in ("pct", "percent"):
+_TIME_UNITS = frozenset(
+    {
+        "seconds",
+        "s",
+        "sec",
+        "secs",
+        "minutes",
+        "min",
+        "mins",
+        "hours",
+        "hr",
+        "hrs",
+        "days",
+        "day",
+        "weeks",
+        "wk",
+        "wks",
+        "milliseconds",
+        "ms",
+        "microseconds",
+        "us",
+        "µs",
+        "duration",
+    }
+)
+
+
+def _infer_format(meta: ColumnMeta) -> FormatLiteral:
+    if meta.format is not None:
+        return meta.format
+    # display_unit (if set) tells us how the value will be SHOWN —
+    # prefer it for format inference so e.g. seconds-stored-as-hours
+    # still renders as a duration.
+    hint = (meta.display_unit or meta.unit or "").lower()
+    if hint in ("pct", "percent"):
         return "percent"
-    if unit == "count":
+    if hint == "count":
         return "integer"
-    if unit in ("seconds", "minutes", "hours", "duration"):
+    if hint in _TIME_UNITS:
         return "duration"
     return "raw"
-
-
-def _label_for_measure(m: Measure) -> str:
-    return m.display_name or _humanize(m.name)
-
-
-def _label_for_dimension(d: Dimension | TimeDimension) -> str:
-    return d.display_name or _humanize(d.name)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +151,18 @@ def _pick_chart_type(
     return "data_table", f"multi-dim or n_rows={n_rows} too large for a chart"
 
 
+def _viz_column(meta: ColumnMeta) -> VizColumn:
+    return VizColumn(
+        name=meta.name,
+        display_name=meta.display_name or _humanize(meta.name),
+        format=_infer_format(meta),
+        is_measure=meta.kind in ("measure", "computed"),
+        is_time=meta.kind == "time",
+        unit=meta.unit,
+        display_unit=meta.display_unit,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -130,70 +170,26 @@ def _pick_chart_type(
 
 def decide_visualization(
     query: SemanticQuery,
-    columns: list[str],
+    compiled: Compiled,
     n_rows: int,
     *,
     catalog: dict[str, Cube],
 ) -> VizDecision:
     """Return chart_type + axis labels + per-column formats for a query.
 
-    `columns` — the `Compiled.columns` list from the compiler.
-    `n_rows` — actual row count; pass 0 for dry-run / explain paths.
-    `catalog` — cube dict (from `Catalog.as_dict()`).
+    Reads from ``compiled.column_meta`` and ``compiled.touched_cube_names``
+    — no catalogue re-resolution. ``catalog`` is consulted only to look
+    up ``Cube.default_chart_type`` for the touched cubes.
+
+    ``query`` carries shape facts the compiler doesn't surface on
+    ``Compiled`` (``ungrouped`` flag, time-dimension granularity).
+    ``n_rows`` is the actual row count; pass ``0`` for dry-run / explain
+    paths.
     """
-    from semql.introspect import resolve_query
+    touched_cubes = [catalog[name] for name in compiled.touched_cube_names if name in catalog]
+    chart_type, reason = _pick_chart_type(query, touched_cubes, n_rows)
 
-    resolved = resolve_query(query, catalog)
-    measure_meta = resolved.measures
-    dim_meta = resolved.dimensions
-    time_meta = resolved.time_dimension
-    touched = resolved.touched_cubes
-
-    chart_type, reason = _pick_chart_type(query, touched, n_rows)
-
-    col_meta: dict[str, VizColumn] = {}
-    for _, d in dim_meta:
-        col_meta[d.name] = VizColumn(
-            name=d.name,
-            display_name=_label_for_dimension(d),
-            format="raw",
-            is_measure=False,
-            is_time=False,
-        )
-    if time_meta is not None:
-        _, td = time_meta
-        gran = query.time_dimension.granularity if query.time_dimension else None
-        col_name = f"{td.name}_{gran}" if gran else td.name
-        col_meta[col_name] = VizColumn(
-            name=col_name,
-            display_name=_label_for_dimension(td),
-            format="raw",
-            is_measure=False,
-            is_time=True,
-        )
-    for _, m in measure_meta:
-        col_meta[m.name] = VizColumn(
-            name=m.name,
-            display_name=_label_for_measure(m),
-            format=_infer_format(m),
-            is_measure=True,
-            is_time=False,
-        )
-
-    ordered: list[VizColumn] = []
-    for col in columns:
-        if col in col_meta:
-            ordered.append(col_meta[col])
-        else:
-            ordered.append(
-                VizColumn(
-                    name=col,
-                    display_name=_humanize(col),
-                    format="raw",
-                    is_measure=False,
-                    is_time=False,
-                )
-            )
+    ordered: list[VizColumn] = [_viz_column(m) for m in compiled.column_meta]
 
     x_axis: str | None = None
     y_axes: list[str] = []
@@ -210,12 +206,15 @@ def decide_visualization(
         y_axes = [measures_out[0].display_name] if measures_out else []
 
     title_bits: list[str] = []
-    if measure_meta:
-        title_bits.append(_label_for_measure(measure_meta[0][1]))
-    if dim_meta:
-        title_bits.append("by " + _label_for_dimension(dim_meta[0][1]))
-    elif time_meta is not None:
-        title_bits.append("over " + _label_for_dimension(time_meta[1]))
+    first_measure = next((c for c in ordered if c.is_measure), None)
+    first_non_measure = next((c for c in ordered if not c.is_measure), None)
+    first_time = next((c for c in ordered if c.is_time), None)
+    if first_measure is not None:
+        title_bits.append(first_measure.display_name)
+    if first_non_measure is not None and not first_non_measure.is_time:
+        title_bits.append("by " + first_non_measure.display_name)
+    elif first_time is not None:
+        title_bits.append("over " + first_time.display_name)
     title = " ".join(title_bits) if title_bits else "Result"
 
     return VizDecision(

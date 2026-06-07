@@ -71,16 +71,30 @@ def _cube_label(cube: Cube) -> str:
 
     sections: list[str] = [header]
     if cube.measures:
-        ms = ", ".join(m.name for m in cube.measures)
+        ms = ", ".join(_field_label(m.name, m.unit, m.display_unit) for m in cube.measures)
         sections.append(f"measures: {ms}")
     if cube.dimensions:
-        ds = ", ".join(d.name for d in cube.dimensions)
+        ds = ", ".join(_field_label(d.name, d.unit, d.display_unit) for d in cube.dimensions)
         sections.append(f"dimensions: {ds}")
     if cube.time_dimensions:
         ts = ", ".join(td.name for td in cube.time_dimensions)
         sections.append(f"time: {ts}")
 
     return "{" + "|".join(_escape_record(s) for s in sections) + "}"
+
+
+def _field_label(name: str, unit: str | None, display_unit: str | None) -> str:
+    """Annotate a field with its storage / display unit when present.
+
+    Renders ``name [unit → display_unit]`` when both are set and
+    differ, ``name [unit]`` when only ``unit`` is set, and the bare
+    ``name`` otherwise. Mirrors the convention used in the planner
+    prompt fragment so the ERD and the prompt stay aligned."""
+    if unit and display_unit and display_unit != unit:
+        return f"{name} [{unit} → {display_unit}]"
+    if unit:
+        return f"{name} [{unit}]"
+    return name
 
 
 def _node_id(cube: Cube) -> str:

@@ -115,8 +115,33 @@ def test_node_label_includes_backend() -> None:
 
 
 def test_node_label_lists_measures() -> None:
+    """Measures are listed with their storage unit in square brackets so
+    a reader (human or LLM) sees the dimension at a glance."""
     out = render_dot(Catalog([_orders(), _customers()]))
-    assert "measures: revenue, count" in out
+    assert "revenue [currency]" in out
+    assert "count [count]" in out
+
+
+def test_node_label_renders_display_unit_when_set() -> None:
+    """When a measure declares both ``unit`` and ``display_unit``, the
+    ERD shows the conversion arrow ``unit → display_unit``."""
+    cube = Cube(
+        name="sessions",
+        backend=Backend.POSTGRES,
+        table="sessions",
+        alias="s",
+        measures=[
+            Measure(
+                name="watch_time",
+                sql="{s}.duration",
+                agg="sum",
+                unit="seconds",
+                display_unit="hours",
+            ),
+        ],
+    )
+    out = render_dot(Catalog([cube]))
+    assert "watch_time [seconds → hours]" in out
 
 
 def test_node_label_lists_dimensions() -> None:

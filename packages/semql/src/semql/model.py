@@ -86,7 +86,15 @@ class BaseField(BaseModel):
 
 class Measure(BaseField):
     agg: AggLiteral
+    # ``unit`` is the unit the column STORES (e.g. ``"seconds"``,
+    # ``"bytes"``, ``"currency"``). ``display_unit`` is the unit a UI
+    # should SHOW the value in (e.g. ``"hours"``). Splitting the two
+    # is the unum-style separation between dimensional truth and
+    # presentation: the compiler ignores both, downstream visualisers
+    # call ``semql.units.convert`` to translate. Leave ``display_unit``
+    # ``None`` to render in the storage unit unchanged.
     unit: str | None = None
+    display_unit: str | None = None
     format: FormatLiteral | None = None
     # When True, summing this measure across a coarser time grain
     # yields a wrong answer (the canonical case is ``count_distinct``).
@@ -131,12 +139,14 @@ class Measure(BaseField):
 
 class Dimension(BaseField):
     type: DimTypeLiteral
-    # Presentation hints — mirror ``Measure.unit`` / ``Measure.format``.
-    # The compiler ignores both; downstream visualisers (charts, tables)
-    # use them to format the rendered value. Example: a duration_seconds
-    # dimension might set ``unit="seconds"``, ``format="duration"`` so a
-    # tabular cell renders as "1h 23m" instead of "4980".
+    # Presentation hints — mirror ``Measure.unit`` / ``Measure.display_unit``
+    # / ``Measure.format``. The compiler ignores all three; downstream
+    # visualisers (charts, tables) use them to format the rendered value.
+    # Example: a duration_seconds dimension might set ``unit="seconds"``,
+    # ``display_unit="hours"``, ``format="duration"`` so a tabular cell
+    # renders as "1.38 h" instead of "4980".
     unit: str | None = None
+    display_unit: str | None = None
     format: FormatLiteral | None = None
     # Names another cube whose ``primary_key`` this dimension references.
     # The Catalog auto-derives a ``many_to_one`` Join from this cube's

@@ -104,7 +104,7 @@ class QueryPlan(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True)
-    steps: list[QueryStep] = Field(default_factory=list)
+    steps: list[QueryStep] = []
     reasoning: str | None = None
 
 
@@ -161,7 +161,7 @@ class DrilldownSuggestions(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True)
-    suggestions: list[DrilldownSuggestion] = Field(default_factory=list)
+    suggestions: list[DrilldownSuggestion] = []
     focus: str | None = None
 
 

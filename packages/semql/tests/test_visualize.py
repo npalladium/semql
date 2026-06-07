@@ -11,12 +11,13 @@ that drift silently when someone re-orders the if-chain.
 from __future__ import annotations
 
 import pytest
-from semql.model import Backend, Cube, Dimension, Measure, TimeDimension
+from semql.model import Backend, Cube, Dimension, Join, Measure, TimeDimension
 from semql.spec import SemanticQuery, TimeWindow
 from semql.visualize import (
     BAR_MAX_BARS,
     PIE_MAX_SLICES,
     VizColumn,
+    VizDecision,
     decide_visualization,
 )
 
@@ -77,6 +78,19 @@ def _catalog(*cubes: Cube) -> dict[str, Cube]:
     return {c.name: c for c in cubes}
 
 
+def _decide(query: SemanticQuery, n_rows: int, *, catalog: dict[str, Cube]) -> VizDecision:
+    """Compile the query against the catalogue and feed the resulting
+    ``Compiled`` bundle to ``decide_visualization``. Tests pass through
+    this wrapper so they don't have to construct a ``Compiled`` by hand
+    every time — the round-trip via the real compiler is also a useful
+    integration check that ``Compiled.column_meta`` carries the right
+    information for the visualiser."""
+    from semql.compile import compile_query
+
+    out = compile_query(query, catalog)
+    return decide_visualization(query=query, compiled=out, n_rows=n_rows, catalog=catalog)
+
+
 # ---------------------------------------------------------------------------
 # Branch: cube default_chart_type override
 # ---------------------------------------------------------------------------
@@ -84,9 +98,8 @@ def _catalog(*cubes: Cube) -> dict[str, Cube]:
 
 def test_single_override_wins_regardless_of_shape() -> None:
     cube = _orders(default_chart_type="data_table")
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=2,  # would otherwise be a pie chart
         catalog=_catalog(cube),
     )
@@ -107,16 +120,15 @@ def test_conflicting_overrides_fall_through_to_normal_logic() -> None:
     orders_join = orders.model_copy(
         update={
             "joins": [
-                {"to": "customers", "relationship": "many_to_one", "on": "..."},
+                Join(to="customers", relationship="many_to_one", on="{o}.cid = {c}.id"),
             ]
         }
     )
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["customers.region"],
         ),
-        columns=["region", "revenue"],
         n_rows=2,
         catalog=_catalog(orders_join, customers),
     )
@@ -132,16 +144,15 @@ def test_matching_overrides_count_as_one() -> None:
     orders_join = orders.model_copy(
         update={
             "joins": [
-                {"to": "customers", "relationship": "many_to_one", "on": "..."},
+                Join(to="customers", relationship="many_to_one", on="{o}.cid = {c}.id"),
             ]
         }
     )
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["customers.region"],
         ),
-        columns=["region", "revenue"],
         n_rows=2,
         catalog=_catalog(orders_join, customers),
     )
@@ -154,9 +165,8 @@ def test_matching_overrides_count_as_one() -> None:
 
 
 def test_ungrouped_always_data_table() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(dimensions=["orders.region"], ungrouped=True, limit=10),
-        columns=["region"],
+    decision = _decide(
+        SemanticQuery(dimensions=["orders.region"], ungrouped=True, limit=10),
         n_rows=5,
         catalog=_catalog(_orders()),
     )
@@ -170,9 +180,8 @@ def test_ungrouped_always_data_table() -> None:
 
 
 def test_single_measure_no_dim_returns_text_only() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"]),
-        columns=["revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"]),
         n_rows=1,
         catalog=_catalog(_orders()),
     )
@@ -185,8 +194,8 @@ def test_single_measure_no_dim_returns_text_only() -> None:
 
 
 def test_time_breakdown_returns_line_chart() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             time_dimension=TimeWindow(
                 dimension="orders.created_at",
@@ -194,7 +203,6 @@ def test_time_breakdown_returns_line_chart() -> None:
                 range=("2026-01-01", "2026-02-01"),
             ),
         ),
-        columns=["created_at_day", "revenue"],
         n_rows=31,
         catalog=_catalog(_orders()),
     )
@@ -204,8 +212,8 @@ def test_time_breakdown_returns_line_chart() -> None:
 def test_time_without_granularity_is_not_line_chart() -> None:
     """Time dimension WITHOUT granularity is just a filter — falls
     through to bar / pie / data-table logic."""
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["orders.region"],
             time_dimension=TimeWindow(
@@ -213,7 +221,6 @@ def test_time_without_granularity_is_not_line_chart() -> None:
                 range=("2026-01-01", "2026-02-01"),
             ),
         ),
-        columns=["region", "revenue"],
         n_rows=2,
         catalog=_catalog(_orders()),
     )
@@ -227,9 +234,8 @@ def test_time_without_granularity_is_not_line_chart() -> None:
 
 @pytest.mark.parametrize("n_rows", [1, PIE_MAX_SLICES])
 def test_pie_chart_at_and_below_boundary(n_rows: int) -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=n_rows,
         catalog=_catalog(_orders()),
     )
@@ -237,9 +243,8 @@ def test_pie_chart_at_and_below_boundary(n_rows: int) -> None:
 
 
 def test_pie_chart_off_by_one_falls_to_bar() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=PIE_MAX_SLICES + 1,
         catalog=_catalog(_orders()),
     )
@@ -248,12 +253,11 @@ def test_pie_chart_off_by_one_falls_to_bar() -> None:
 
 def test_pie_chart_requires_exactly_one_measure() -> None:
     """2 measures + 1 dim → bar chart (or data_table at large n)."""
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue", "orders.orders"],
             dimensions=["orders.region"],
         ),
-        columns=["region", "revenue", "orders"],
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -266,9 +270,8 @@ def test_pie_chart_requires_exactly_one_measure() -> None:
 
 
 def test_bar_chart_at_boundary() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=BAR_MAX_BARS,
         catalog=_catalog(_orders()),
     )
@@ -277,9 +280,8 @@ def test_bar_chart_at_boundary() -> None:
 
 
 def test_bar_chart_off_by_one_falls_to_data_table() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=BAR_MAX_BARS + 1,
         catalog=_catalog(_orders()),
     )
@@ -292,12 +294,11 @@ def test_bar_chart_off_by_one_falls_to_data_table() -> None:
 
 
 def test_multi_dim_returns_data_table() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["orders.region", "orders.status"],
         ),
-        columns=["region", "status", "revenue"],
         n_rows=4,
         catalog=_catalog(_orders()),
     )
@@ -310,9 +311,8 @@ def test_multi_dim_returns_data_table() -> None:
 
 
 def test_columns_are_populated_with_per_column_metadata() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -329,8 +329,8 @@ def test_columns_are_populated_with_per_column_metadata() -> None:
 
 
 def test_time_dimension_column_marked_is_time() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             time_dimension=TimeWindow(
                 dimension="orders.created_at",
@@ -338,26 +338,11 @@ def test_time_dimension_column_marked_is_time() -> None:
                 range=("2026-01-01", "2026-02-01"),
             ),
         ),
-        columns=["created_at_day", "revenue"],
         n_rows=10,
         catalog=_catalog(_orders()),
     )
     ts_col = next(c for c in decision.columns if c.name == "created_at_day")
     assert ts_col.is_time is True
-
-
-def test_unknown_columns_get_default_viz_column() -> None:
-    """A column in ``columns`` that doesn't correspond to a referenced
-    measure / dimension still surfaces with sensible defaults."""
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue", "mystery_column"],
-        n_rows=3,
-        catalog=_catalog(_orders()),
-    )
-    mystery = next(c for c in decision.columns if c.name == "mystery_column")
-    assert mystery.format == "raw"
-    assert mystery.display_name == "Mystery Column"  # _humanize converts
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +351,8 @@ def test_unknown_columns_get_default_viz_column() -> None:
 
 
 def test_unit_count_becomes_integer_format() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.orders"], dimensions=["orders.region"]),
-        columns=["region", "orders"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.orders"], dimensions=["orders.region"]),
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -377,9 +361,8 @@ def test_unit_count_becomes_integer_format() -> None:
 
 
 def test_unit_pct_becomes_percent_format() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.conversion_rate"], dimensions=["orders.region"]),
-        columns=["region", "conversion_rate"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.conversion_rate"], dimensions=["orders.region"]),
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -402,9 +385,8 @@ def test_explicit_format_overrides_unit_inference() -> None:
             ],
         }
     )
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=3,
         catalog={"orders": cube.model_copy(update={"dimensions": _orders().dimensions})},
     )
@@ -418,9 +400,8 @@ def test_explicit_format_overrides_unit_inference() -> None:
 
 
 def test_title_combines_measure_and_dimension_labels() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -429,9 +410,8 @@ def test_title_combines_measure_and_dimension_labels() -> None:
 
 
 def test_bar_chart_axis_labels_filled() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=15,
         catalog=_catalog(_orders()),
     )
@@ -441,9 +421,8 @@ def test_bar_chart_axis_labels_filled() -> None:
 
 
 def test_pie_chart_axes_labels_single_value() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=3,
         catalog=_catalog(_orders()),
     )
@@ -453,12 +432,11 @@ def test_pie_chart_axes_labels_single_value() -> None:
 
 
 def test_data_table_has_no_axes() -> None:
-    decision = decide_visualization(
-        query=SemanticQuery(
+    decision = _decide(
+        SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["orders.region", "orders.status"],
         ),
-        columns=["region", "status", "revenue"],
         n_rows=4,
         catalog=_catalog(_orders()),
     )
@@ -494,9 +472,8 @@ def test_explicit_display_name_overrides_humanize() -> None:
             ],
         }
     )
-    decision = decide_visualization(
-        query=SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
-        columns=["region", "revenue"],
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
         n_rows=3,
         catalog={"orders": cube},
     )
@@ -515,3 +492,92 @@ def test_viz_column_can_be_constructed_directly() -> None:
     col = VizColumn(name="x", display_name="X", format="raw", is_measure=False, is_time=False)
     assert col.name == "x"
     assert col.format == "raw"
+
+
+# ---------------------------------------------------------------------------
+# Unit / display_unit propagation
+# ---------------------------------------------------------------------------
+
+
+def test_measure_unit_and_display_unit_surface_on_viz_column() -> None:
+    """Both unit fields ride out on VizColumn so downstream renderers
+    can call units.convert(unit, display_unit) and apply the factor
+    to row data."""
+    cube = _orders().model_copy(
+        update={
+            "measures": [
+                Measure(
+                    name="watch_time",
+                    sql="{o}.duration",
+                    agg="sum",
+                    unit="seconds",
+                    display_unit="hours",
+                ),
+            ],
+        }
+    )
+    decision = _decide(
+        SemanticQuery(measures=["orders.watch_time"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog={"orders": cube.model_copy(update={"dimensions": _orders().dimensions})},
+    )
+    wt = next(c for c in decision.columns if c.name == "watch_time")
+    assert wt.unit == "seconds"
+    assert wt.display_unit == "hours"
+
+
+def test_display_unit_drives_format_inference_for_time() -> None:
+    """``unit="seconds", display_unit="hours"`` should infer
+    ``format="duration"`` (hours is a time unit). Without
+    display_unit, the same measure would still be a duration because
+    the storage unit is seconds — this test specifically checks the
+    display_unit path takes precedence."""
+    cube = _orders().model_copy(
+        update={
+            "measures": [
+                Measure(
+                    name="session_ms",
+                    sql="{o}.x",
+                    agg="avg",
+                    unit="bytes",  # would NOT infer duration
+                    display_unit="hours",  # but this WOULD
+                ),
+            ],
+        }
+    )
+    decision = _decide(
+        SemanticQuery(measures=["orders.session_ms"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog={"orders": cube.model_copy(update={"dimensions": _orders().dimensions})},
+    )
+    col = next(c for c in decision.columns if c.name == "session_ms")
+    assert col.format == "duration"
+
+
+def test_dimension_unit_fields_surface_on_viz_column() -> None:
+    """Dimensions can also carry unit / display_unit (e.g. a
+    duration_seconds dimension); they should propagate the same way."""
+    cube = _orders().model_copy(
+        update={
+            "dimensions": [
+                Dimension(
+                    name="duration",
+                    sql="{o}.dur",
+                    type="number",
+                    unit="seconds",
+                    display_unit="minutes",
+                    format="duration",
+                ),
+                Dimension(name="region", sql="{o}.region", type="string"),
+            ],
+        }
+    )
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.duration"]),
+        n_rows=3,
+        catalog={"orders": cube},
+    )
+    dur = next(c for c in decision.columns if c.name == "duration")
+    assert dur.unit == "seconds"
+    assert dur.display_unit == "minutes"
+    assert dur.format == "duration"

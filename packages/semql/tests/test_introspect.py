@@ -183,13 +183,21 @@ def test_catalog_cubes_dimensions_match_meta_values_columns() -> None:
 
 
 def test_catalog_measures_dimensions_match_meta_values_columns() -> None:
-    expected_cols = {"cube", "name", "agg", "unit", "description"}
+    expected_cols = {"cube", "name", "agg", "unit", "display_unit", "description"}
     actual_cols = {d.name for d in CATALOG_MEASURES.dimensions}
     assert actual_cols == expected_cols
 
 
 def test_catalog_dimensions_dimensions_match_meta_values_columns() -> None:
-    expected_cols = {"cube", "name", "type", "description", "is_time"}
+    expected_cols = {
+        "cube",
+        "name",
+        "type",
+        "unit",
+        "display_unit",
+        "description",
+        "is_time",
+    }
     actual_cols = {d.name for d in CATALOG_DIMENSIONS.dimensions}
     assert actual_cols == expected_cols
 

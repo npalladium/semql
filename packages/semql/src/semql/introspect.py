@@ -20,7 +20,7 @@ caller (SQL planner vs Python tool).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from semql.model import (
     AuthContext,
@@ -92,18 +92,21 @@ def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
         return _rows_to_values(rows, ["name", "backend", "exposed", "description", "alias"])
 
     if cube_name == "catalog_measures":
-        rows = [
+        meas_rows: list[tuple[str, ...]] = [
             (
                 quote_literal(c.name),
                 quote_literal(m.name),
                 quote_literal(m.agg),
                 quote_literal(m.unit),
+                quote_literal(m.display_unit),
                 quote_literal(m.description),
             )
             for c in catalog.values()
             for m in c.measures
         ]
-        return _rows_to_values(rows, ["cube", "name", "agg", "unit", "description"])
+        return _rows_to_values(
+            meas_rows, ["cube", "name", "agg", "unit", "display_unit", "description"]
+        )
 
     if cube_name == "catalog_dimensions":
         dim_rows: list[tuple[str, ...]] = []
@@ -114,6 +117,8 @@ def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
                         quote_literal(c.name),
                         quote_literal(d.name),
                         quote_literal(d.type),
+                        quote_literal(d.unit),
+                        quote_literal(d.display_unit),
                         quote_literal(d.description),
                         _bool(False),
                     )
@@ -124,11 +129,16 @@ def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
                         quote_literal(c.name),
                         quote_literal(td.name),
                         quote_literal(td.type),
+                        quote_literal(None),  # TimeDimension has no unit field
+                        quote_literal(None),
                         quote_literal(td.description),
                         _bool(True),
                     )
                 )
-        return _rows_to_values(dim_rows, ["cube", "name", "type", "description", "is_time"])
+        return _rows_to_values(
+            dim_rows,
+            ["cube", "name", "type", "unit", "display_unit", "description", "is_time"],
+        )
 
     raise KeyError(f"No META builder for cube {cube_name!r}.")
 
@@ -168,6 +178,7 @@ CATALOG_MEASURES = Cube(
         Dimension(name="name", sql="{cm}.name", type="string"),
         Dimension(name="agg", sql="{cm}.agg", type="string"),
         Dimension(name="unit", sql="{cm}.unit", type="string"),
+        Dimension(name="display_unit", sql="{cm}.display_unit", type="string"),
         Dimension(name="description", sql="{cm}.description", type="string"),
     ],
     description="One row per (cube, measure). Use to find measures by unit / agg.",
@@ -185,6 +196,8 @@ CATALOG_DIMENSIONS = Cube(
         Dimension(name="cube", sql="{cd}.cube", type="string"),
         Dimension(name="name", sql="{cd}.name", type="string"),
         Dimension(name="type", sql="{cd}.type", type="string"),
+        Dimension(name="unit", sql="{cd}.unit", type="string"),
+        Dimension(name="display_unit", sql="{cd}.display_unit", type="string"),
         Dimension(name="description", sql="{cd}.description", type="string"),
         Dimension(name="is_time", sql="{cd}.is_time", type="bool"),
     ],
@@ -358,10 +371,10 @@ class ResolvedQuery:
     cover.
     """
 
-    measures: list[tuple[Cube, Measure]] = field(default_factory=list)
-    dimensions: list[tuple[Cube, Dimension]] = field(default_factory=list)
+    measures: list[tuple[Cube, Measure]]
+    dimensions: list[tuple[Cube, Dimension]]
+    touched_cubes: list[Cube]
     time_dimension: tuple[Cube, TimeDimension] | None = None
-    touched_cubes: list[Cube] = field(default_factory=list)
 
 
 def resolve_query(

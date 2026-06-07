@@ -37,8 +37,9 @@ import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import sqlglot
 from sqlglot import exp
@@ -66,6 +67,7 @@ from semql.model import (
     Backend,
     Cube,
     Dimension,
+    FormatLiteral,
     Join,
     Measure,
     ScopePredicate,
@@ -78,12 +80,46 @@ from semql.spec import BoolExpr, Filter, SemanticQuery
 MAX_UNGROUPED_ROWS = 1000
 
 
+ColumnKind = Literal["measure", "dimension", "time", "computed"]
+
+
+@dataclass
+class ColumnMeta:
+    """Per-output-column type + presentation metadata.
+
+    Sits on :class:`Compiled` in the same order as ``columns`` so a
+    consumer (dashboard, MCP server, presenter LLM) can render a result
+    row without re-resolving against the catalogue. ``kind`` tags the
+    column's role; ``unit`` / ``display_unit`` / ``format`` mirror the
+    fields on ``Measure`` / ``Dimension``; ``display_name`` carries the
+    human-friendly label (catalog ``display_name`` or a humanised
+    fallback) so visualisers don't need to call ``humanize`` themselves.
+
+    ``computed`` covers compare-mode derivatives (``foo_delta``,
+    ``foo_pct_change``) — values the catalogue doesn't directly name
+    but the compiler emits. Their ``format`` is set inline (e.g.
+    ``"percent"`` for pct_change) so renderers don't need to guess.
+    """
+
+    name: str
+    kind: ColumnKind
+    display_name: str = ""
+    unit: str | None = None
+    display_unit: str | None = None
+    format: FormatLiteral | None = None
+
+
 @dataclass
 class Compiled:
     backend: Backend
     sql: str
     params: dict[str, Any]
     columns: list[str]
+    column_meta: list[ColumnMeta] = dc_field(default_factory=lambda: [])
+    # Names of every cube the query touched, in first-mention order.
+    # Lets downstream tools (visualiser, MCP envelope) avoid re-running
+    # the resolver against the catalogue for cube-level facts.
+    touched_cube_names: list[str] = dc_field(default_factory=lambda: [])
 
 
 def _resolve_field(
@@ -96,6 +132,95 @@ def _resolve_field(
         raise
     except ResolveError as exc:
         raise CompileError(str(exc)) from exc
+
+
+def _humanize(name: str) -> str:
+    return name.replace("_", " ").title()
+
+
+def _build_column_meta(
+    columns: list[str],
+    dim_fields: list[tuple[Cube, Dimension]],
+    dim_col_names: list[str],
+    measure_fields: list[tuple[Cube, Measure]],
+    measure_col_names: list[str],
+    time_dim: TimeDimension | None,
+    time_col_name: str | None,
+    is_compare: bool,
+) -> list[ColumnMeta]:
+    """Assemble :class:`ColumnMeta` for every entry in ``columns``.
+
+    Lookup table keyed by column name (the alias the compiler emits) →
+    ColumnMeta. Compare-mode columns (``foo_current``, ``foo_prior``,
+    ``foo_delta``, ``foo_pct_change``) carry the underlying measure's
+    unit/display_unit/format; ``pct_change`` overrides format to
+    ``"percent"`` regardless of the measure's declared format. The
+    computed derivatives' ``display_name`` is the parent measure's
+    label suffixed with the derivative role (e.g. ``"Revenue (% change)"``).
+    """
+    by_name: dict[str, ColumnMeta] = {}
+
+    for (_cube, dim), col_name in zip(dim_fields, dim_col_names, strict=True):
+        by_name[col_name] = ColumnMeta(
+            name=col_name,
+            kind="dimension",
+            display_name=dim.display_name or _humanize(col_name),
+            unit=dim.unit,
+            display_unit=dim.display_unit,
+            format=dim.format,
+        )
+
+    if time_dim is not None and time_col_name is not None:
+        # Drop the granularity suffix (``_day`` / ``_week`` / ...) from
+        # the display label — readers don't need "Created At Day", they
+        # need "Created At" plotted on a time axis.
+        by_name[time_col_name] = ColumnMeta(
+            name=time_col_name,
+            kind="time",
+            display_name=time_dim.display_name or _humanize(time_dim.name),
+        )
+
+    for (_cube, m), col_name in zip(measure_fields, measure_col_names, strict=True):
+        m_label = m.display_name or _humanize(col_name)
+        by_name[col_name] = ColumnMeta(
+            name=col_name,
+            kind="measure",
+            display_name=m_label,
+            unit=m.unit,
+            display_unit=m.display_unit,
+            format=m.format,
+        )
+        if is_compare:
+            # Compare mode emits four derivatives per measure. The first
+            # three keep the measure's units; pct_change is dimensionless
+            # so its format is always "percent".
+            suffix_label = {
+                "_current": " (current)",
+                "_prior": " (prior)",
+                "_delta": " (delta)",
+            }
+            for suffix, label_tail in suffix_label.items():
+                derived_name = col_name + suffix
+                by_name[derived_name] = ColumnMeta(
+                    name=derived_name,
+                    kind="computed",
+                    display_name=m_label + label_tail,
+                    unit=m.unit,
+                    display_unit=m.display_unit,
+                    format=m.format,
+                )
+            pct_name = col_name + "_pct_change"
+            by_name[pct_name] = ColumnMeta(
+                name=pct_name,
+                kind="computed",
+                display_name=m_label + " (% change)",
+                format="percent",
+            )
+
+    out: list[ColumnMeta] = []
+    for c in columns:
+        out.append(by_name.get(c) or ColumnMeta(name=c, kind="computed", display_name=_humanize(c)))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1114,24 @@ def compile_query(
             outer = outer.offset(int(q.offset))
 
         sql = outer.sql(dialect=dialect, pretty=False, normalize_functions=False)
-        return Compiled(backend=backend, sql=sql, params=params, columns=outer_columns)
+        cm = _build_column_meta(
+            outer_columns,
+            dim_fields,
+            dim_col_names,
+            measure_fields,
+            measure_col_names,
+            time_dim,
+            time_col_name,
+            is_compare=True,
+        )
+        return Compiled(
+            backend=backend,
+            sql=sql,
+            params=params,
+            columns=outer_columns,
+            column_meta=cm,
+            touched_cube_names=[c.name for c in touched],
+        )
 
     # 7. Non-compare path — single inner Select with order/having/limit
     # applied directly.
@@ -1122,7 +1264,24 @@ def compile_query(
         select_node = select_node.offset(int(q.offset))
 
     sql = select_node.sql(dialect=dialect, pretty=False, normalize_functions=False)
-    return Compiled(backend=backend, sql=sql, params=params, columns=columns)
+    cm = _build_column_meta(
+        columns,
+        dim_fields,
+        dim_col_names,
+        measure_fields,
+        measure_col_names,
+        time_dim,
+        time_col_name,
+        is_compare=False,
+    )
+    return Compiled(
+        backend=backend,
+        sql=sql,
+        params=params,
+        columns=columns,
+        column_meta=cm,
+        touched_cube_names=[c.name for c in touched],
+    )
 
 
 __all__ = [

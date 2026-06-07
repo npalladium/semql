@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import AuthContext, BaseField, Cube, Join, View
+from semql.units import DEFAULT_REGISTRY, Registry
 
 _T = TypeVar("_T", bound=BaseField)
 
@@ -40,6 +41,7 @@ class Catalog:
         views: list[View] | None = None,
         policy: PolicyFn | None = None,
         scope_fns: dict[str, ScopeFn] | None = None,
+        unit_registry: Registry | None = None,
     ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -163,6 +165,28 @@ class Catalog:
         # Validate scope_fns: every Cube.scope must resolve to a
         # registered name. Catching it here means the compiler can
         # trust the registry lookup later.
+        # Unit conversion registry — used by downstream presenters
+        # (visualize, renderers) when applying ``Measure.display_unit``
+        # to row values. Defaults to the shared process-wide registry;
+        # pass a custom :class:`semql.units.Registry` to isolate a
+        # catalog's vocabulary (e.g. per-tenant overrides) without
+        # mutating the global one.
+        self.unit_registry: Registry = unit_registry or DEFAULT_REGISTRY
+
+        # Unit / display_unit validation — fail fast on configuration
+        # errors that would otherwise only surface at render time.
+        # Two checks:
+        #   1. ``display_unit`` without ``unit`` — the renderer would
+        #      have nothing to convert FROM.
+        #   2. The (unit, display_unit) pair must be reachable in the
+        #      registry. Catches typos like ``display_unit="hour"`` vs
+        #      ``"hours"`` that Pydantic accepts as plain strings.
+        # Both checks are skipped when ``unit`` matches ``display_unit``
+        # (no conversion needed) or when only ``unit`` is set.
+        for cube in merged:
+            for fld in (*cube.measures, *cube.dimensions):
+                self._check_unit_pair(cube, fld)
+
         self._scope_fns: dict[str, ScopeFn] = dict(scope_fns or {})
         for c in merged:
             if c.scope is not None and c.scope not in self._scope_fns:
@@ -172,6 +196,37 @@ class Catalog:
                     f"Pass scope_fns={{'{c.scope}': fn, ...}} to the Catalog "
                     f"constructor. Registered scopes: {sorted(self._scope_fns)}."
                 )
+
+    def _check_unit_pair(self, cube: Cube, fld: BaseField) -> None:
+        """Validate ``unit`` / ``display_unit`` on a single field.
+
+        Raises ``ValueError`` with a pointer to the offending cube and
+        field if:
+          * ``display_unit`` is set without ``unit``, or
+          * the pair can't be converted in ``self.unit_registry``.
+        Skips no-op pairs where ``unit == display_unit``.
+        """
+        unit = getattr(fld, "unit", None)
+        display_unit = getattr(fld, "display_unit", None)
+        if display_unit is None:
+            return
+        if unit is None:
+            raise ValueError(
+                f"Cube {cube.name!r}, field {fld.name!r}: display_unit="
+                f"{display_unit!r} requires unit to also be set — there's "
+                "nothing to convert from."
+            )
+        if unit == display_unit:
+            return
+        try:
+            self.unit_registry.factor(unit, display_unit)
+        except ValueError as exc:
+            raise ValueError(
+                f"Cube {cube.name!r}, field {fld.name!r}: cannot convert "
+                f"{unit!r} → {display_unit!r}: {exc}. "
+                "Register the conversion on the catalog's unit_registry "
+                "or correct the spelling."
+            ) from exc
 
     @property
     def policy(self) -> PolicyFn | None:

@@ -136,3 +136,122 @@ def test_catalog_iter_and_len() -> None:
     assert len(cat) == 1 + len(META_CUBES)
     cube_names = {c.name for c in cat}
     assert "orders" in cube_names
+
+
+# ---------------------------------------------------------------------------
+# Unit / display_unit validation at construction
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_rejects_display_unit_without_unit() -> None:
+    """display_unit only makes sense when paired with unit — the
+    renderer has nothing to convert from otherwise."""
+    bad = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[
+            Measure(
+                name="watch_time",
+                sql="{o}.x",
+                agg="sum",
+                display_unit="hours",  # no unit set
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="requires unit to also be set"):
+        Catalog([bad])
+
+
+def test_catalog_rejects_unknown_unit_pair() -> None:
+    """Typo ``hour`` vs ``hours`` passes Pydantic but should fail at
+    construction so the bug doesn't only surface at render time."""
+    bad = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[
+            Measure(
+                name="watch_time",
+                sql="{o}.duration",
+                agg="sum",
+                unit="seconds",
+                display_unit="hour",  # typo — should be "hours"
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="cannot convert"):
+        Catalog([bad])
+
+
+def test_catalog_accepts_known_unit_pair() -> None:
+    """Properly registered (unit, display_unit) pair must not raise."""
+    good = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[
+            Measure(
+                name="watch_time",
+                sql="{o}.duration",
+                agg="sum",
+                unit="seconds",
+                display_unit="hours",
+            ),
+        ],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    )
+    Catalog([good])  # no exception
+
+
+def test_catalog_validation_also_runs_on_dimensions() -> None:
+    """Dimensions carry the same unit fields; the same checks apply."""
+    bad = Cube(
+        name="events",
+        backend=Backend.POSTGRES,
+        table="events",
+        alias="e",
+        dimensions=[
+            Dimension(
+                name="duration",
+                sql="{e}.dur",
+                type="number",
+                unit="seconds",
+                display_unit="fortnights",  # not in registry
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="cannot convert"):
+        Catalog([bad])
+
+
+def test_catalog_validation_uses_custom_registry() -> None:
+    """A catalog with a custom registry should validate against THAT
+    registry, not the global default."""
+    from semql.units import Registry
+
+    r = Registry()
+    r.register("widgets", "megawidgets", 1.0 / 1_000_000.0)
+
+    cube = Cube(
+        name="parts",
+        backend=Backend.POSTGRES,
+        table="parts",
+        alias="p",
+        measures=[
+            Measure(
+                name="produced",
+                sql="{p}.count",
+                agg="sum",
+                unit="widgets",
+                display_unit="megawidgets",
+            ),
+        ],
+        dimensions=[Dimension(name="factory", sql="{p}.factory", type="string")],
+    )
+    # Without the custom registry this would fail (widgets/megawidgets
+    # aren't in the default). With it, construction succeeds.
+    Catalog([cube], unit_registry=r)

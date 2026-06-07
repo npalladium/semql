@@ -593,7 +593,7 @@ def _compile_and_decide(
     n_rows: int = 1,
 ) -> tuple[Compiled, VizDecision]:
     out = compile_query(q, catalog, context=CONTEXT)
-    viz = decide_visualization(q, out.columns, n_rows=n_rows, catalog=catalog)
+    viz = decide_visualization(q, out, n_rows=n_rows, catalog=catalog)
     return out, viz
 
 
@@ -686,8 +686,10 @@ def test_decide_measure_column_is_measure_flagged(catalog: dict[str, Cube]) -> N
 
 def test_decide_rejects_measure_in_dimensions_list(catalog: dict[str, Cube]) -> None:
     q = SemanticQuery(dimensions=["orders.revenue"])  # revenue is a measure
-    with pytest.raises(ValueError, match="non-Dimension"):
-        decide_visualization(q, ["revenue"], n_rows=1, catalog=catalog)
+    # The rejection now happens in compile_query — decide_visualization
+    # only sees a fully-compiled bundle, so the type check lives upstream.
+    with pytest.raises(CompileError, match="not a dimension"):
+        compile_query(q, catalog, context=CONTEXT)
 
 
 def test_decide_multi_measure_y_axes(catalog: dict[str, Cube]) -> None:
@@ -767,3 +769,80 @@ def test_order_by_unknown_cube_field_rejected(catalog: dict[str, Cube]) -> None:
     )
     with pytest.raises(CompileError, match=r"(?i)order by"):
         compile_query(q, catalog, context=CONTEXT)
+
+
+# ---------------------------------------------------------------------------
+# Compiled.column_meta — per-output-column type + presentation metadata
+# ---------------------------------------------------------------------------
+
+
+def test_column_meta_populated_for_each_output_column(catalog: dict[str, Cube]) -> None:
+    """``column_meta`` lines up 1:1 with ``columns``; same length, same
+    order. Downstream renderers iterate them together."""
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"])
+    out = compile_query(q, catalog, context=CONTEXT)
+    assert [m.name for m in out.column_meta] == out.columns
+    assert len(out.column_meta) == 2
+
+
+def test_column_meta_classifies_measure_vs_dimension(catalog: dict[str, Cube]) -> None:
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"])
+    out = compile_query(q, catalog, context=CONTEXT)
+    by_name = {m.name: m for m in out.column_meta}
+    assert by_name["revenue"].kind == "measure"
+    assert by_name["region"].kind == "dimension"
+
+
+def test_column_meta_propagates_measure_unit(catalog: dict[str, Cube]) -> None:
+    """Whatever ``unit`` the catalogue's Measure declared rides through
+    to ``column_meta`` — no re-resolution against the catalogue needed."""
+    q = SemanticQuery(measures=["sessions.duration"], dimensions=["sessions.app_name"])
+    out = compile_query(q, catalog, context=CONTEXT)
+    dur = next(m for m in out.column_meta if m.name == "duration")
+    assert dur.kind == "measure"
+    assert dur.unit == "duration"
+
+
+def test_column_meta_marks_time_dimension(catalog: dict[str, Cube]) -> None:
+    """Time columns get ``kind="time"`` so a renderer can pick an
+    x-axis without re-deriving the granularity."""
+    q = SemanticQuery(
+        measures=["orders.revenue"],
+        time_dimension=TimeWindow(
+            dimension="orders.created_at",
+            granularity="day",
+            range=("2026-01-01", "2026-02-01"),
+        ),
+    )
+    out = compile_query(q, catalog, context=CONTEXT)
+    time_col = next(m for m in out.column_meta if m.kind == "time")
+    assert time_col.name == "created_at_day"
+
+
+def test_column_meta_compare_mode_marks_pct_change_as_percent(
+    catalog: dict[str, Cube],
+) -> None:
+    """In compare mode, ``foo_current``/``foo_prior``/``foo_delta``
+    keep the measure's unit; ``foo_pct_change`` is dimensionless and
+    always reads as ``"percent"``."""
+    q = SemanticQuery(
+        measures=["orders.revenue"],
+        time_dimension=TimeWindow(
+            dimension="orders.created_at",
+            granularity="day",
+            range=("2026-02-01", "2026-03-01"),
+        ),
+        compare=CompareWindow(mode="previous_period"),
+    )
+    out = compile_query(q, catalog, context=CONTEXT)
+    by_name = {m.name: m for m in out.column_meta}
+    # All four derived columns are present.
+    for suffix in ("_current", "_prior", "_delta", "_pct_change"):
+        assert f"revenue{suffix}" in by_name
+    # Current/prior/delta inherit the measure's unit (currency).
+    assert by_name["revenue_current"].unit == "currency"
+    assert by_name["revenue_prior"].unit == "currency"
+    assert by_name["revenue_delta"].unit == "currency"
+    # pct_change is dimensionless.
+    assert by_name["revenue_pct_change"].format == "percent"
+    assert by_name["revenue_pct_change"].unit is None
