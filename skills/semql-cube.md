@@ -1,39 +1,56 @@
 ---
 name: semql-cube
 description: >
-  Author a SemQL semantic cube or extend an existing catalog.
-  Use when the user asks to model a table, add a cube, define
-  dimensions / measures / time dimensions / segments / joins, declare
-  a tenancy model, or register anything with the SemQL catalog.
+  Author SemQL cubes, views, and the catalog wiring (auth, scope,
+  prompt fragments). The technical counterpart to
+  `semql-requirement-discovery`: where that skill captures intent,
+  this one writes the Python. Use when the user says "model this
+  table," "add a measure," "wire up team-scoped auth," or hands you
+  a requirements doc to implement.
 ---
 
 # Authoring SemQL cubes
 
-A **cube** is one logical table the planner can query. It declares
-where the rows live (`backend`, `table`), an always-on membership
-predicate (`base_predicate`), the *measures* / *dimensions* /
-*time dimensions* / *segments* exposed, and the *joins* to other
-cubes.
+This skill writes Python. If the user hasn't decided *what* they need
+(entities, questions, auth concerns), point them at
+`semql-requirement-discovery` first — that skill captures intent at
+the domain level. This skill picks up at the technical translation:
+chosen entity → `Cube`, identified scoping rule → `ScopeFn`,
+question shape → `SemanticQuery`.
 
-A **catalog** is a validated collection of cubes plus a thin
-convenience surface (`compile`, `prompt`, `as_dict`).
+You may interview the user when a requirements doc doesn't cover a
+technical detail (alias choice, SQL fragment shape, granularities,
+ScopePredicate SQL). Ask in concrete technical terms: "What's the
+join predicate's column on each side?" rather than "How do these
+entities relate?"
+
+## A cube is a logical table
+
+It declares where rows live (`backend`, `table`), the always-on
+membership predicate (`base_predicate`), the addressable fields
+(*measures*, *dimensions*, *time dimensions*, *segments*), and the
+*joins* to other cubes.
+
+A **catalog** is a validated `list[Cube]` plus optional `views`,
+`policy`, and `scope_fns`. It exposes `compile`, `prompt`,
+`as_dict`, and acts as the iteration root for the introspection
+primitives.
 
 ## Step 1: pick the backend
 
 ```python
 from semql import Backend
 
-Backend.POSTGRES     # %name placeholder, native ILIKE
-Backend.CLICKHOUSE   # {name:Type} placeholder, toStartOf<Gran>
-Backend.DUCKDB       # $name placeholder, native ILIKE
-Backend.BIGQUERY     # @name placeholder, ILIKE → LOWER LIKE LOWER
-Backend.SNOWFLAKE    # :name placeholder, native ILIKE
-Backend.META         # reflection cubes — see `META_CUBES`
+Backend.POSTGRES     # %(name)s placeholder, native ILIKE, generate_series spine
+Backend.CLICKHOUSE   # {name:Type} placeholder, toStartOf<Gran>, numbers() spine
+Backend.DUCKDB       # $name placeholder, native ILIKE, generate_series spine
+Backend.BIGQUERY     # @name placeholder, LOWER LIKE LOWER, UNNEST(GENERATE_DATE_ARRAY) spine
+Backend.SNOWFLAKE    # :name placeholder, native ILIKE, TABLE(GENERATOR) + SEQ4 spine
+Backend.META         # in-memory VALUES; reflection only — see META_CUBES
 ```
 
 Cross-backend queries are rejected at compile time. If one query
-needs columns from two backends, split it or wait for the federation
-TODO to land.
+needs columns from two backends, split it.
 
 ## Step 2: declare the cube
 
@@ -41,30 +58,32 @@ TODO to land.
 from semql import Cube, Dimension, Measure, TimeDimension, Backend
 
 orders = Cube(
-    name="orders",                    # qualified-reference root: orders.X
+    name="orders",
     backend=Backend.POSTGRES,
-    table="public.orders",            # may contain {schema}, {tenant_schema}
-    alias="o",                        # what the SQL FROM clause uses
+    table="public.orders",            # may contain {schema} / {tenant_schema}
+    alias="o",                        # what the FROM clause uses
     base_predicate="{o}.deleted_at IS NULL",
     description="One row per checkout, paid or not.",
+    primary_key="id",                 # the row-identifying dim
     measures=[
         Measure(name="count", sql="*", agg="count", unit="count"),
         Measure(
-            name="revenue",
-            sql="{o}.amount",
-            agg="sum",
-            unit="currency",
-            format="currency",
+            name="revenue", sql="{o}.amount", agg="sum",
+            unit="currency", format="currency",
+            description="Total order revenue.",
         ),
     ],
     dimensions=[
+        Dimension(name="id", sql="{o}.id", type="number"),
         Dimension(name="region", sql="{o}.region", type="string"),
-        Dimension(name="amount", sql="{o}.amount", type="number"),
+        # foreign_key auto-derives a many_to_one Join to the named cube
+        # (which must declare primary_key).
+        Dimension(name="customer_id", sql="{o}.customer_id",
+                  type="number", foreign_key="customers"),
     ],
     time_dimensions=[
         TimeDimension(
-            name="created_at",
-            sql="{o}.created_at",
+            name="created_at", sql="{o}.created_at",
             granularities=("hour", "day", "week", "month"),
         ),
     ],
@@ -73,40 +92,81 @@ orders = Cube(
 
 ### The `{alias}` placeholder
 
-Every `sql` fragment uses `{<alias>}` (or `{<cube_name>}`, both
-resolve to the cube's alias). The compiler substitutes them at
-compile time so the emitted SQL is always alias-qualified. Other
-known placeholders:
+Every `sql` fragment uses `{<alias>}` (or `{<cube_name>}` — both
+resolve to the alias). Other known placeholders:
 
-- `{schema}` / `{tenant_schema}` — caller-supplied via the `context`
-  kwarg on `Catalog.compile(...)`.
-- `{ctx.X}` (inside `security_sql` only) — bound as a parameter, not
-  inlined as a SQL literal.
+- `{schema}` / `{tenant_schema}` — caller-supplied via `context=` on
+  `Catalog.compile`.
+- `{ctx.X}` (inside `security_sql` and `ScopePredicate.sql`) — binds
+  as a parameter, never inlined as a literal.
 
-## Step 3: pick aggregation / dimension type
+## Step 3: measure aggregations
 
-| `Measure.agg` | Use when |
-|---|---|
-| `sum`             | adds (revenue, count of events) |
-| `count`           | row count; `sql="*"` is fine |
-| `count_distinct`  | unique cardinality — sets `non_additive=True` semantics |
-| `avg` / `min` / `max` | obvious |
+| `Measure.agg`     | Use when                                        |
+|-------------------|-------------------------------------------------|
+| `sum`             | adds (revenue, count of events)                 |
+| `count`           | row count; `sql="*"` is fine                    |
+| `count_distinct`  | unique cardinality — pair with `non_additive=True` |
+| `avg` / `min` / `max` | obvious                                     |
+| `ratio`           | composed from two other measures on the same cube |
 
-| `Dimension.type` | Behaviour |
-|---|---|
-| `string`  | default; filter values must be strings |
-| `number`  | numeric comparisons (`gt`/`lt`/...) |
-| `time`    | filter values must parse as ISO-8601 |
-| `bool`    | filter values must be Python `bool` |
-| `uuid`    | filter values must parse as UUIDs |
+### Non-additive flag
 
-Time dimensions go in `time_dimensions=` rather than `dimensions=`
-because the compiler can truncate them with `granularity`.
+```python
+Measure(name="unique_users", sql="{o}.user_id", agg="count_distinct",
+        non_additive=True)
+```
 
-## Step 4: declare joins
+Flags measures that can't be summed across a coarser grain (counting
+distinct users across days ≠ summing daily distinct counts). Surfaced
+in the prompt; the rollup work refuses to roll them up.
+
+### Filtered measures
+
+```python
+Measure(
+    name="paid_revenue", sql="{o}.amount", agg="sum",
+    filter="{o}.status = 'paid'",        # SUM(amount) FILTER (WHERE ...)
+)
+```
+
+Renders as `FILTER (WHERE ...)` on PG / CH / DuckDB / BigQuery, and
+transpiles to `SUM(IFF(..., amount, NULL))` on Snowflake.
+
+### Ratio measures
+
+```python
+Measure(name="paid_rate", agg="ratio",
+        numerator="paid_revenue", denominator="revenue",
+        sql="")  # ignored; ratio composes from numerator/denominator
+```
+
+Compiler emits `paid_revenue / NULLIF(revenue, 0)`. Composes with
+filtered measures — a filtered ratio is just a ratio of two filtered
+sums.
+
+## Step 4: dimensions
+
+| `Dimension.type` | Behaviour                                   |
+|------------------|---------------------------------------------|
+| `string`         | default; filter values must be strings      |
+| `number`         | numeric comparisons (`gt`/`lt`/…)           |
+| `time`           | filter values must parse as ISO-8601        |
+| `bool`           | filter values must be Python `bool`         |
+| `uuid`           | filter values must parse as UUIDs           |
+
+Presentation hints (`unit`, `format`) mirror Measure's — visualisers
+read them; the compiler ignores them.
+
+```python
+Dimension(name="duration_seconds", sql="{o}.duration_sec",
+          type="number", unit="seconds", format="duration")
+```
+
+## Step 5: joins
 
 A `Join` is a directed edge. The BFS finds a path; multiple edges
-can compose.
+compose.
 
 ```python
 from semql import Join
@@ -114,16 +174,17 @@ from semql import Join
 orders = Cube(
     ...,
     joins=[
-        Join(
-            to="customers",
-            relationship="many_to_one",  # one_to_one | one_to_many | many_to_one
-            on="{o}.customer_id = {customers}.id",
-        ),
+        Join(to="customers", relationship="many_to_one",
+             on="{o}.customer_id = {customers}.id"),
     ],
 )
 ```
 
-## Step 5: reusable predicates and required filters
+Prefer `Dimension.foreign_key="<other_cube>"` on the FK column — the
+Catalog auto-derives the `many_to_one` Join from the FK to the
+target's `primary_key`. Explicit `Join` with the same target wins.
+
+## Step 6: reusable predicates and required filters
 
 ```python
 from semql import Segment
@@ -131,54 +192,158 @@ from semql import Segment
 orders = Cube(
     ...,
     segments=[
-        Segment(
-            name="paid",
-            sql="{o}.status = 'paid'",
-            description="Confirmed payment received.",
-        ),
+        Segment(name="paid", sql="{o}.status = 'paid'",
+                description="Confirmed payment received."),
     ],
-    # Dimensions a query MUST filter on (any op, any value).
-    required_filters=["region"],
+    required_filters=["region"],  # query MUST filter on this dim
 )
 ```
 
-A query then references `segments=["orders.paid"]` to apply the
+A query then references `segments=["orders.paid"]` to AND-compose the
 predicate without re-deriving it.
 
-## Step 6: tenancy + row-level security
+## Step 7: drill paths + extends
 
 ```python
 orders = Cube(
     ...,
-    tenancy="discriminator",          # schema | discriminator | none
-    tenancy_column="tenant_id",       # required for discriminator
-    security_sql="{o}.user_id = {ctx.user_id}",
+    drill_paths=[["region", "city"]],   # UI drill affordance hint
+    extends="base_audited",              # inherit measures/dims by name
 )
 ```
 
-`schema` substitutes `{tenant_schema}` in the table name.
-`discriminator` wraps the FROM in `SELECT * FROM ... WHERE
-tenant_col = bind(tenant)` *inside* the alias — an outer OR predicate
-can't smuggle in cross-tenant rows. `security_sql` AND-composes with
-tenancy in the same subquery.
+`drill_paths` is metadata for downstream UIs (the compiler ignores
+it; the drilldown prompt fragment reads it). `extends` flattens the
+named parent's measures / dimensions / time_dimensions / segments
+into this cube — child redeclarations win, new items append. Cycles
+raise at Catalog construction.
 
-## Step 7: register with a Catalog
+## Step 8: views — curated facades
 
 ```python
-from semql import Catalog
+from semql import View
 
-catalog = Catalog([orders, customers])
+revenue_view = View(
+    name="revenue_overview",
+    description="Curated revenue facade for line-of-business questions.",
+    fields={
+        "revenue": "orders.revenue",
+        "region": "orders.region",
+        "created_at": "orders.created_at",
+    },
+)
 ```
 
-`Catalog([...])` validates on construction: no duplicate cube names,
-every `Join.to` resolves, every `required_filter` names a real
-dimension. META cubes (`catalog_cubes` / `catalog_measures` /
-`catalog_dimensions`) auto-append.
+Views expose a renamed subset of cube fields. Used for prompt
+trimming (a 30-cube catalog can expose half a dozen 5-field views
+for common question shapes) and join disambiguation. Reference
+fields as `view.local_name`; the compiler rewrites to the underlying
+cube field and preserves the view-local alias in the output column.
 
-## Step 8: query
+## Step 9: tenancy + RLS + scope
+
+Three predicates can wrap a cube's FROM source, all AND-composed
+*inside* the alias subquery (so an outer `OR` can't bypass any of
+them):
+
+### Tenancy
 
 ```python
-from semql import SemanticQuery, Filter, TimeWindow
+Cube(
+    ...,
+    tenancy="discriminator",     # schema | discriminator | none
+    tenancy_column="tenant_id",  # required for discriminator
+)
+```
+
+`schema` substitutes `{tenant_schema}` in `table`. `discriminator`
+wraps the source in `WHERE tenant_col = bind(tenant)` — pass
+`context={"tenant": ...}` at compile time. `none` skips the check
+(META cubes, public lookups).
+
+### `security_sql` — caller-attached RLS
+
+```python
+Cube(
+    ...,
+    security_sql="{o}.owner_id = {ctx.viewer_id}",
+)
+```
+
+`{ctx.X}` placeholders bind as parameters — never inlined as
+literals. `viewer.viewer_id` auto-flattens to `ctx.viewer_id` when a
+viewer is passed (see Step 12).
+
+### `Cube.scope` — registered ScopeFn
+
+For row-level rules that apply across multiple cubes (e.g. "every
+table scoped to your team"), name a scope on each cube:
+
+```python
+Cube(name="orders", ..., scope="my_team")
+Cube(name="tickets", ..., scope="my_team")
+```
+
+Then register the function on the Catalog (Step 11). The compiler
+calls it with `(cube, viewer)` and AND-injects the returned
+`ScopePredicate` inside the alias subquery — same protection as
+tenancy / security_sql.
+
+## Step 10: cube-level authorisation
+
+```python
+Cube(
+    name="finance_ledger",
+    ...,
+    required_roles=["finance"],   # ANY-match; empty list = open
+)
+```
+
+When the caller passes a `viewer`, cubes whose `required_roles` don't
+intersect the viewer's roles disappear from `iter_cubes` /
+prompt fragments / MCP tool registration, and the compiler refuses
+queries that touch them (loud `CompileError`, not silent filtering).
+
+## Step 11: assemble the Catalog
+
+```python
+from semql import AuthContext, Catalog, ScopePredicate
+
+def my_team(cube: "Cube", viewer: AuthContext) -> "ScopePredicate | None":
+    if "admin" in viewer.roles:
+        return None              # admins see all rows
+    return ScopePredicate(
+        sql="{o}.rep_id IN (SELECT id FROM reps WHERE team = {ctx.viewer_team})",
+        ctx_keys=["ctx.viewer_team"],
+    )
+
+
+def deny_pii(cube: "Cube", viewer: AuthContext) -> bool:
+    # Policy override: cube-level visibility on top of required_roles.
+    if "pii" in cube.metadata and "pii_certified" not in viewer.roles:
+        return False
+    return True
+
+
+catalog = Catalog(
+    cubes=[orders, customers, finance_ledger],
+    views=[revenue_view],
+    scope_fns={"my_team": my_team},
+    policy=deny_pii,
+)
+```
+
+`Catalog([...])` validates on construction: duplicate cube names,
+unknown `Join.to` targets, missing `primary_key` on
+`foreign_key` targets, unregistered `Cube.scope` names — all raise
+loudly here so the compiler can trust the wiring later.
+
+## Step 12: query (with viewer)
+
+```python
+from semql import AuthContext, Filter, SemanticQuery, TimeWindow
+
+viewer = AuthContext(viewer_id="alice@example.com", roles=["sales"])
 
 compiled = catalog.compile(
     SemanticQuery(
@@ -186,54 +351,89 @@ compiled = catalog.compile(
         dimensions=["orders.region"],
         time_dimension=TimeWindow(
             dimension="orders.created_at",
-            granularity="day",
-            range=("2026-01-01T00:00:00", "2026-02-01T00:00:00"),
+            granularity="month",
+            range=("2026-01-01", "2026-04-01"),
+            fill_nulls_with=0,        # one row per month, COALESCE missing → 0
         ),
         filters=[Filter(dimension="orders.region", op="in", values=["us", "ca"])],
         segments=["orders.paid"],
         order=[("revenue", "desc")],
         limit=100,
     ),
-    context={"tenant": "acme"},   # for tenancy='discriminator' / {schema}
+    viewer=viewer,
+    context={"ctx.viewer_team": "EMEA-East", "tenant": "acme"},
 )
 print(compiled.sql, compiled.params)
 ```
 
-For OR / NOT predicates, use `where=BoolExpr(op="or", children=[...])`
-instead of (or alongside) `filters`.
+- `viewer=` filters unauthorised cubes (loud refusal) and auto-binds
+  `ctx.viewer_id`.
+- `context=` supplies `{schema}` / `{tenant}` / any `{ctx.X}` your
+  `security_sql` or `ScopePredicate` declares.
+- `fill_nulls_with` requires `granularity` and rejects queries with
+  non-time dimensions (Phase A: time-series only).
+- For OR / NOT, use `where=BoolExpr(op="or", children=[...])`.
+- Compare windows: `compare=CompareWindow(mode="previous_period")`.
 
-## Step 9: surface to LLMs
+## Step 13: surface to LLMs — the four-role pipeline
+
+Four fragment builders, each paired with a typed Pydantic output the
+LLM emits. Splice the fragment into the role's system prompt; parse
+the response with the matching model.
+
+| Role | Fragment | Output |
+|---|---|---|
+| Router | `build_router_prompt_fragment(catalog, viewer=...)` | `RouterDecision { path, cubes, views }` |
+| Generator | `build_query_generator_prompt_fragment(catalog, scope_to=decision.cubes+decision.views, viewer=...)` | `QueryPlan { steps: list[QueryStep] }` |
+| Presenter | `build_presenter_prompt_fragment(query_labels=..., result_summary=...)` | `Presentation { summary, highlights, caveats }` |
+| Drilldown | `build_drilldown_prompt_fragment(cube, focused_row=...)` | `DrilldownSuggestions { suggestions }` |
 
 ```python
-print(catalog.prompt())                  # planner-facing fragment
-print(catalog.prompt(include_introspection=True))  # + META cubes
+from semql import build_router_prompt_fragment
+
+router_prompt = build_router_prompt_fragment(catalog.as_dict(), viewer=viewer)
+# ... send to LLM, parse RouterDecision, feed cubes+views into Generator ...
 ```
 
-The fragment teaches the LLM the catalog's vocabulary and the
-`SemanticQuery` shape so it emits valid specs your code compiles.
+See `demos/pipeline_demo.py` for the full data flow without an LLM.
+
+The single-stage `catalog.prompt(viewer=...)` is still available for
+callers that don't want the four-stage breakdown.
 
 ## Common pitfalls
 
-- **Forgetting the `{alias}` placeholder** — `sql="amount"` won't
-  compile; use `sql="{o}.amount"` so the column qualifies in joined
-  queries.
-- **Aggregating in `Measure.sql`** — let `agg=` do it. `sql="{o}.amount"`
-  + `agg="sum"` emits `SUM(o.amount)`. Don't pre-wrap.
-- **Required filter not in `filters`** — putting it inside a `where`
-  tree's `or` branch doesn't satisfy `required_filters` because that
-  branch isn't AND-only.
-- **Bare measure name in `having`** — both `having=[Filter(dimension="revenue",
-  ...)]` and `having=[Filter(dimension="orders.revenue", ...)]` resolve;
-  the bare form looks up by alias.
-- **Granularity not declared on the time dimension** — if a query
-  asks for `granularity="hour"` but the dim only declares
-  `granularities=("day", "month")`, compile fails.
+- **Forgetting `{alias}`** — `sql="amount"` won't compile; use
+  `sql="{o}.amount"`.
+- **Aggregating in `Measure.sql`** — let `agg=` do it.
+  `sql="{o}.amount"` + `agg="sum"` emits `SUM(o.amount)`.
+- **Required filter inside an OR branch** —
+  `where=BoolExpr(op="or", ...)` doesn't satisfy `required_filters`.
+- **Bare measure in `having`** — `having=[Filter(dimension="revenue",
+  ...)]` and `having=[Filter(dimension="orders.revenue", ...)]` both
+  resolve; the bare form looks up by alias.
+- **Granularity not declared** — `granularity="hour"` against a dim
+  with `granularities=("day", "month")` fails.
+- **`scope` without registration** — `Cube(scope="X")` requires
+  `Catalog(scope_fns={"X": fn})`; missing is a construction-time
+  error, not a compile-time one.
+- **`viewer` only on `compile`** — also pass it to `catalog.prompt`
+  and to the four pipeline fragment builders, or the LLM sees cubes
+  the viewer can't query.
+- **Auto-binding `viewer_id` vs explicit context** — `ctx.viewer_id`
+  set in `context=` wins over `viewer.viewer_id`; useful for
+  impersonation flows, surprising otherwise.
 
 ## See also
 
-- `docs/api/semql.md` — auto-generated API reference for every public
-  symbol. Run `uv run scripts/gen_api_docs.py` to refresh.
-- `PHILOSOPHY.md` — design invariants. Catalogues are *data*; the
-  emitted SQL is the product; structure carries the meaning.
-- The existing test fixtures under `packages/semql/tests/` are the
-  best living examples of well-shaped cubes.
+- `skills/semql-requirement-discovery.md` — upstream skill that
+  captures intent at the domain level. Hand off via a markdown
+  requirements doc.
+- `demos/pipeline_demo.py` — runnable end-to-end demo.
+- `docs/api/semql.md` — auto-generated API reference for every
+  public symbol. Run `uv run scripts/gen_api_docs.py` to refresh.
+- `PHILOSOPHY.md` — design invariants. Identity is the caller's;
+  authorisation is the compiler's; bypass-proof beats convenient.
+- Existing test fixtures under `packages/semql/tests/` — the best
+  living examples of well-shaped cubes (`test_auth.py`,
+  `test_scope.py`, `test_time_spine.py` are particularly worth
+  browsing).

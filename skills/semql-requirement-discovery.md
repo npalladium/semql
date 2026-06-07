@@ -1,230 +1,250 @@
 ---
 name: semql-requirement-discovery
 description: >
-  Discover what semantic-layer cubes a developer needs to build. Use
-  upstream of `semql-cube`: when the user wants to bootstrap a SemQL
-  catalog from a PRD, a feature brief, or a vague intent ("we want
-  to answer revenue questions"), this skill interviews them and / or
-  reads provided spec docs, then emits a structured requirements
-  document the `semql-cube` skill consumes to write actual Cubes.
+  Discover what a SemQL catalog should contain — before any Python
+  gets written. Use upstream of `semql-cube`: when the user says
+  "we want to answer revenue questions" or hands you a PRD and asks
+  what cubes to build, this skill captures intent at the domain
+  level and emits a requirements doc that `semql-cube` consumes.
 ---
 
 # Discovering catalog requirements
 
 This skill bridges **intent** ("we want analytics for our orders
-table") to **catalog structure** (cubes, measures, dimensions, joins,
-auth). Its output is a markdown requirements document the
-`semql-cube` skill reads to author the Python `Cube` definitions.
+process") to a **structured plan** the `semql-cube` skill can act
+on. It stays out of Python: no SQL fragments, no alias choices, no
+column types. Those decisions belong in `semql-cube`, where the
+technical interview happens.
 
-**You're in this skill when:**
-- The user has not yet written cube code and is asking what to build.
-- The user hands you a PRD / spec / Notion doc and says "model this."
-- The user wants help breaking a vague analytics ask into concrete
-  cubes / measures / dimensions.
+**Use this skill when:**
+- The user hasn't decided what to build yet.
+- The user hands you a PRD / feature brief / strategy doc and asks
+  "what cubes do we need?"
+- The user can describe what their users want to know, but hasn't
+  mapped that to tables.
 
-**You're NOT in this skill when:**
-- The user already knows the shape and wants the Python code written
-  → use `semql-cube`.
-- The user has cubes and wants to query them → use the
-  `build_query_generator_prompt_fragment` surface in core.
+**Use `semql-cube` instead when:**
+- The user already knows the entities and now needs the Python.
+- The user is extending an existing catalog with one more measure
+  or dimension.
+- The conversation is about SQL fragments, granularities, ScopeFn
+  predicates, or other technical details.
 
-## Inputs the skill consumes
+## What the skill produces
+
+A markdown requirements document at `docs/requirements/<name>.md`
+(or a path the user specifies). The doc is the contract with
+`semql-cube` — that skill reads it and writes the Python.
+
+The doc lists **intent-level** facts only:
+- The domain and audience.
+- The questions users will ask.
+- The entities those questions imply.
+- Which entities relate to which.
+- Who's allowed to see what (in business terms).
+
+It does **not** list:
+- Backend / dialect choices.
+- SQL fragments or column expressions.
+- Specific aggregations or granularities.
+- Exact join predicates.
+- ScopeFn implementations.
+
+Those are `semql-cube`'s job. If the user wants to talk about them,
+hand off.
+
+## Inputs
 
 Either or both:
 
-1. **PRD documents** — the user names file paths or URLs to spec
-   material (product briefs, feature designs, schema dumps). Read
-   them with the `Read` tool. Cite specific sections in your follow-up
-   questions so the user knows you're grounded.
-2. **Interview answers** — when the PRD is missing, ambiguous, or
-   silent on a needed dimension, ask. Use `AskUserQuestion` for
-   structured multi-choice decisions; use plain prose for open-ended
-   ones.
+1. **PRD documents** — paths or URLs the user names. Read with the
+   `Read` tool. Cite specific sections in your follow-up questions
+   so the user sees you're grounded ("section 3.2 mentions
+   transactions; should that be a separate cube from orders?").
+2. **Interview answers** — when the PRD is silent on an intent
+   question, ask. Use `AskUserQuestion` for closed choices; open
+   prose for the rest.
 
-## The interview structure
+## The interview — five domain-level passes
 
-Walk the developer through these in order. Skip questions the PRD
-already answers; ask the rest.
+### 1. Domain and audience
 
-### 1. Domain + business questions
+Who's asking these questions? Founder reviewing weekly numbers, an
+operations lead investigating incidents, a sales rep checking their
+own pipeline? Audience drives auth (everyone vs role-scoped) and
+view design (curated facade vs full catalog).
 
-Get the *questions users will ask*, not "the entities in our schema."
-The schema falls out of the questions. Aim for 5-10 example questions
-spanning headline, breakdown, compare, and context shapes.
+Capture in the doc:
+- Domain (one line).
+- Audience (roles or personas).
+- Primary question shapes (headline / breakdown / compare /
+  context).
 
-Examples:
-- "What was revenue last quarter?" → headline
-- "Revenue by region for the same period?" → breakdown
-- "How does that compare to the previous quarter?" → compare
-- "How many orders contributed?" → context
+### 2. The questions
 
-If the user can't generate questions, that's a signal the analytics
-ask is underspecified — flag it and ask them to come back.
+Get **5-10 example questions** users will ask. Real ones, in their
+voice. Examples:
+- "What was revenue last quarter?"
+- "Which regions outperformed?"
+- "How does that compare to the previous quarter?"
+- "How many orders contributed?"
 
-### 2. Source data
+If the user can't come up with five, the analytics ask is
+underspecified. Flag it as a blocker; come back when there are
+real questions.
 
-For each question, identify the table(s) involved. Get:
-- Backend (Postgres, ClickHouse, DuckDB, BigQuery, Snowflake)
-- Table name (with `{schema}` placeholder if multi-tenant)
-- DDL or column list (ask for `\d table_name` output or equivalent)
+### 3. The entities
 
-A cube ≈ a table. Cross-table aggregations are joins, not single
-cubes.
+For each question, identify the **business entity** it's about — not
+the database table. "Revenue" implies orders / transactions /
+invoices (pick one based on the user's mental model). "Active
+users" implies customers + activity. Each entity becomes a cube.
 
-### 3. Per cube: measures and dimensions
+Capture in the doc:
+- Cube name (use the business-domain noun, plural lowercase:
+  `orders`, `customers`, `tickets`).
+- One-sentence description ("one row per …").
+- Which questions reference this entity.
 
-For each table:
-- **Measures** — what gets aggregated? Default to `count(*)` + the
-  one or two numeric columns the questions reference. Note each
-  measure's `agg` (sum / count / count_distinct / avg / min / max /
-  ratio) and `unit` (currency, count, duration, percent).
-- **Dimensions** — what gets filtered or grouped on? Categoricals
-  and IDs. Note each dimension's type (string / number / time / bool
-  / uuid).
-- **Time dimensions** — separate list. Note allowed granularities
-  (hour / day / week / month) based on the underlying column.
+Don't ask for column lists or DDL. Those land in `semql-cube`.
 
-### 4. Joins
+### 4. Relationships
 
-For each pair of cubes a question crosses, capture:
-- Direction (which side is many, which is one)
-- The join predicate (`{a}.col = {b}.col`)
-- Whether it should be auto-derived from a `foreign_key` on a
-  dimension (preferred when natural)
+For each pair of entities a question crosses, capture **direction**
+in business terms:
+- "An order belongs to one customer; a customer has many orders" →
+  many-to-one from `orders` to `customers`.
+- "Each ticket has one assignee; an assignee has many tickets" →
+  many-to-one from `tickets` to `employees`.
 
-### 5. Reusable predicates and required filters
+The user describes the relationship; `semql-cube` translates it to
+a `Join` with a predicate.
 
-Centralise repeated WHERE clauses:
-- **Segments** — named predicates a planner references by name
-  ("paid_orders", "active_users").
-- **`required_filters`** — dimensions a query MUST filter on (tenant
-  ID, status). The compiler refuses queries that omit them.
+Capture in the doc:
+- For each entity: who they relate to and how (1:1, 1:N, N:1).
 
-### 6. Authorisation
+### 5. Authorisation — at the policy level
 
-Critical and easy to miss. Ask:
-- **Who sees what?** A `viewer` is the request's identity
-  (`AuthContext { viewer_id, roles, metadata }`). Roles drive the
-  static `Cube.required_roles` ANY-match.
-- **Row-level scoping?** Does any cube need rows filtered by viewer
-  identity ("my tickets," "my team's orders")? If yes, identify the
-  scope as a `ScopeFn` candidate — name it, describe the predicate.
-- **Tenant model?** SCHEMA (per-tenant database schema),
-  DISCRIMINATOR (shared table, tenant column), or NONE.
+Capture the **rules** the catalog has to honour, not the
+implementation:
 
-### 7. Views (curated facades)
+- **Role gates.** Which entities are restricted to which roles? In
+  business terms: "finance ledger is finance team only."
+- **Row-level visibility.** Are there entities everyone can see, but
+  scoped to their slice? "Sales reps see only their team's orders."
+  "Engineers see only their incidents."
+- **Tenant model.** Is this multi-tenant? Per-tenant schemas, or
+  shared tables with a tenant column?
 
-When the catalog grows past ~10 cubes, ask whether the planner should
-see a curated subset for common question shapes. Each view names a
-handful of `cube.field` references under view-local aliases.
+Capture in the doc:
+- Expected viewer roles (the role vocabulary).
+- For each row-level rule: the rule in business terms + which
+  entities it applies to (without writing the SQL).
+- Tenant model (one line).
 
-## Output format
+`semql-cube` translates "sales reps see their team's orders" into a
+`ScopeFn` returning a `ScopePredicate` with the right SQL. You don't
+write that SQL here.
 
-Write the requirements as a markdown document. Suggested path:
-`docs/requirements/<catalog_name>.md`. Use this structure verbatim
-so `semql-cube` can parse it predictably:
+## Output document
+
+Write to `docs/requirements/<catalog_name>.md`. Use this structure
+verbatim so `semql-cube` parses it predictably:
 
 ```markdown
 # Catalog Requirements: <name>
 
 ## Context
-<1-2 paragraphs on the domain, audience, and primary question shapes>
 
-## Cubes
+- **Domain**: <one line>
+- **Audience**: <roles or personas>
+- **Primary question shapes**: <headline / breakdown / compare / context>
 
-### <cube_name>
-- **Backend**: postgres | clickhouse | duckdb | bigquery | snowflake
-- **Table**: `<table_expression, e.g. {schema}.orders>`
-- **Alias**: `<one or two letters>`
-- **Description**: <one sentence>
-- **Primary key**: <dimension_name>  *(optional)*
-- **Measures**:
-  - `<name>` — `agg=<agg>`, `unit=<unit>`, sql `<{alias}.col>`,
-    description: <one line>
-- **Dimensions**:
-  - `<name>` — `type=<type>`, sql `<{alias}.col>`, foreign_key:
-    `<other_cube>` *(optional)*
-- **Time dimensions**:
-  - `<name>` — granularities=<list>, sql `<{alias}.col>`
-- **Segments** *(optional)*:
-  - `<name>` — sql `<{alias}.predicate>`
-- **Joins**:
-  - many_to_one → `<other_cube>` on `{a}.col = {b}.col`
-- **Required filters** *(optional)*: `[dim1, dim2]`
-- **Required roles** *(optional)*: `[role1, role2]` (ANY-match)
-- **Scope** *(optional)*: `<scope_fn_name>`
-- **Tenancy**: schema | discriminator | none
+## Example questions
 
-### <next_cube_name>
+1. <question>
+2. <question>
 ...
 
-## Views *(optional)*
+## Entities
+
+### <cube_name>
+- **Description**: <one sentence — "one row per …">
+- **Relates to**:
+  - many_to_one → `<other_entity>` ("a <this> belongs to one <other>")
+- **Question references**: questions 1, 3, 5
+
+### <next_entity>
+...
+
+## Views (optional)
+
+When the catalog grows past ~10 entities or there are repeated
+question shapes, suggest curated facades:
 
 ### <view_name>
 - **Description**: <one line>
-- **Fields**:
-  - `<local_name>` → `<cube.field>`
+- **Surfaces**: <which fields from which entities, business names>
+- **Used for**: <which questions>
 
 ## Authorisation
 
-- **Expected viewer roles**: `[role1, role2, role3]`
-- **Scope functions**:
-  - `<name>` — <one-line description of who sees what>
-    - Predicate sketch: `<sql with {alias} and {ctx.X} placeholders>`
-    - Required ctx keys: `[ctx.X, ctx.Y]`
+- **Viewer roles**: [<role1>, <role2>, …]
+- **Role gates**:
+  - `<entity>` — restricted to roles [<role>, …]
+- **Row-level rules** (business prose, not SQL):
+  - <entity>: <rule, e.g. "sales reps see their team's rows; admins see all">
+- **Tenant model**: schema | discriminator | none — <one-line rationale>
 
 ## Open questions
 
-- <Anything the interview / PRD didn't resolve. semql-cube will
-  surface these before writing any Cube that depends on them.>
+- <Anything the PRD / interview didn't resolve. semql-cube surfaces
+  these before writing any Cube that depends on them.>
 ```
 
 ## Output report
 
-After writing the requirements doc, send the user a short report:
+After writing the doc, send the user a short report:
 
 1. Path to the requirements document.
-2. Cube count + view count.
-3. Any **open questions** you couldn't resolve from the PRD /
-   interview — call these out as blockers.
-4. Suggested next step: invoke `semql-cube` (or its slash command)
-   pointing at the requirements doc.
+2. Entity count + view count.
+3. Open questions that need resolving before `semql-cube` can run.
+4. Suggested next step: invoke `semql-cube` pointing at the doc.
 
-End with: "Want me to dig into any of these — refine a cube, draft
-the SQL fragments for a measure, or sketch the ScopeFn?" This is the
-follow-up invitation — the user opts in to interactive refinement,
-opts out by doing nothing.
+End with: "Want me to refine any of these — narrow down an entity's
+scope, propose more views, sketch additional questions?" That's the
+follow-up invitation. The user opts into another pass or moves on
+to `semql-cube`.
 
 ## Interview etiquette
 
-- One bundle of related questions at a time, not one at a time. Use
-  `AskUserQuestion` for closed choices (4 options max).
-- Cite the PRD when you have it: "Section 3.2 says transactions are
-  USD-denominated — should `revenue.unit` be `currency`?"
-- Don't invent column names. If the user gave you "amount" and you
-  need "tax_rate," ask.
-- Don't write Python in this skill. Output is a markdown spec.
-- When the user gives a one-line answer like "yes" or "no," do
-  follow-up to fill in the implications. "Yes, scope to reportees"
-  → who's the manager, what's the org table, what's the recursion?
+- Cite the PRD where you have it. "Section 3.2 mentions transactions
+  separately from orders — should we model them as two cubes?"
+- Ask in business terms, not technical ones. "Who's allowed to see
+  this data?" not "What role string should we use?"
+- Don't propose SQL, joins-as-predicates, or ScopeFn names. Those
+  belong in `semql-cube`.
+- Don't write Python in this skill. Output is the markdown doc.
+- One bundle of related questions at a time. Use `AskUserQuestion`
+  for closed choices (4 options max).
 
 ## Common pitfalls
 
-- **Sketching the schema before the questions are clear.** If the
-  user can't list 5 questions, the catalog is premature.
-- **Inventing measures from column names.** A column named
-  `is_active` isn't a measure — it's a bool dimension. Measures are
-  what you'd put `SUM()` / `COUNT()` around.
-- **Skipping auth.** Every new cube should pass through Section 6.
-  Auth bolted on after-the-fact is where bugs land.
-- **One giant cube.** A "facts" table that holds orders + customers
-  + products inline is a cube smell. Split by entity; declare joins.
+- **Skipping straight to schema.** If the user starts listing
+  columns, gently redirect: "Let's nail down the questions first;
+  the columns fall out of those."
+- **Inventing the audience.** If the user doesn't say who's asking,
+  ask. Audience is load-bearing for auth.
+- **Treating auth as an afterthought.** Section 5 is mandatory.
+  Catalogs without a clear auth story tend to ship one and then
+  have to refactor.
+- **One giant entity.** A "facts" entity that fuses orders +
+  customers + products is an entity smell — split by business noun.
 
 ## See also
 
-- `skills/semql-cube.md` — the downstream skill that authors Cubes
-  from the requirements doc this skill produces.
-- `docs/decisions.md` — design decisions worth pinning ("we don't
-  use PyYAML for catalogs," etc.).
-- `PHILOSOPHY.md` — the catalog-is-data + auth-is-compiler-side
-  invariants the requirements doc must honour.
+- `skills/semql-cube.md` — the downstream skill that writes Python
+  from this skill's requirements doc.
+- `PHILOSOPHY.md` — design invariants. The catalog-is-data,
+  identity-is-caller-side, auth-is-compiler-side line is what
+  Section 5 honours.
