@@ -57,7 +57,7 @@ build *pkgs="semql semql-mcp semql-erd semql-validate-db": clean-dist
 
 # Metadata validation — same gate PyPI applies on upload.
 check-dist:
-    uvx twine check dist/*
+    uv run twine check dist/*
 
 # Decrypt one token field from secrets.enc.yaml. Used by the publish
 # recipes; can also be called directly:
@@ -97,7 +97,7 @@ release: (build) check-dist publish
 #   just stage semql        # leaves only semql artifacts in dist/
 stage pkg: clean-dist
     uv build --package {{pkg}}
-    uvx twine check dist/*
+    uv run twine check dist/*
 
 # ---------------------------------------------------------------------------
 # Staged release — semql first, wait for the index, then dependents.
@@ -160,7 +160,7 @@ publish-test-rest: clean-dist
       echo "── build $pkg ──"
       uv build --package "$pkg"
     done
-    uvx twine check dist/*
+    uv run twine check dist/*
     if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
       UV_PUBLISH_TOKEN=$(just _token test_pypi_token)
       export UV_PUBLISH_TOKEN
@@ -176,7 +176,7 @@ publish-rest: clean-dist
       echo "── build $pkg ──"
       uv build --package "$pkg"
     done
-    uvx twine check dist/*
+    uv run twine check dist/*
     if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
       UV_PUBLISH_TOKEN=$(just _token pypi_token)
       export UV_PUBLISH_TOKEN
