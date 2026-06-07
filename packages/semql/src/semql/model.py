@@ -204,6 +204,26 @@ class TableRef(BaseModel):
     table: str
 
 
+class NamedCTE(BaseModel):
+    """A named CTE the compiler hoists into the outer ``WITH`` clause.
+
+    A ``DerivedTable`` whose ``sql`` is a layered preamble can declare
+    each CTE separately here, with the cube's main ``sql`` referencing
+    them by name. The compiler collects every cube's CTEs across the
+    query, deduplicates by ``name``, and emits a single ``WITH`` at the
+    top of the final SELECT — so two cubes that share a CTE name MUST
+    declare it identically (same SQL) or the catalog raises at
+    construction time.
+
+    ``sql`` uses the same placeholder convention as
+    :attr:`DerivedTable.sql`: ``{tenant_schema}`` and ``{key}``
+    substitution flow through ``resolve_sql`` at compile time."""
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    sql: str
+
+
 class DerivedTable(BaseModel):
     """A cube whose physical source is a SQL expression, not a table.
 
@@ -216,14 +236,35 @@ class DerivedTable(BaseModel):
     ``{tenant_schema}`` for schema-tenancy substitution and ``{key}``
     for compile-context substitution.
 
+    ``with_ctes`` declares a preamble of named CTEs that get hoisted to
+    a single outer ``WITH`` clause at compile time. The cube's main
+    ``sql`` references them by bare name; the compiler resolves them.
+    CTE names are global within a compiled query — the catalog enforces
+    uniqueness across all cubes.
+
     DerivedTable is the second place raw SQL legitimately enters the
     catalogue (the first is ``Measure.sql``). The compiler surfaces the
-    resolved SQL on :attr:`semql.compile.Compiled.derived_sources` so
-    static checks (``is_safe_select``, dialect snapshots) cover every
-    raw fragment, not just the outer SELECT."""
+    resolved SQL of both the main ``sql`` and every CTE on
+    :attr:`semql.compile.Compiled.derived_sources` so static checks
+    (``is_safe_select``, dialect snapshots) cover every raw fragment,
+    not just the outer SELECT."""
 
     model_config = ConfigDict(frozen=True)
     sql: str
+    with_ctes: list[NamedCTE] = []
+
+    @model_validator(mode="after")
+    def _check_unique_cte_names(self) -> DerivedTable:
+        seen: set[str] = set()
+        for cte in self.with_ctes:
+            if cte.name in seen:
+                raise ValueError(
+                    f"DerivedTable: duplicate CTE name {cte.name!r} in "
+                    "with_ctes. Each CTE within a derived source must "
+                    "have a unique name."
+                )
+            seen.add(cte.name)
+        return self
 
 
 CubeSource = TableRef | DerivedTable
@@ -381,6 +422,11 @@ class Cube(BaseModel):
                 offenders.append("source.table")
             if isinstance(self.source, DerivedTable) and "{tenant_schema}" in self.source.sql:
                 offenders.append("source.sql")
+            if isinstance(self.source, DerivedTable):
+                for cte in self.source.with_ctes:
+                    if "{tenant_schema}" in cte.sql:
+                        offenders.append(f"source.with_ctes[{cte.name!r}]")
+                        break
             if offenders:
                 raise ValueError(
                     f"Cube {self.name!r} declares tenancy='discriminator' "

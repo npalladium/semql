@@ -18,6 +18,7 @@ from semql import (
     DerivedTable,
     Dimension,
     Measure,
+    NamedCTE,
     SemanticQuery,
 )
 from semql.model import TableRef
@@ -264,3 +265,178 @@ def test_join_from_plain_cube_to_derived_cube() -> None:
     # derived_sources surfaces the joined cube's derived SQL.
     assert len(c.derived_sources) == 1
     assert "spend_rollup" in c.derived_sources[0]
+
+
+# ---------------------------------------------------------------------------
+# DerivedTable.with_ctes — hoisted preamble
+# ---------------------------------------------------------------------------
+
+
+def _layered_cube() -> Cube:
+    """A two-CTE preamble feeding the main cube body — the zenai shape."""
+    return Cube(
+        name="user_activity",
+        backend=Backend.POSTGRES,
+        source=DerivedTable(
+            with_ctes=[
+                NamedCTE(
+                    name="raw_active",
+                    sql="SELECT user_id, duration FROM events WHERE in_shift",
+                ),
+                NamedCTE(
+                    name="bucketed",
+                    sql="SELECT user_id, SUM(duration) AS total FROM raw_active GROUP BY user_id",
+                ),
+            ],
+            sql="SELECT user_id, total AS active_time FROM bucketed",
+        ),
+        alias="ua",
+        measures=[Measure(name="total_active", sql="{ua}.active_time", agg="sum")],
+        dimensions=[Dimension(name="user_id", sql="{ua}.user_id", type="string")],
+    )
+
+
+def test_with_ctes_emits_outer_with_clause() -> None:
+    cat = Catalog([_layered_cube()])
+    q = SemanticQuery(measures=["user_activity.total_active"], dimensions=["user_activity.user_id"])
+    c = cat.compile(q)
+    # WITH clause sits at the top; both CTEs appear before the SELECT.
+    assert c.sql.startswith("WITH ")
+    assert "raw_active AS" in c.sql
+    assert "bucketed AS" in c.sql
+    # Main FROM still wraps the body sql aliased to the cube alias.
+    assert ") AS ua" in c.sql
+    # CTE order is preserved (raw_active references events; bucketed
+    # references raw_active — emit the prerequisite first).
+    assert c.sql.index("raw_active AS") < c.sql.index("bucketed AS")
+
+
+def test_with_ctes_appear_in_derived_sources() -> None:
+    cat = Catalog([_layered_cube()])
+    q = SemanticQuery(measures=["user_activity.total_active"], dimensions=["user_activity.user_id"])
+    c = cat.compile(q)
+    # Three entries: cte1, cte2, then the main sql.
+    assert len(c.derived_sources) == 3
+    assert "raw_active" in c.derived_sources[0] or "events" in c.derived_sources[0]
+    assert "bucketed" in c.derived_sources[1] or "raw_active" in c.derived_sources[1]
+    assert "active_time" in c.derived_sources[2]
+
+
+def test_with_ctes_rejects_duplicate_names_within_cube() -> None:
+    with pytest.raises(ValidationError, match=r"(?i)duplicate CTE name"):
+        DerivedTable(
+            with_ctes=[
+                NamedCTE(name="a", sql="SELECT 1"),
+                NamedCTE(name="a", sql="SELECT 2"),
+            ],
+            sql="SELECT * FROM a",
+        )
+
+
+def test_with_ctes_rejects_cross_cube_name_collision() -> None:
+    c1 = Cube(
+        name="cube_a",
+        backend=Backend.POSTGRES,
+        source=DerivedTable(
+            with_ctes=[NamedCTE(name="shared", sql="SELECT 1 AS x")],
+            sql="SELECT * FROM shared",
+        ),
+        alias="a",
+        dimensions=[Dimension(name="x", sql="{a}.x", type="string")],
+    )
+    c2 = Cube(
+        name="cube_b",
+        backend=Backend.POSTGRES,
+        source=DerivedTable(
+            with_ctes=[NamedCTE(name="shared", sql="SELECT 2 AS y")],
+            sql="SELECT * FROM shared",
+        ),
+        alias="b",
+        dimensions=[Dimension(name="y", sql="{b}.y", type="string")],
+    )
+    with pytest.raises(ValueError, match=r"(?i)CTE name 'shared'.*collides"):
+        Catalog([c1, c2])
+
+
+def test_with_ctes_resolves_tenant_schema_placeholder() -> None:
+    cube = Cube(
+        name="rollup",
+        backend=Backend.POSTGRES,
+        source=DerivedTable(
+            with_ctes=[
+                NamedCTE(
+                    name="raw_rows",
+                    sql="SELECT * FROM {tenant_schema}.raw_table",
+                )
+            ],
+            sql="SELECT * FROM raw_rows",
+        ),
+        alias="r",
+        measures=[Measure(name="cnt", sql="*", agg="count")],
+        dimensions=[Dimension(name="bucket", sql="{r}.bucket", type="string")],
+    )
+    cat = Catalog([cube])
+    q = SemanticQuery(measures=["rollup.cnt"], dimensions=["rollup.bucket"])
+    c = cat.compile(q, context={"tenant_schema": "tenant42"})
+    assert "tenant42.raw_table" in c.sql
+    assert "{tenant_schema}" not in c.sql
+    # CTE body is also in derived_sources with the substituted schema.
+    assert any("tenant42.raw_table" in src for src in c.derived_sources)
+
+
+def test_with_ctes_rejected_with_tenant_schema_under_discriminator() -> None:
+    with pytest.raises(ValidationError, match=r"(?i)tenant_schema"):
+        Cube(
+            name="bad",
+            backend=Backend.POSTGRES,
+            source=DerivedTable(
+                with_ctes=[NamedCTE(name="raw", sql="SELECT * FROM {tenant_schema}.raw")],
+                sql="SELECT * FROM raw",
+            ),
+            alias="b",
+            tenancy="discriminator",
+            tenancy_column="tenant_id",
+        )
+
+
+def test_plain_cube_emits_no_with_clause() -> None:
+    cube = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="public.orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    )
+    cat = Catalog([cube])
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"])
+    c = cat.compile(q)
+    assert not c.sql.startswith("WITH ")
+
+
+def test_with_ctes_join_path_plain_to_layered() -> None:
+    """Joining a plain-table cube against a layered-CTE cube emits ONE
+    outer WITH followed by the join. Both cubes' sources are inside the
+    same FROM ... JOIN clause."""
+    facts = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="public.orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+        dimensions=[Dimension(name="user_id", sql="{o}.user_id", type="string")],
+        joins=[
+            {  # type: ignore[list-item]
+                "to": "user_activity",
+                "relationship": "many_to_one",
+                "on": "{o}.user_id = {ua}.user_id",
+            }
+        ],
+    )
+    cat = Catalog([facts, _layered_cube()])
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["user_activity.user_id"])
+    c = cat.compile(q)
+    assert c.sql.startswith("WITH ")
+    assert "raw_active AS" in c.sql
+    assert "bucketed AS" in c.sql
+    assert "o.user_id = ua.user_id" in c.sql

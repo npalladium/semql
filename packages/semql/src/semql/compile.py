@@ -138,13 +138,63 @@ def _collect_derived_sources(
     """Materialize the resolved SQL of every ``DerivedTable`` source the
     query touched. Plain-table cubes contribute nothing.
 
-    Order matches ``touched`` (first-mention) so callers can correlate
-    each entry with the parallel ``touched_cube_names`` list."""
+    Order matches ``touched`` (first-mention). For each derived cube,
+    any ``with_ctes`` are emitted first (declaration order) followed by
+    the main ``sql`` — so a static checker like ``is_safe_select``
+    walking ``derived_sources`` sees the same fragments that actually
+    enter the compiled query."""
     out: list[str] = []
     for cube in touched:
         src = cube.resolved_source
         if isinstance(src, DerivedTable):
+            for cte in src.with_ctes:
+                out.append(resolve_sql(cte.sql))
             out.append(resolve_sql(src.sql))
+    return out
+
+
+def _collect_hoisted_ctes(
+    touched: list[Cube],
+    resolve_sql: Callable[[str], str],
+) -> list[tuple[str, str]]:
+    """Collect every CTE every touched cube declares, deduped by name.
+
+    Returns ``[(name, resolved_sql), ...]`` in first-mention order. The
+    catalog already enforces cube-cross uniqueness at construction
+    time, so the dedup here only matters when the same cube is touched
+    twice (e.g. self-join) — its CTEs collapse to one ``WITH`` entry."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for cube in touched:
+        src = cube.resolved_source
+        if not isinstance(src, DerivedTable):
+            continue
+        for cte in src.with_ctes:
+            if cte.name in seen:
+                continue
+            seen.add(cte.name)
+            out.append((cte.name, resolve_sql(cte.sql)))
+    return out
+
+
+def _apply_with_clause(
+    select_node: exp.Select,
+    ctes: list[tuple[str, str]],
+    backend: Backend,
+) -> exp.Select:
+    """Attach a ``WITH`` clause hoisting every ``ctes`` entry to the front
+    of ``select_node``.
+
+    Uses sqlglot's ``Select.with_`` helper which returns a new node
+    carrying the CTE. ``as_`` strings get re-parsed in the cube's
+    dialect so backend-specific shapes (ClickHouse ARRAY JOIN, BigQuery
+    UNNEST) survive the round-trip. No-op when ``ctes`` is empty."""
+    if not ctes:
+        return select_node
+    dialect = dialect_for(backend)
+    out: exp.Select = select_node
+    for name, body_sql in ctes:
+        out = out.with_(name, as_=body_sql, dialect=dialect)
     return out
 
 
@@ -1139,6 +1189,7 @@ def compile_query(
         if q.offset is not None and q.offset > 0:
             outer = outer.offset(int(q.offset))
 
+        outer = _apply_with_clause(outer, _collect_hoisted_ctes(touched, resolve_in_ctx), backend)
         sql = outer.sql(dialect=dialect, pretty=False, normalize_functions=False)
         cm = _build_column_meta(
             outer_columns,
@@ -1290,6 +1341,9 @@ def compile_query(
     if q.offset is not None and q.offset > 0:
         select_node = select_node.offset(int(q.offset))
 
+    select_node = _apply_with_clause(
+        select_node, _collect_hoisted_ctes(touched, resolve_in_ctx), backend
+    )
     sql = select_node.sql(dialect=dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
         columns,

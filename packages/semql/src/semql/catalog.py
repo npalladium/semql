@@ -24,6 +24,7 @@ from semql.model import (
     AuthContext,
     BaseField,
     Cube,
+    DerivedTable,
     Dimension,
     Join,
     Lookup,
@@ -135,6 +136,26 @@ class Catalog:
                         f"{j.to!r} is not in the catalog. "
                         f"Known cubes: {sorted(known)}."
                     )
+
+        # DerivedTable CTE names live in a flat namespace across the
+        # whole catalog — the compiler hoists every touched cube's CTEs
+        # into a single outer ``WITH`` clause, so two cubes that both
+        # declare ``WITH foo AS (...)`` with different bodies would
+        # silently lose one. Surface the collision at construction time.
+        cte_owners: dict[str, str] = {}
+        for cube in merged:
+            src = cube.source
+            if not isinstance(src, DerivedTable):
+                continue
+            for cte in src.with_ctes:
+                if cte.name in cte_owners:
+                    raise ValueError(
+                        f"Cube {cube.name!r}: CTE name {cte.name!r} in "
+                        f"with_ctes collides with cube "
+                        f"{cte_owners[cte.name]!r}. CTE names must be "
+                        "unique across the catalog."
+                    )
+                cte_owners[cte.name] = cube.name
 
         self._cubes: list[Cube] = merged
         self._by_name: dict[str, Cube] = {c.name: c for c in merged}
