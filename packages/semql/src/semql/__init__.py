@@ -37,6 +37,7 @@ from semql.introspect import (
 )
 from semql.model import (
     AggLiteral,
+    AuthContext,
     Backend,
     BaseField,
     ChartTypeLiteral,
@@ -70,6 +71,7 @@ from semql.visualize import VizColumn, VizDecision, decide_visualization
 
 __all__ = [
     "AggLiteral",
+    "AuthContext",
     "Backend",
     "BaseField",
     "BoolExpr",

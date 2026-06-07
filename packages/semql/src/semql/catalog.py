@@ -19,8 +19,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
-from semql.introspect import META_CUBES
-from semql.model import BaseField, Cube, Join, View
+from semql.introspect import META_CUBES, PolicyFn
+from semql.model import AuthContext, BaseField, Cube, Join, View
 
 _T = TypeVar("_T", bound=BaseField)
 
@@ -38,6 +38,7 @@ class Catalog:
         cubes: list[Cube],
         *,
         views: list[View] | None = None,
+        policy: PolicyFn | None = None,
     ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -156,6 +157,14 @@ class Catalog:
                         f"or dimension on cube {cube_name!r}."
                     )
         self.views: dict[str, View] = {v.name: v for v in view_list}
+        self._policy: PolicyFn | None = policy
+
+    @property
+    def policy(self) -> PolicyFn | None:
+        """The optional custom-visibility predicate registered at
+        construction time. ``None`` means cube visibility is governed
+        purely by ``Cube.required_roles``."""
+        return self._policy
 
     def as_dict(self) -> dict[str, Cube]:
         """Return ``{cube.name: Cube}`` — the shape ``compile_query`` consumes."""
@@ -166,21 +175,41 @@ class Catalog:
         query: SemanticQuery,
         *,
         context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
     ) -> Compiled:
         """Compile a ``SemanticQuery`` against this catalog. Thin wrapper
-        around ``semql.compile.compile_query``."""
+        around ``semql.compile.compile_query``.
+
+        When ``viewer`` is provided, the compiler:
+        - Refuses queries that touch a cube the viewer cannot see
+          (``Cube.required_roles`` ANY-match + optional ``policy``).
+        - Auto-binds ``ctx.viewer_id`` from ``viewer.viewer_id`` so
+          ``security_sql`` fragments referencing it get a parameter
+          (never a SQL literal).
+        """
         from semql.compile import compile_query
 
-        return compile_query(query, self._by_name, context=context, views=self.views)
+        return compile_query(
+            query,
+            self._by_name,
+            context=context,
+            views=self.views,
+            viewer=viewer,
+            policy=self._policy,
+        )
 
     def prompt(
         self,
         *,
         only_exposed: bool = True,
         include_introspection: bool = False,
+        viewer: AuthContext | None = None,
     ) -> str:
         """Render the planner prompt fragment for this catalog. Thin
-        wrapper around ``semql.prompt.build_planner_prompt_fragment``."""
+        wrapper around ``semql.prompt.build_planner_prompt_fragment``.
+
+        When ``viewer`` is provided, the catalogue block shrinks to the
+        cubes the viewer is allowed to see."""
         from semql.prompt import build_planner_prompt_fragment
 
         return build_planner_prompt_fragment(
@@ -188,6 +217,8 @@ class Catalog:
             only_exposed=only_exposed,
             include_introspection=include_introspection,
             views=self.views,
+            viewer=viewer,
+            policy=self._policy,
         )
 
     def __iter__(self) -> Iterator[Cube]:

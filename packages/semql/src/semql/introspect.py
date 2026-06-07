@@ -19,11 +19,26 @@ caller (SQL planner vs Python tool).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
-from semql.model import Backend, BaseField, Cube, Dimension, Join, Measure, TimeDimension, View
+from semql.model import (
+    AuthContext,
+    Backend,
+    BaseField,
+    Cube,
+    Dimension,
+    Join,
+    Measure,
+    TimeDimension,
+    View,
+)
 from semql.spec import SemanticQuery
+
+PolicyFn = Callable[[Cube, AuthContext], bool]
+"""Custom cube-visibility predicate. Returns True if the viewer may see
+the cube. Composes with the static ``Cube.required_roles`` check via
+AND — a cube has to pass both. Registered on ``Catalog(policy=...)``."""
 
 CatalogLike = "Mapping[str, Cube] | Catalog | Iterable[Cube]"
 """Anything we can iterate cubes from. Concrete types: ``Catalog``
@@ -191,11 +206,33 @@ def _iter_all_cubes(catalog: object) -> Iterator[Cube]:
     yield from catalog  # type: ignore[misc]
 
 
+def viewer_sees(cube: Cube, viewer: AuthContext | None, policy: PolicyFn | None) -> bool:
+    """Decide whether ``viewer`` may see ``cube``.
+
+    Two doors AND-composed:
+    1. **Static**: ``cube.required_roles`` (empty = open; otherwise the
+       viewer must hold at least one listed role — ANY-match).
+    2. **Dynamic**: optional ``policy`` callable from the Catalog.
+
+    ``viewer=None`` short-circuits: with no viewer, both checks pass
+    so the cube is visible. The compiler and prompt builders use
+    ``viewer=None`` as their default; callers wanting authorisation
+    must explicitly pass a viewer.
+    """
+    if viewer is None:
+        return True
+    if cube.required_roles and not set(cube.required_roles).intersection(viewer.roles):
+        return False
+    return not (policy is not None and not policy(cube, viewer))
+
+
 def iter_cubes(
     catalog: object,
     *,
     include_meta: bool = False,
     only_exposed: bool = False,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
 ) -> Iterator[Cube]:
     """Yield cubes from a catalogue with consistent filtering.
 
@@ -208,11 +245,17 @@ def iter_cubes(
     the right default for LLM-facing surfaces (prompt rendering, MCP
     auto-tools). Leave ``False`` to include hidden cubes (ERD,
     validate-db).
+
+    ``viewer`` + ``policy`` apply authorisation: a cube is yielded only
+    if ``viewer_sees(cube, viewer, policy)`` passes. ``viewer=None``
+    disables authorisation entirely (today's default).
     """
     for cube in _iter_all_cubes(catalog):
         if not include_meta and cube.backend is Backend.META:
             continue
         if only_exposed and not cube.expose_in_prompt:
+            continue
+        if not viewer_sees(cube, viewer, policy):
             continue
         yield cube
 
@@ -378,6 +421,7 @@ __all__ = [
     "CATALOG_DIMENSIONS",
     "CATALOG_MEASURES",
     "META_CUBES",
+    "PolicyFn",
     "ResolvedQuery",
     "build_meta_values",
     "iter_cubes",
@@ -386,4 +430,5 @@ __all__ = [
     "quote_literal",
     "resolve_field",
     "resolve_query",
+    "viewer_sees",
 ]

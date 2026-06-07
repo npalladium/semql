@@ -12,14 +12,16 @@ system prompt alongside role description, data-source context, etc.
 
 from __future__ import annotations
 
-from semql.introspect import iter_cubes
-from semql.model import Cube, View
+from semql.introspect import PolicyFn, iter_cubes
+from semql.model import AuthContext, Cube, View
 
 
 def render_catalogue_block(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
 ) -> str:
     # ``include_meta=True`` here is deliberate: META reflection cubes
     # historically appeared in the planner fragment when callers opted
@@ -28,7 +30,15 @@ def render_catalogue_block(
     # catalogue block itself stays inclusive — META cubes carry
     # ``expose_in_prompt=False`` so ``only_exposed=True`` hides them
     # by default anyway).
-    cubes = list(iter_cubes(catalog, include_meta=True, only_exposed=only_exposed))
+    cubes = list(
+        iter_cubes(
+            catalog,
+            include_meta=True,
+            only_exposed=only_exposed,
+            viewer=viewer,
+            policy=policy,
+        )
+    )
     if not cubes:
         return ""
 
@@ -216,16 +226,24 @@ def build_planner_prompt_fragment(
     only_exposed: bool = True,
     include_introspection: bool = False,
     views: dict[str, View] | None = None,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
     Returns a fragment that includes the spec contract, the catalogue
     block, and the raw-fallback rule. Splice into your broader system
     prompt alongside role description, data-source context, etc.
+
+    ``viewer`` + ``policy`` (when set) shrink the catalogue block to
+    only the cubes the viewer is authorised to see — keeps the planner
+    from suggesting a query it can't run.
     """
     parts: list[str] = [
         _SPEC_CONTRACT,
-        render_catalogue_block(catalog, only_exposed=only_exposed).rstrip(),
+        render_catalogue_block(
+            catalog, only_exposed=only_exposed, viewer=viewer, policy=policy
+        ).rstrip(),
     ]
     if views:
         parts.append(_render_view_block(views).rstrip())
@@ -241,6 +259,8 @@ def build_router_prompt_fragment(
     only_exposed: bool = True,
     include_topic_summary: bool = True,
     views: dict[str, View] | None = None,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
 ) -> str:
     """Fragment for the path-routing decision (semantic vs raw SQL).
 
@@ -263,7 +283,13 @@ def build_router_prompt_fragment(
     parts: list[str] = [router_header]
     if include_topic_summary:
         topics: list[str] = ["## Catalogue topics"]
-        for cube in iter_cubes(catalog, include_meta=True, only_exposed=only_exposed):
+        for cube in iter_cubes(
+            catalog,
+            include_meta=True,
+            only_exposed=only_exposed,
+            viewer=viewer,
+            policy=policy,
+        ):
             blurb = cube.description.split(".")[0] if cube.description else ""
             blurb = f" — {blurb}." if blurb else "."
             human = _human(cube.display_name)

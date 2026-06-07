@@ -236,6 +236,13 @@ class Cube(BaseModel):
     # base_predicate, tenancy, joins) are cube-specific and do not
     # inherit. Cycles raise at Catalog construction.
     extends: str | None = None
+    # Roles required to see this cube. ANY-match: a viewer with at
+    # least one of the listed roles can see it; empty list means
+    # the cube is open. Filtering happens in ``iter_cubes(viewer=...)``
+    # and the compiler refuses queries that touch a cube the viewer
+    # cannot see. Static surface — for dynamic / programmable policy
+    # use ``Catalog(policy=...)``.
+    required_roles: list[str] = []
 
     @model_validator(mode="after")
     def _check_drill_paths(self) -> Cube:
@@ -286,6 +293,32 @@ class Cube(BaseModel):
         return names
 
 
+class AuthContext(BaseModel):
+    """Identity + roles a viewer carries into a request.
+
+    Threads through ``Catalog.compile`` / ``Catalog.prompt`` / ``iter_cubes``
+    as the ``viewer=`` kwarg. Two effects:
+
+    - **Cube visibility**: ``iter_cubes(viewer=...)`` skips cubes whose
+      ``required_roles`` don't intersect the viewer's roles. Prompt
+      fragments and MCP tool auto-registration shrink to what the
+      viewer is allowed to see.
+    - **Row-level scoping**: ``viewer_id`` auto-flattens to
+      ``ctx.viewer_id`` inside ``security_sql`` substitution, so
+      cubes that scope to "rows owned by the viewer" can declare
+      ``security_sql="{t}.assignee_id = {ctx.viewer_id}"`` once and
+      have it bound as a parameter (never as a SQL literal).
+
+    ``metadata`` is the same caller-owned escape hatch the catalogue
+    types carry: opaque string→string the platform never reads.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    viewer_id: str
+    roles: list[str] = Field(default_factory=list)
+    metadata: Metadata = Field(default_factory=dict)
+
+
 class View(BaseModel):
     """A curated catalogue facade.
 
@@ -332,6 +365,7 @@ class View(BaseModel):
 
 __all__ = [
     "AggLiteral",
+    "AuthContext",
     "Backend",
     "BaseField",
     "ChartTypeLiteral",

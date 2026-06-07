@@ -60,7 +60,18 @@ from semql.errors import (
     ResolveError,
     UnknownIdentifierError,
 )
-from semql.model import Backend, Cube, Dimension, Join, Measure, Segment, TimeDimension, View
+from semql.introspect import PolicyFn, viewer_sees
+from semql.model import (
+    AuthContext,
+    Backend,
+    Cube,
+    Dimension,
+    Join,
+    Measure,
+    Segment,
+    TimeDimension,
+    View,
+)
 from semql.spec import BoolExpr, Filter, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
@@ -304,6 +315,8 @@ def compile_query(
     having_alias: bool = False,
     strategies: dict[Backend, BackendStrategy] | None = None,
     views: dict[str, View] | None = None,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
 ) -> Compiled:
     """Compile a SemanticQuery to a Compiled bundle.
 
@@ -318,8 +331,21 @@ def compile_query(
     ``strategies`` — optional per-backend strategy overrides. Pass a
         ``RecordingStrategy`` for tests; pass a custom Snowflake / BigQuery
         adapter for out-of-tree backends without touching the global registry.
+    ``viewer`` — optional ``AuthContext``. When set, queries touching a
+        cube the viewer can't see (``Cube.required_roles`` ANY-match +
+        optional ``policy``) raise ``CompileError`` before SQL emission.
+        ``viewer.viewer_id`` auto-binds to ``ctx.viewer_id`` so
+        ``security_sql`` referencing it gets a parameter.
+    ``policy`` — optional custom-visibility predicate (cube, viewer) → bool.
+        AND-composes with ``Cube.required_roles``.
     """
-    ctx = context or {}
+    ctx = dict(context or {})
+    if viewer is not None:
+        # Auto-flatten the viewer's identity into the context so
+        # ``security_sql`` fragments declaring ``{ctx.viewer_id}`` resolve
+        # without callers having to wire it manually. Explicit caller-
+        # supplied ``ctx.viewer_id`` wins (the caller knows best).
+        ctx.setdefault("ctx.viewer_id", viewer.viewer_id)
 
     if q.compare is not None:
         if q.time_dimension is None:
@@ -464,6 +490,18 @@ def compile_query(
 
     if not touched:
         raise CompileError("Could not determine any cubes from the query.")
+
+    # 1a. Authorisation: refuse queries that touch a cube the viewer
+    # can't see. Static (``required_roles`` ANY-match) + dynamic
+    # (``policy``) — both AND-compose inside ``viewer_sees``.
+    if viewer is not None:
+        forbidden = [c.name for c in touched if not viewer_sees(c, viewer, policy)]
+        if forbidden:
+            raise CompileError(
+                f"Query touches cubes the viewer is not authorised to see: "
+                f"{sorted(forbidden)}. Check Cube.required_roles or the "
+                "Catalog's policy override."
+            )
 
     # 1b. Required-filter enforcement.
     filter_dims = {f.dimension for f in q.filters}
