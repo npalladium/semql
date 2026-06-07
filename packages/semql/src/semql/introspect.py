@@ -20,12 +20,10 @@ caller (SQL planner vs Python tool).
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
 
 from semql.model import Backend, BaseField, Cube, Dimension, Join, Measure, TimeDimension, View
-
-if TYPE_CHECKING:
-    pass
+from semql.spec import SemanticQuery
 
 CatalogLike = "Mapping[str, Cube] | Catalog | Iterable[Cube]"
 """Anything we can iterate cubes from. Concrete types: ``Catalog``
@@ -294,15 +292,98 @@ def resolve_field(
     return _resolve(qualified, by_name)
 
 
+@dataclass(frozen=True)
+class ResolvedQuery:
+    """Every measure / dimension / time_dimension reference in a
+    ``SemanticQuery`` paired with the Cube and Field it resolves to.
+
+    The shape compile.py and visualize.py both want — a typed-bucket
+    breakdown of "what does this query actually touch?" Filter / segment
+    / where-tree resolution stays inside the compiler because it's
+    intertwined with parameter binding; this primitive covers the
+    projection surface, which is what every read-only tool needs.
+
+    ``touched_cubes`` preserves first-mention order and excludes
+    duplicates. It's the cube set a SELECT's FROM/JOIN graph has to
+    cover.
+    """
+
+    measures: list[tuple[Cube, Measure]] = field(default_factory=list)
+    dimensions: list[tuple[Cube, Dimension]] = field(default_factory=list)
+    time_dimension: tuple[Cube, TimeDimension] | None = None
+    touched_cubes: list[Cube] = field(default_factory=list)
+
+
+def resolve_query(
+    query: SemanticQuery,
+    catalog: object,
+    *,
+    views: Mapping[str, View] | None = None,
+) -> ResolvedQuery:
+    """Resolve every projection reference in a ``SemanticQuery`` at once.
+
+    Same view-rewrite semantics as ``resolve_field`` — when a reference
+    matches ``view.local``, the underlying field is returned with its
+    ``name`` carrying the view-local alias.
+
+    Raises ``ValueError`` (with a precise message) if a reference
+    resolves to the wrong field kind — e.g. ``"orders.revenue"`` listed
+    under ``dimensions`` resolves but isn't a Dimension. Callers that
+    need a ``CompileError`` should let the compiler re-wrap.
+    """
+    out_measures: list[tuple[Cube, Measure]] = []
+    out_dimensions: list[tuple[Cube, Dimension]] = []
+    out_time: tuple[Cube, TimeDimension] | None = None
+
+    for ref in query.measures:
+        cube, fld = resolve_field(ref, catalog, views=views)
+        if not isinstance(fld, Measure):
+            raise ValueError(f"{ref!r} resolved to non-Measure on cube {cube.name!r}")
+        out_measures.append((cube, fld))
+
+    for ref in query.dimensions:
+        cube, fld = resolve_field(ref, catalog, views=views)
+        if not isinstance(fld, Dimension):
+            raise ValueError(f"{ref!r} resolved to non-Dimension on cube {cube.name!r}")
+        out_dimensions.append((cube, fld))
+
+    if query.time_dimension is not None:
+        cube, fld = resolve_field(query.time_dimension.dimension, catalog, views=views)
+        if not isinstance(fld, TimeDimension):
+            raise ValueError(
+                f"{query.time_dimension.dimension!r} resolved to "
+                f"non-TimeDimension on cube {cube.name!r}"
+            )
+        out_time = (cube, fld)
+
+    touched: list[Cube] = []
+    seen: set[str] = set()
+    for c, _ in [*out_measures, *out_dimensions]:
+        if c.name not in seen:
+            touched.append(c)
+            seen.add(c.name)
+    if out_time is not None and out_time[0].name not in seen:
+        touched.append(out_time[0])
+
+    return ResolvedQuery(
+        measures=out_measures,
+        dimensions=out_dimensions,
+        time_dimension=out_time,
+        touched_cubes=touched,
+    )
+
+
 __all__ = [
     "CATALOG_CUBES",
     "CATALOG_DIMENSIONS",
     "CATALOG_MEASURES",
     "META_CUBES",
+    "ResolvedQuery",
     "build_meta_values",
     "iter_cubes",
     "iter_fields",
     "iter_joins",
     "quote_literal",
     "resolve_field",
+    "resolve_query",
 ]

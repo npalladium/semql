@@ -17,7 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from semql._resolve import resolve_field as _resolve_field
 from semql.model import (
     ChartTypeLiteral,
     Cube,
@@ -142,38 +141,13 @@ def decide_visualization(
     `n_rows` — actual row count; pass 0 for dry-run / explain paths.
     `catalog` — cube dict (from `Catalog.as_dict()`).
     """
-    measure_meta: list[tuple[Cube, Measure]] = []
-    dim_meta: list[tuple[Cube, Dimension]] = []
-    time_meta: tuple[Cube, TimeDimension] | None = None
+    from semql.introspect import resolve_query
 
-    for ref in query.measures:
-        c, fld = _resolve_field(ref, catalog)
-        if not isinstance(fld, Measure):
-            raise ValueError(f"{ref!r} resolved to non-Measure on cube {c.name!r}")
-        measure_meta.append((c, fld))
-    for ref in query.dimensions:
-        c, fld = _resolve_field(ref, catalog)
-        if not isinstance(fld, Dimension):
-            raise ValueError(f"{ref!r} resolved to non-Dimension on cube {c.name!r}")
-        dim_meta.append((c, fld))
-    if query.time_dimension is not None:
-        c, fld = _resolve_field(query.time_dimension.dimension, catalog)
-        if not isinstance(fld, TimeDimension):
-            raise ValueError(
-                f"{query.time_dimension.dimension!r} resolved to "
-                f"non-TimeDimension on cube {c.name!r}"
-            )
-        time_meta = (c, fld)
-
-    touched: list[Cube] = []
-    seen: set[str] = set()
-    for c, _ in [*measure_meta, *dim_meta]:
-        if c.name not in seen:
-            touched.append(c)
-            seen.add(c.name)
-    if time_meta is not None and time_meta[0].name not in seen:
-        touched.append(time_meta[0])
-        seen.add(time_meta[0].name)
+    resolved = resolve_query(query, catalog)
+    measure_meta = resolved.measures
+    dim_meta = resolved.dimensions
+    time_meta = resolved.time_dimension
+    touched = resolved.touched_cubes
 
     chart_type, reason = _pick_chart_type(query, touched, n_rows)
 

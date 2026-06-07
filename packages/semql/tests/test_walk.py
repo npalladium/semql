@@ -12,10 +12,12 @@ import pytest
 from semql.errors import ResolveError
 from semql.introspect import (
     META_CUBES,
+    ResolvedQuery,
     iter_cubes,
     iter_fields,
     iter_joins,
     resolve_field,
+    resolve_query,
 )
 from semql.model import (
     Backend,
@@ -27,6 +29,7 @@ from semql.model import (
     TimeDimension,
     View,
 )
+from semql.spec import SemanticQuery, TimeWindow
 
 
 def _orders() -> Cube:
@@ -170,3 +173,54 @@ def test_resolve_field_with_view_unknown_local_raises() -> None:
     view = View(name="rev", fields={"net": "orders.revenue"})
     with pytest.raises(ResolveError):
         resolve_field("rev.not_in_view", _catalog(), views={"rev": view})
+
+
+# ---------------------------------------------------------------------------
+# resolve_query
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_query_fills_typed_buckets() -> None:
+    q = SemanticQuery(
+        measures=["orders.revenue"],
+        dimensions=["orders.region"],
+        time_dimension=TimeWindow(
+            dimension="orders.created_at",
+            granularity="day",
+            range=("2024-01-01", "2024-02-01"),
+        ),
+    )
+    resolved = resolve_query(q, _catalog())
+    assert isinstance(resolved, ResolvedQuery)
+    assert [m.name for _, m in resolved.measures] == ["revenue"]
+    assert [d.name for _, d in resolved.dimensions] == ["region"]
+    assert resolved.time_dimension is not None
+    _, td = resolved.time_dimension
+    assert td.name == "created_at"
+
+
+def test_resolve_query_touched_cubes_dedups_in_order() -> None:
+    """Same cube referenced by multiple fields must only appear once
+    in ``touched_cubes`` — that's what the compiler / visualize layer
+    use to build the FROM/JOIN graph."""
+    q = SemanticQuery(
+        measures=["orders.revenue"],
+        dimensions=["orders.region"],
+    )
+    resolved = resolve_query(q, _catalog())
+    assert [c.name for c in resolved.touched_cubes] == ["orders"]
+
+
+def test_resolve_query_wrong_kind_raises_value_error() -> None:
+    q = SemanticQuery(dimensions=["orders.revenue"])  # revenue is a Measure
+    with pytest.raises(ValueError, match="non-Dimension"):
+        resolve_query(q, _catalog())
+
+
+def test_resolve_query_supports_views() -> None:
+    view = View(name="rev", fields={"net": "orders.revenue"})
+    q = SemanticQuery(measures=["rev.net"])
+    resolved = resolve_query(q, _catalog(), views={"rev": view})
+    cube, m = resolved.measures[0]
+    assert cube.name == "orders"
+    assert m.name == "net"  # view local name carried through

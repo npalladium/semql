@@ -28,10 +28,12 @@ from semql.introspect import (
     CATALOG_DIMENSIONS,
     CATALOG_MEASURES,
     META_CUBES,
+    ResolvedQuery,
     iter_cubes,
     iter_fields,
     iter_joins,
     resolve_field,
+    resolve_query,
 )
 from semql.model import (
     AggLiteral,
@@ -96,6 +98,7 @@ __all__ = [
     "PhaseDeferredError",
     "PlaceholderError",
     "ResolveError",
+    "ResolvedQuery",
     "Segment",
     "SemQLError",
     "SemanticQuery",
@@ -117,5 +120,6 @@ __all__ = [
     "render_catalog_markdown",
     "render_catalogue_block",
     "resolve_field",
+    "resolve_query",
     "validate",
 ]
