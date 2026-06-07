@@ -13,6 +13,7 @@ members = [
     "semql",
     "semql-engine",
     "semql-erd",
+    "semql-introspect",
     "semql-mcp",
     "semql-validate-db",
 ]
@@ -2064,6 +2065,17 @@ requires-dist = [
     { name = "semql", editable = "packages/semql" },
 ]
 provides-extras = ["image"]
+
+[[package]]
+name = "semql-introspect"
+version = "0.1.0"
+source = { editable = "packages/semql-introspect" }
+dependencies = [
+    { name = "semql" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "semql", editable = "packages/semql" }]
 
 [[package]]
 name = "semql-mcp"
