@@ -45,7 +45,13 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
-from semql._resolve import resolve_field as _resolve_field_raw
+from semql._resolve import (
+    _ResolvedFields,
+    walk_query_fields,
+)
+from semql._resolve import (
+    resolve_field as _resolve_field_raw,
+)
 from semql.backend import BackendDialect, dialect_for
 
 # Importing from semql.dialect also registers the ClickHouse placeholder
@@ -73,7 +79,6 @@ from semql.model import (
     Join,
     Measure,
     ScopePredicate,
-    Segment,
     StorageType,
     TimeDimension,
     View,
@@ -617,16 +622,6 @@ def _filter_node(
     raise CompileError(f"Unsupported filter op: {op!r}")  # pragma: no cover
 
 
-def _walk_where_leaves(expr: BoolExpr | Filter) -> list[Filter]:
-    """Return all ``Filter`` leaves from a where tree, depth-first."""
-    if isinstance(expr, Filter):
-        return [expr]
-    leaves: list[Filter] = []
-    for child in expr.children:
-        leaves.extend(_walk_where_leaves(child))
-    return leaves
-
-
 def _compile_where_tree(
     expr: BoolExpr | Filter,
     leaf_to_node: Callable[[Filter], exp.Expression],
@@ -666,22 +661,6 @@ def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
 # make the orchestration legible. Each stage is a pure function over its
 # inputs; ``compile_query`` glues them together. POSA "Pipes and Filters".
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _ResolvedFields:
-    """Field-level resolution output: every ``cube.field`` reference in
-    the query mapped to a concrete ``(Cube, Field)`` pair, plus the
-    ordered list of cubes the query touches."""
-
-    measure_fields: list[tuple[Cube, Measure]]
-    dim_fields: list[tuple[Cube, Dimension]]
-    time_cube: Cube | None
-    time_dim: TimeDimension | None
-    filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]]
-    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]]
-    segment_resolutions: list[tuple[Cube, Segment]]
-    touched: list[Cube]
 
 
 def _validate_query_invariants(
@@ -737,66 +716,6 @@ def _validate_query_invariants(
         )
 
 
-def _make_view_resolver(
-    catalog: dict[str, Cube],
-    views_map: dict[str, View],
-) -> Callable[[str], tuple[Cube, Measure | Dimension | TimeDimension]]:
-    """Build the per-call view-aware resolver.
-
-    Rewrites ``view.local_name`` references to the underlying
-    ``cube.field`` BUT re-aliases the returned field so the SELECT
-    output column uses the view's local name (not the underlying
-    field name)."""
-
-    def _resolve(
-        qualified: str,
-    ) -> tuple[Cube, Measure | Dimension | TimeDimension]:
-        if "." in qualified:
-            prefix, local = qualified.split(".", 1)
-            if prefix in views_map:
-                view = views_map[prefix]
-                if local not in view.fields:
-                    raise CompileError(
-                        f"View {prefix!r} has no field {local!r}. "
-                        f"Known fields on this view: {sorted(view.fields)}."
-                    )
-                cube, fld = _resolve_field(view.fields[local], catalog)
-                return cube, fld.model_copy(update={"name": local})
-        return _resolve_field(qualified, catalog)
-
-    return _resolve
-
-
-def _validate_filter_against_field(
-    f: Filter,
-    fld: Dimension | Measure | TimeDimension,
-) -> None:
-    """Type-check a filter as soon as its target field resolves.
-
-    Surfaces ``FilterTypeError`` alongside resolution errors — callers
-    see "the dimension exists but the value is wrong type" without
-    having to advance through SQL emission first. Time dimensions go
-    through ``"time"`` (ISO-8601 string) — they live on the resolver's
-    return as ``TimeDimension``, not ``Dimension``."""
-    if isinstance(fld, Dimension):
-        field_type = fld.type
-    elif isinstance(fld, TimeDimension):
-        field_type = "time"
-    else:
-        # Measure: filtered measures are emission-time HAVING shaped;
-        # ``_filter_node`` still validates them as ``"number"`` there.
-        return
-    try:
-        f.validate_for_type(field_type)
-    except ValueError as exc:
-        raise FilterTypeError(
-            str(exc),
-            dimension=f.dimension,
-            op=f.op,
-            value=f.values[0] if f.values else None,
-        ) from exc
-
-
 def _resolve_query_fields(
     q: SemanticQuery,
     catalog: dict[str, Cube],
@@ -805,166 +724,30 @@ def _resolve_query_fields(
     """Resolve every ``cube.field`` reference in ``q`` to its catalog
     entry and collect the ordered set of touched cubes.
 
-    Accumulates per-reference errors and raises a single combined
-    ``CompileError`` listing them all so an LLM planner sees every
-    missing / mistyped field in one round-trip — not the head of a
-    pile that only surfaces on retry. ``FilterTypeError`` is the one
-    structured subclass we re-raise standalone so callers branching on
-    it (UIs that highlight the offending row) still get the typed
-    instance.
-
-    Also resolves segment references and where-tree leaves so all
-    referenced cubes land in ``touched`` (the join-graph builder
-    needs the full set up front)."""
-    resolve_with_views = _make_view_resolver(catalog, views_map)
-    diagnostics: list[CompileError] = []
-
-    measure_fields: list[tuple[Cube, Measure]] = []
-    for ref in q.measures:
-        try:
-            cube, fld = resolve_with_views(ref)
-        except CompileError as exc:
-            diagnostics.append(exc)
-            continue
-        if not isinstance(fld, Measure):
-            diagnostics.append(CompileError(f"{ref!r} is not a measure on cube {cube.name!r}."))
-            continue
-        measure_fields.append((cube, fld))
-
-    dim_fields: list[tuple[Cube, Dimension]] = []
-    for ref in q.dimensions:
-        try:
-            cube, fld = resolve_with_views(ref)
-        except CompileError as exc:
-            diagnostics.append(exc)
-            continue
-        if not isinstance(fld, Dimension):
-            diagnostics.append(CompileError(f"{ref!r} is not a dimension on cube {cube.name!r}."))
-            continue
-        dim_fields.append((cube, fld))
-
-    time_cube: Cube | None = None
-    time_dim: TimeDimension | None = None
-    if q.time_dimension is not None:
-        try:
-            tcube, tfld = resolve_with_views(q.time_dimension.dimension)
-        except CompileError as exc:
-            diagnostics.append(exc)
-            tcube, tfld = None, None
-        if tfld is not None and not isinstance(tfld, TimeDimension):
-            diagnostics.append(
-                CompileError(f"{q.time_dimension.dimension!r} is not a time dimension.")
-            )
-        elif tfld is not None:
-            gran = q.time_dimension.granularity
-            if gran is not None and gran not in tfld.granularities:
-                diagnostics.append(
-                    CompileError(
-                        f"Granularity {gran!r} not supported on "
-                        f"{q.time_dimension.dimension!r}. "
-                        f"Allowed: {tfld.granularities}."
-                    )
-                )
-            else:
-                time_cube, time_dim = tcube, tfld
-
-    touched: list[Cube] = []
-    for c, _ in [*measure_fields, *dim_fields]:
-        if c not in touched:
-            touched.append(c)
-    if time_cube is not None and time_cube not in touched:
-        touched.append(time_cube)
-
-    filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension]] = []
-    for f in q.filters:
-        try:
-            c, fld = resolve_with_views(f.dimension)
-        except CompileError as exc:
-            diagnostics.append(exc)
-            continue
-        try:
-            _validate_filter_against_field(f, fld)
-        except FilterTypeError as exc:
-            diagnostics.append(exc)
-            continue
-        filter_resolutions.append((f, c, fld))
-        if c not in touched:
-            touched.append(c)
-
-    where_leaves: list[Filter] = _walk_where_leaves(q.where) if q.where is not None else []
-    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension]] = {}
-    for leaf in where_leaves:
-        try:
-            c, fld = resolve_with_views(leaf.dimension)
-        except CompileError as exc:
-            diagnostics.append(exc)
-            continue
-        try:
-            _validate_filter_against_field(leaf, fld)
-        except FilterTypeError as exc:
-            diagnostics.append(exc)
-            continue
-        where_leaf_resolutions[id(leaf)] = (c, fld)
-        if c not in touched:
-            touched.append(c)
-
-    segment_resolutions: list[tuple[Cube, Segment]] = []
-    for seg_ref in q.segments:
-        if "." not in seg_ref:
-            diagnostics.append(
-                CompileError(f"Segment reference {seg_ref!r} must be qualified as 'cube.segment'.")
-            )
-            continue
-        cube_name, seg_name = seg_ref.rsplit(".", 1)
-        if cube_name not in catalog:
-            diagnostics.append(
-                CompileError(f"Segment reference {seg_ref!r}: unknown cube {cube_name!r}.")
-            )
-            continue
-        cube_obj = catalog[cube_name]
-        match = next((s for s in cube_obj.segments if s.name == seg_name), None)
-        if match is None:
-            known = ", ".join(s.name for s in cube_obj.segments) or "(none)"
-            diagnostics.append(
-                CompileError(
-                    f"Segment reference {seg_ref!r}: cube {cube_name!r} has no segment "
-                    f"{seg_name!r}. Known segments: {known}."
-                )
-            )
-            continue
-        segment_resolutions.append((cube_obj, match))
-        if cube_obj not in touched:
-            touched.append(cube_obj)
-
+    Thin wrapper over :func:`semql._resolve.walk_query_fields`. The
+    shared walker accumulates per-reference diagnostics without
+    raising; this wrapper translates them into the compile-time error
+    contract: a single combined ``CompileError`` listing every
+    problem, or — when exactly one diagnostic carries a typed source
+    (``FilterTypeError`` / ``UnknownIdentifierError``) — that typed
+    exception standalone so UIs branching on the leaf class still
+    receive it."""
+    resolved, diagnostics = walk_query_fields(q, catalog, views_map=views_map)
     if diagnostics:
-        # One CompileError carrying every per-reference problem. A single
-        # exception preserves the existing fail-fast contract for callers
-        # that don't care about the breakdown; the combined message lets
-        # an LLM planner see every wrong reference in one round-trip
-        # rather than discovering them sequentially across retries.
-        # FilterTypeError is the one structured subclass we preserve
-        # standalone — UIs that branch on it (highlight the offending
-        # row) still get the typed instance when it's the only failure.
         if len(diagnostics) == 1:
-            raise diagnostics[0]
-        lines = [f"  - {exc}" for exc in diagnostics]
+            src = diagnostics[0].source
+            if isinstance(src, CompileError):
+                raise src
+            raise CompileError(diagnostics[0].message)
+        lines = [f"  - {d.message}" for d in diagnostics]
         raise CompileError(
             f"SemanticQuery has {len(diagnostics)} resolution errors:\n" + "\n".join(lines)
         )
 
-    if not touched:
+    if not resolved.touched:
         raise CompileError("Could not determine any cubes from the query.")
 
-    return _ResolvedFields(
-        measure_fields=measure_fields,
-        dim_fields=dim_fields,
-        time_cube=time_cube,
-        time_dim=time_dim,
-        filter_resolutions=filter_resolutions,
-        where_leaf_resolutions=where_leaf_resolutions,
-        segment_resolutions=segment_resolutions,
-        touched=touched,
-    )
+    return resolved
 
 
 def _check_viewer_authorization(

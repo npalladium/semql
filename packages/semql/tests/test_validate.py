@@ -7,6 +7,7 @@ Two tools, two contracts (PHILOSOPHY.md).
 from __future__ import annotations
 
 from semql import (
+    BoolExpr,
     Catalog,
     Cube,
     Dimension,
@@ -16,7 +17,7 @@ from semql import (
     TimeDimension,
     TimeWindow,
 )
-from semql.model import Backend
+from semql.model import Backend, Segment
 from semql.validate import ValidationError, validate
 
 
@@ -155,3 +156,72 @@ def test_validate_accepts_dict_catalog() -> None:
     via_obj = validate(q, cat)
     via_dict = validate(q, cat.as_dict())
     assert via_obj == via_dict
+
+
+# ---------------------------------------------------------------------------
+# Shared-walker coverage: validate now follows where-tree leaves and
+# segment references through the same resolver compile uses. Pins the
+# expanded coverage so a future refactor that drops them surfaces here.
+# ---------------------------------------------------------------------------
+
+
+def test_where_tree_unknown_field_reported() -> None:
+    """``where`` leaves are resolved by the shared walker — an unknown
+    identifier inside the tree must surface, not pass silently."""
+    q = SemanticQuery(
+        measures=["orders.count"],
+        where=BoolExpr(
+            op="or",
+            children=[
+                Filter(dimension="orders.region", op="eq", values=["us"]),
+                Filter(dimension="orders.nope", op="eq", values=["x"]),
+            ],
+        ),
+    )
+    errors = validate(q, _cat())
+    codes = {e.code for e in errors}
+    assert "unknown_field" in codes
+
+
+def test_where_tree_type_mismatch_reported() -> None:
+    q = SemanticQuery(
+        measures=["orders.count"],
+        where=BoolExpr(
+            op="and",
+            children=[
+                Filter(dimension="orders.region", op="eq", values=["us"]),
+                Filter(dimension="orders.is_paid", op="eq", values=["yes"]),
+            ],
+        ),
+    )
+    errors = validate(q, _cat())
+    codes = {e.code for e in errors}
+    assert "filter_type_mismatch" in codes
+
+
+def test_segment_unknown_cube_reported() -> None:
+    q = SemanticQuery(measures=["orders.count"], segments=["nope.active"])
+    errors = validate(q, _cat())
+    codes = {e.code for e in errors}
+    assert "segment_unknown_cube" in codes
+
+
+def test_segment_unknown_segment_reported() -> None:
+    cat = _cat()
+    # Inject a segment on the orders cube via a fresh Catalog.
+    orders = cat.as_dict()["orders"].model_copy(
+        update={"segments": [Segment(name="paid", sql="o.is_paid = true")]}
+    )
+    cubes = list(cat.as_dict().values())
+    cubes = [orders if c.name == "orders" else c for c in cubes]
+    q = SemanticQuery(measures=["orders.count"], segments=["orders.does_not_exist"])
+    errors = validate(q, Catalog(cubes))
+    codes = {e.code for e in errors}
+    assert "segment_unknown_segment" in codes
+
+
+def test_segment_unqualified_reported() -> None:
+    q = SemanticQuery(measures=["orders.count"], segments=["bareword"])
+    errors = validate(q, _cat())
+    codes = {e.code for e in errors}
+    assert "segment_unqualified" in codes

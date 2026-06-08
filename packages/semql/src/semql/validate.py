@@ -10,6 +10,12 @@ list of ``ValidationError`` records. Two contracts (PHILOSOPHY.md):
 
 ``validate`` never raises on input it would otherwise complain about.
 It returns an empty list when the query is compile-ready.
+
+The resolution walk itself lives in :mod:`semql._resolve`; this module
+maps its :class:`~semql._resolve.ResolutionDiagnostic` records into
+:class:`ValidationError` records and layers on the non-resolution
+checks (lifecycle, required filters, ungrouped row caps, HAVING
+references, cross-backend refusals).
 """
 
 from __future__ import annotations
@@ -18,9 +24,9 @@ from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from typing import TYPE_CHECKING, Any
 
-from semql._resolve import resolve_field
-from semql.errors import UnknownIdentifierError, closest_match
-from semql.model import Cube, Dimension, Measure, TimeDimension
+from semql._resolve import ResolutionDiagnostic, walk_query_fields
+from semql.errors import closest_match
+from semql.model import Cube
 from semql.spec import SemanticQuery
 
 if TYPE_CHECKING:
@@ -58,30 +64,17 @@ def _catalog_dict(catalog: Catalog | dict[str, Cube]) -> dict[str, Cube]:
     return catalog.as_dict()
 
 
-def _resolve_silent(
-    qualified: str,
-    catalog: dict[str, Cube],
-) -> tuple[Cube, Measure | Dimension | TimeDimension] | ValidationError:
-    """Like ``resolve_field`` but returns a ValidationError instead of
-    raising. Other resolve failures (malformed reference) surface as a
-    generic unknown_field error."""
-    try:
-        return resolve_field(qualified, catalog)
-    except UnknownIdentifierError as exc:
-        code = "unknown_cube" if exc.kind == "cube" else "unknown_field"
-        return ValidationError(
-            code=code,
-            message=str(exc),
-            cube=exc.cube,
-            field=exc.name if exc.kind == "field" else None,
-            hint=exc.hint,
-        )
-    except Exception as exc:
-        return ValidationError(
-            code="bad_reference",
-            message=str(exc),
-            field=qualified,
-        )
+def _to_validation_error(d: ResolutionDiagnostic) -> ValidationError:
+    return ValidationError(
+        code=d.code,
+        message=d.message,
+        cube=d.cube,
+        field=d.field,
+        op=d.op,
+        value=d.value,
+        hint=d.hint,
+        extra=dict(d.extra),
+    )
 
 
 def validate(
@@ -107,106 +100,11 @@ def validate(
             )
         )
 
-    touched: list[Cube] = []
+    resolved, diagnostics = walk_query_fields(query, cat)
+    for d in diagnostics:
+        errors.append(_to_validation_error(d))
 
-    def _track(c: Cube) -> None:
-        if c not in touched:
-            touched.append(c)
-
-    for ref in query.measures:
-        result = _resolve_silent(ref, cat)
-        if isinstance(result, ValidationError):
-            errors.append(result)
-            continue
-        c, fld = result
-        _track(c)
-        if not isinstance(fld, Measure):
-            errors.append(
-                ValidationError(
-                    code="wrong_field_kind",
-                    message=f"{ref!r} is not a measure on cube {c.name!r}.",
-                    cube=c.name,
-                    field=fld.name,
-                )
-            )
-
-    for ref in query.dimensions:
-        result = _resolve_silent(ref, cat)
-        if isinstance(result, ValidationError):
-            errors.append(result)
-            continue
-        c, fld = result
-        _track(c)
-        if not isinstance(fld, Dimension):
-            errors.append(
-                ValidationError(
-                    code="wrong_field_kind",
-                    message=f"{ref!r} is not a dimension on cube {c.name!r}.",
-                    cube=c.name,
-                    field=fld.name,
-                )
-            )
-
-    time_dim_field: TimeDimension | None = None
-    if query.time_dimension is not None:
-        tref = query.time_dimension.dimension
-        result = _resolve_silent(tref, cat)
-        if isinstance(result, ValidationError):
-            errors.append(result)
-        else:
-            c, fld = result
-            _track(c)
-            if not isinstance(fld, TimeDimension):
-                errors.append(
-                    ValidationError(
-                        code="wrong_field_kind",
-                        message=f"{tref!r} is not a time dimension.",
-                        cube=c.name,
-                        field=fld.name,
-                    )
-                )
-            else:
-                time_dim_field = fld
-                gran = query.time_dimension.granularity
-                if gran is not None and gran not in fld.granularities:
-                    errors.append(
-                        ValidationError(
-                            code="bad_granularity",
-                            message=(
-                                f"Granularity {gran!r} not supported on {tref!r}. "
-                                f"Allowed: {fld.granularities}."
-                            ),
-                            field=tref,
-                            value=gran,
-                            extra={"allowed": list(fld.granularities)},
-                        )
-                    )
-
-    for f in query.filters:
-        result = _resolve_silent(f.dimension, cat)
-        if isinstance(result, ValidationError):
-            errors.append(result)
-            continue
-        c, fld = result
-        _track(c)
-        fld_type = (
-            fld.type
-            if isinstance(fld, Dimension)
-            else ("time" if isinstance(fld, TimeDimension) else "string")
-        )
-        try:
-            f.validate_for_type(fld_type)
-        except ValueError as exc:
-            errors.append(
-                ValidationError(
-                    code="filter_type_mismatch",
-                    message=str(exc),
-                    cube=c.name,
-                    field=fld.name,
-                    op=f.op,
-                    value=f.values[0] if f.values else None,
-                )
-            )
+    touched = resolved.touched
 
     filter_dim_refs = {f.dimension for f in query.filters}
     for c in touched:
@@ -336,10 +234,6 @@ def validate(
                 extra={"backends": names},
             )
         )
-
-    # Touch time_dim_field to silence unused warnings when we want it
-    # for future shape checks. (Kept for symmetry with compile_query.)
-    _ = time_dim_field
 
     return errors
 
