@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from semql.compile import CompiledQuery
-    from semql.errors import CompileError
+    from semql.errors import SemQLError
     from semql.model import AuthContext, Cube
     from semql.spec import SemanticQuery
 
@@ -37,7 +40,7 @@ class CompileHook(Protocol):
     def on_compile_error(
         self,
         query: SemanticQuery,
-        error: CompileError,
+        error: SemQLError,
         *,
         viewer: AuthContext | None = None,
         context: dict[str, str] | None = None,
@@ -69,7 +72,7 @@ class BaseCompileHook:
     def on_compile_error(
         self,
         query: SemanticQuery,
-        error: CompileError,
+        error: SemQLError,
         *,
         viewer: AuthContext | None = None,
         context: dict[str, str] | None = None,
@@ -79,13 +82,19 @@ class BaseCompileHook:
 
 @dataclass(frozen=True)
 class AuditEvent:
-    query: SemanticQuery = field(repr=False)
-    outcome: str  # "ok" or "error"
+    timestamp: datetime
+    query_hash: str
+    viewer_id: str | None
+    tenant: str | None
     cubes_accessed: list[str]
     measures_accessed: list[str]
+    dimensions_accessed: list[str]
+    segments_applied: list[str]
     filter_dimensions: list[str]
+    sql_hash: str
+    masked_fields: list[str]
+    outcome: Literal["ok", "error"]
     error_code: str | None = None
-    viewer_id: str | None = None
 
 
 class AuditHook(BaseCompileHook):
@@ -120,6 +129,22 @@ class AuditHook(BaseCompileHook):
                 dims.add(f.dimension)
         return sorted(list(dims))
 
+    def _query_hash(self, query: SemanticQuery) -> str:
+        return hashlib.sha256(query.model_dump_json().encode("utf-8")).hexdigest()
+
+    def _sql_hash(self, sql: str) -> str:
+        return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+    def _extract_dimensions(self, query: SemanticQuery) -> list[str]:
+        dims = {ref.split(".", 1)[1] if "." in ref else ref for ref in query.dimensions}
+        if query.time_dimension is not None:
+            ref = query.time_dimension.dimension
+            dims.add(ref.split(".", 1)[1] if "." in ref else ref)
+        return sorted(dims)
+
+    def _extract_segments(self, query: SemanticQuery) -> list[str]:
+        return sorted(ref.split(".", 1)[1] if "." in ref else ref for ref in query.segments)
+
     def post_compile(
         self,
         query: SemanticQuery,
@@ -129,39 +154,49 @@ class AuditHook(BaseCompileHook):
         context: dict[str, str] | None = None,
     ) -> None:
         viewer_id = viewer.viewer_id if viewer else None
-
-        # When compiled, we can trust compiled.touched_cube_names
-        # But we also have our manual extraction
-        cubes = compiled.touched_cube_names
+        tenant = context.get("tenant_schema") if context else None
 
         event = AuditEvent(
-            query=query,
-            outcome="ok",
-            cubes_accessed=cubes,
-            measures_accessed=self._extract_measures(query),
-            filter_dimensions=self._extract_filter_dims(query),
+            timestamp=datetime.now(UTC),
+            query_hash=self._query_hash(query),
             viewer_id=viewer_id,
+            tenant=tenant,
+            cubes_accessed=compiled.touched_cube_names,
+            measures_accessed=self._extract_measures(query),
+            dimensions_accessed=self._extract_dimensions(query),
+            segments_applied=self._extract_segments(query),
+            filter_dimensions=self._extract_filter_dims(query),
+            sql_hash=self._sql_hash(compiled.sql),
+            masked_fields=[],
+            outcome="ok",
         )
         self.sink(event)
 
     def on_compile_error(
         self,
         query: SemanticQuery,
-        error: CompileError,
+        error: SemQLError,
         *,
         viewer: AuthContext | None = None,
         context: dict[str, str] | None = None,
     ) -> None:
         viewer_id = viewer.viewer_id if viewer else None
+        tenant = context.get("tenant_schema") if context else None
 
         event = AuditEvent(
-            query=query,
-            outcome="error",
+            timestamp=datetime.now(UTC),
+            query_hash=self._query_hash(query),
+            viewer_id=viewer_id,
+            tenant=tenant,
             cubes_accessed=self._extract_cubes(query),
             measures_accessed=self._extract_measures(query),
+            dimensions_accessed=self._extract_dimensions(query),
+            segments_applied=self._extract_segments(query),
             filter_dimensions=self._extract_filter_dims(query),
-            error_code=getattr(error, "code", "CompileError"),
-            viewer_id=viewer_id,
+            sql_hash="",
+            masked_fields=[],
+            outcome="error",
+            error_code=type(error).__name__,
         )
         self.sink(event)
 
@@ -194,15 +229,36 @@ class QueryTagRewriter:
     ) -> CompiledQuery:
         rendered_tags: list[str] = []
         for k, v in self.tags.items():
-            if v == "{viewer_id}" and viewer is not None:
-                rendered_tags.append(f"{k}={viewer.viewer_id}")
-            else:
-                rendered_tags.append(f"{k}={v}")
+            rendered_tags.append(
+                f"{self._sanitize(k)}={self._render_value(v, query, viewer, context)}"
+            )
 
         tag_str = "/* " + " ".join(rendered_tags) + " */\n"
         from dataclasses import replace
 
         return replace(compiled, sql=tag_str + compiled.sql)
+
+    def _render_value(
+        self,
+        value: str,
+        query: SemanticQuery,
+        viewer: AuthContext | None,
+        context: dict[str, str] | None,
+    ) -> str:
+        replacements = {
+            "viewer_id": viewer.viewer_id if viewer is not None else "",
+            "tenant": context.get("tenant_schema", "") if context else "",
+            "query_hash": hashlib.sha256(query.model_dump_json().encode("utf-8")).hexdigest(),
+        }
+        rendered = value
+        for key, replacement in replacements.items():
+            rendered = rendered.replace("{" + key + "}", replacement)
+        return self._sanitize(rendered)
+
+    def _sanitize(self, value: str) -> str:
+        value = value.replace("/*", "").replace("*/", "")
+        value = re.sub(r"[^A-Za-z0-9_.:=@/-]+", "_", value).strip("_")
+        return value
 
 
 class LimitCapRewriter:
@@ -268,10 +324,10 @@ class CubePromptHook(Protocol):
 
 @runtime_checkable
 class ErrorTransformHook(Protocol):
-    """Callable invoked when ``Catalog.compile()`` raises a ``CompileError``.
+    """Callable invoked when ``Catalog.compile()`` raises a semantic error.
 
     Return a replacement exception to raise instead, or ``None`` to
-    re-raise the original ``CompileError`` unchanged.
+    re-raise the original error unchanged.
     """
 
-    def __call__(self, error: CompileError) -> Exception | None: ...
+    def __call__(self, error: SemQLError) -> Exception | None: ...

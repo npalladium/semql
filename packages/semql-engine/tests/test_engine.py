@@ -555,3 +555,31 @@ def test_merge_plan_has_required_attributes() -> None:
     # the IR shapes are decoupled cleanly.
     plan = compile_federated_query(q, catalog)
     assert plan.merge.sql.startswith("SELECT")
+
+
+def test_engine_custom_merge_engine_receives_merge_spec(
+    pg_con: duckdb.DuckDBPyConnection,
+    bq_con: duckdb.DuckDBPyConnection,
+) -> None:
+    from semql import MergeSpec
+
+    catalog = _catalog(_orders_cube(), _customers_cube())
+    q = SemanticQuery(measures=["orders.revenue"], dimensions=["customers.region"])
+    plan = compile_federated_query(q, catalog)
+
+    seen_specs: list[MergeSpec] = []
+
+    class RecordingMergeEngine:
+        def merge(self, fragment_results: list[AdapterResult], spec: MergeSpec) -> AdapterResult:
+            seen_specs.append(spec)
+            assert len(fragment_results) == 2
+            return AdapterResult(columns=plan.columns, rows=[("custom", 123.0)])
+
+    engine = Engine(merge_engine=RecordingMergeEngine())
+    engine.register(Backend.POSTGRES, _DialectTranslatingAdapter(pg_con))
+    engine.register(Backend.BIGQUERY, _DialectTranslatingAdapter(bq_con))
+
+    result = engine.run(plan)
+    assert seen_specs == [plan.merge_spec]
+    assert result.columns == plan.columns
+    assert result.rows == [("custom", 123.0)]

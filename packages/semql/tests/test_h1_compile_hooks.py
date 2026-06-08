@@ -16,12 +16,13 @@ import warnings
 import pytest
 from semql import Backend, Catalog, Cube, Dimension, Measure, SemanticQuery
 from semql.compile import CompiledQuery
-from semql.errors import CompileError
+from semql.errors import CompileError, SemQLError
+from semql.hooks import CompileHook
 
 
 def _catalog(
     *,
-    compile_hooks: list[object] | None = None,
+    compile_hooks: list[CompileHook] | None = None,
 ) -> Catalog:
     cube = Cube(
         name="orders",
@@ -184,7 +185,7 @@ def test_on_compile_error_fires_on_failure() -> None:
     errors: list[Exception] = []
 
     class ErrorObserver(BaseCompileHook):
-        def on_compile_error(self, query: SemanticQuery, error: CompileError, **_: object) -> None:
+        def on_compile_error(self, query: SemanticQuery, error: SemQLError, **_: object) -> None:
             errors.append(error)
 
     cat = _catalog(compile_hooks=[ErrorObserver()])
@@ -198,13 +199,16 @@ def test_on_compile_error_hook_exception_swallowed() -> None:
     from semql.hooks import BaseCompileHook
 
     class CrashOnError(BaseCompileHook):
-        def on_compile_error(self, query: SemanticQuery, error: CompileError, **_: object) -> None:
+        def on_compile_error(self, query: SemanticQuery, error: SemQLError, **_: object) -> None:
             raise RuntimeError("error hook crash")
 
     cat = _catalog(compile_hooks=[CrashOnError()])
-    with pytest.raises(CompileError):
-        # Original CompileError still propagates; RuntimeError is swallowed.
-        cat.compile(SemanticQuery(measures=["orders.bad_field"]))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        with pytest.raises(CompileError):
+            # Original CompileError still propagates; RuntimeError is swallowed.
+            cat.compile(SemanticQuery(measures=["orders.bad_field"]))
+    assert any("error hook crash" in str(warning.message) for warning in w)
 
 
 def test_on_compile_error_not_called_on_success() -> None:
@@ -213,7 +217,7 @@ def test_on_compile_error_not_called_on_success() -> None:
     called: list[bool] = []
 
     class ErrorObserver(BaseCompileHook):
-        def on_compile_error(self, query: SemanticQuery, error: CompileError, **_: object) -> None:
+        def on_compile_error(self, query: SemanticQuery, error: SemQLError, **_: object) -> None:
             called.append(True)
 
     cat = _catalog(compile_hooks=[ErrorObserver()])
@@ -243,12 +247,15 @@ def test_audit_hook_ok_event() -> None:
 
     events: list[AuditEvent] = []
     cat = _catalog(compile_hooks=[AuditHook(events.append)])
-    cat.compile(SemanticQuery(measures=["orders.revenue"]))
+    cat.compile(SemanticQuery(measures=["orders.revenue"]), context={"tenant_schema": "acme"})
     assert len(events) == 1
     ev = events[0]
     assert ev.outcome == "ok"
     assert "orders" in ev.cubes_accessed
     assert "revenue" in ev.measures_accessed
+    assert ev.tenant == "acme"
+    assert ev.query_hash
+    assert ev.sql_hash
     assert ev.error_code is None
 
 
@@ -263,6 +270,7 @@ def test_audit_hook_error_event() -> None:
     ev = events[0]
     assert ev.outcome == "error"
     assert ev.error_code is not None
+    assert ev.sql_hash == ""
 
 
 def test_audit_hook_filter_dimensions_not_values() -> None:
@@ -278,5 +286,6 @@ def test_audit_hook_filter_dimensions_not_values() -> None:
     cat.compile(q)
     ev = events[0]
     assert "status" in ev.filter_dimensions
+    assert not hasattr(ev, "query")
     # Values must NOT appear — PII risk
-    assert "paid" not in str(ev)
+    assert "paid" not in repr(ev)

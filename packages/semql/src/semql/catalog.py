@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from semql._grounding import validate_relations
-from semql.hooks import CubePromptHook
+from semql.hooks import CompileHook, CubePromptHook, SqlRewriteHook
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import (
     AuthContext,
@@ -63,8 +63,8 @@ class Catalog:
         glossary: list[GlossaryEntry] | None = None,
         relations: str = "",
         error_transform: object | None = None,
-        compile_hooks: list[Any] | None = None,
-        sql_rewrite_hooks: list[Any] | None = None,
+        compile_hooks: list[CompileHook] | None = None,
+        sql_rewrite_hooks: list[SqlRewriteHook] | None = None,
     ) -> None:
         self.compile_hooks = compile_hooks or []
         self.sql_rewrite_hooks = sql_rewrite_hooks or []
@@ -421,18 +421,17 @@ class Catalog:
           (never a SQL literal).
         """
         from semql.compile import compile_query
-        from semql.errors import CompileError
+        from semql.errors import SemQLError
         from semql.spec import SemanticQueryDefaults, _apply_query_defaults
 
         if isinstance(query_defaults, SemanticQueryDefaults):
             query = _apply_query_defaults(query, query_defaults)
 
         try:
-            for hook in self.compile_hooks:
-                if hasattr(hook, "pre_compile"):
-                    new_q = hook.pre_compile(query, viewer=viewer, context=context)
-                    if new_q is not None:
-                        query = new_q
+            for compile_hook in self.compile_hooks:
+                new_q = compile_hook.pre_compile(query, viewer=viewer, context=context)
+                if new_q is not None:
+                    query = new_q
 
             compiled = compile_query(
                 query,
@@ -444,30 +443,34 @@ class Catalog:
                 scope_fns=self._scope_fns,
             )
 
-            for hook in self.compile_hooks:
-                if hasattr(hook, "post_compile"):
-                    try:
-                        hook.post_compile(query, compiled, viewer=viewer, context=context)
-                    except Exception as e:
-                        import warnings
+            for compile_hook in self.compile_hooks:
+                try:
+                    compile_hook.post_compile(query, compiled, viewer=viewer, context=context)
+                except Exception as e:
+                    import warnings
 
-                        warnings.warn(
-                            f"Compile hook {hook} raised exception in post_compile: {e}",
-                            stacklevel=2,
-                        )
+                    warnings.warn(
+                        f"Compile hook {compile_hook} raised exception in post_compile: {e}",
+                        stacklevel=2,
+                    )
 
-            for hook in self.sql_rewrite_hooks:
-                if hasattr(hook, "rewrite"):
-                    compiled = hook.rewrite(compiled, query=query, viewer=viewer, context=context)
+            for rewrite_hook in self.sql_rewrite_hooks:
+                compiled = rewrite_hook.rewrite(
+                    compiled, query=query, viewer=viewer, context=context
+                )
 
             return compiled
-        except CompileError as exc:
-            import contextlib
+        except SemQLError as exc:
+            import warnings
 
-            for hook in self.compile_hooks:
-                if hasattr(hook, "on_compile_error"):
-                    with contextlib.suppress(Exception):
-                        hook.on_compile_error(query, exc, viewer=viewer, context=context)
+            for compile_hook in self.compile_hooks:
+                try:
+                    compile_hook.on_compile_error(query, exc, viewer=viewer, context=context)
+                except Exception as e:
+                    warnings.warn(
+                        f"Compile hook {compile_hook} raised exception in on_compile_error: {e}",
+                        stacklevel=2,
+                    )
 
             if self._error_transform is not None:
                 replacement = self._error_transform(exc)  # type: ignore[operator]

@@ -13,13 +13,14 @@ from __future__ import annotations
 import pytest
 from semql import Backend, Catalog, Cube, Dimension, Measure, SemanticQuery
 from semql.compile import CompiledQuery
+from semql.hooks import CompileHook, SqlRewriteHook
 from semql.model import AuthContext
 
 
 def _catalog(
     *,
-    compile_hooks: list[object] | None = None,
-    sql_rewrite_hooks: list[object] | None = None,
+    compile_hooks: list[CompileHook] | None = None,
+    sql_rewrite_hooks: list[SqlRewriteHook] | None = None,
 ) -> Catalog:
     cube = Cube(
         name="orders",
@@ -79,6 +80,36 @@ def test_query_tag_rewriter_viewer_id_placeholder() -> None:
     viewer = AuthContext(viewer_id="alice")
     result = cat.compile(SemanticQuery(measures=["orders.revenue"]), viewer=viewer)
     assert "user=alice" in result.sql
+
+
+def test_query_tag_rewriter_tenant_and_query_hash_placeholders() -> None:
+    from semql.hooks import QueryTagRewriter
+
+    cat = _catalog(
+        sql_rewrite_hooks=[
+            QueryTagRewriter({"tenant": "{tenant}", "query": "{query_hash}", "label": "semql"})
+        ]
+    )
+    result = cat.compile(
+        SemanticQuery(measures=["orders.revenue"]),
+        context={"tenant_schema": "acme"},
+    )
+    tag = result.sql.split("*/", 1)[0]
+    assert "tenant=acme" in tag
+    assert "query={query_hash}" not in tag
+    assert "query=" in tag
+
+
+def test_query_tag_rewriter_sanitizes_comment_values() -> None:
+    from semql.hooks import QueryTagRewriter
+
+    cat = _catalog(sql_rewrite_hooks=[QueryTagRewriter({"x": "*/ SELECT 1 /*"})])
+    result = cat.compile(SemanticQuery(measures=["orders.revenue"]))
+    first_line = result.sql.splitlines()[0]
+    tag_body = first_line.removeprefix("/* ").removesuffix(" */")
+    assert first_line.count("*/") == 1
+    assert "/*" not in tag_body
+    assert "*/" not in tag_body
 
 
 def test_query_tag_rewriter_unknown_placeholder_kept_verbatim() -> None:
@@ -154,8 +185,8 @@ def test_rewrite_exception_propagates() -> None:
             compiled: CompiledQuery,
             *,
             query: SemanticQuery,
-            viewer: AuthContext | None,
-            context: dict[str, str] | None,
+            viewer: AuthContext | None = None,
+            context: dict[str, str] | None = None,
         ) -> CompiledQuery:
             raise RuntimeError("rewrite crash")
 

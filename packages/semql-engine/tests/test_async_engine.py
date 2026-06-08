@@ -16,6 +16,7 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Mapping
+from dataclasses import replace
 from typing import Any
 
 import duckdb
@@ -33,9 +34,11 @@ from semql_engine import (
     AdapterResult,
     AsyncDuckDBAdapter,
     AsyncEngine,
+    AsyncMergeEngine,
     DuckDBAdapter,
     EngineError,
     to_async_adapter,
+    to_async_merge_engine,
 )
 
 
@@ -349,6 +352,17 @@ def test_to_async_adapter_bridges_sync_into_async_engine(
     assert rows == {"paid": 650.0, "pending": 25.0}
 
 
+def test_to_async_merge_engine_bridges_sync_merge_engine() -> None:
+    from semql import MergeSpec
+
+    class RecordingMergeEngine:
+        def merge(self, fragment_results: list[AdapterResult], spec: MergeSpec) -> AdapterResult:
+            return AdapterResult(columns=["count"], rows=[(len(fragment_results),)])
+
+    wrapped = to_async_merge_engine(RecordingMergeEngine())
+    assert isinstance(wrapped, AsyncMergeEngine)
+
+
 # ---------------------------------------------------------------------------
 # iter_run single-fragment fast path
 # ---------------------------------------------------------------------------
@@ -388,6 +402,30 @@ def test_iter_run_single_fragment_takes_fast_path(
     rows = _run(collect())
     assert engine.last_iter_run_used_fast_path
     assert {r[0]: r[1] for r in rows} == {"paid": 650.0, "pending": 25.0}
+
+
+def test_iter_run_single_fragment_fast_path_uses_merge_spec(
+    pg_con: duckdb.DuckDBPyConnection,
+) -> None:
+    catalog = _catalog(_orders_cube())
+    plan = compile_federated_query(
+        SemanticQuery(measures=["orders.revenue"], order=[("revenue", "desc")], limit=1),
+        catalog,
+    )
+    plan.merge = replace(plan.merge, sql="not valid sql")
+
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))
+
+    async def collect() -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=100):
+            out.extend(chunk)
+        return out
+
+    rows = _run(collect())
+    assert rows == [(675.0,)]
+    assert engine.last_iter_run_used_fast_path
 
 
 def test_iter_run_multi_fragment_skips_fast_path(

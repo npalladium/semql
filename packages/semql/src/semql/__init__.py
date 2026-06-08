@@ -24,7 +24,16 @@ from semql.errors import (
     SemQLError,
     UnknownIdentifierError,
 )
-from semql.federate import FederatedPlan, MergePlan, compile_federated_query
+from semql.federate import (
+    BridgeJoin,
+    DimensionOutput,
+    FederatedPlan,
+    FragmentColumn,
+    MeasureOutput,
+    MergePlan,
+    MergeSpec,
+    compile_federated_query,
+)
 from semql.hooks import CubePromptHook, ErrorTransformHook
 from semql.introspect import (
     CATALOG_CUBES,
@@ -146,6 +155,7 @@ __all__ = [
     "Backend",
     "BaseField",
     "BoolExpr",
+    "BridgeJoin",
     "CATALOG_CUBES",
     "CATALOG_DIMENSIONS",
     "CATALOG_MEASURES",
@@ -164,6 +174,7 @@ __all__ = [
     "DimTypeLiteral",
     "DEFAULT_REGISTRY",
     "Dimension",
+    "DimensionOutput",
     "DrilldownSuggestion",
     "DrilldownSuggestions",
     "EmbeddingProvider",
@@ -174,6 +185,7 @@ __all__ = [
     "FilterOp",
     "FilterTypeError",
     "FormatLiteral",
+    "FragmentColumn",
     "GlossaryEntry",
     "HybridRetriever",
     "IncompatibleUnits",
@@ -189,12 +201,14 @@ __all__ = [
     "MAX_UNGROUPED_ROWS",
     "MMRWrapper",
     "MergePlan",
+    "MergeSpec",
     "META_CUBES",
     "AddFilter",
     "ChangeGranularity",
     "ChangeTimeWindow",
     "Drilldown",
     "Measure",
+    "MeasureOutput",
     "NamedCTE",
     "NumpyCosineRetriever",
     "RemoveFilter",

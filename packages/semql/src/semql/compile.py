@@ -68,7 +68,7 @@ from semql.errors import (
     UnknownIdentifierError,
 )
 from semql.introspect import PolicyFn, ScopeFn, viewer_sees
-from semql.logical import to_logical_plan
+from semql.logical import build_join_graph
 from semql.model import (
     AggLiteral,
     AuthContext,
@@ -852,10 +852,10 @@ class _CompileEnv:
                     "left-joined cube's column to express the anti-join."
                 )
 
-        self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
-        self.cubes_in_from = [scan.cube for scan in self.plan.scans]
-        self.join_edges = [(j.left, j.right, j.model) for j in self.plan.joins]
-        self.root = self.plan.root
+        self.cubes_in_from, self.join_edges = build_join_graph(
+            self.touched, catalog, left_join_cubes=self.left_join_cubes
+        )
+        self.root = self.cubes_in_from[0]
 
         self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
         self.dialect = dialect_for(self.backend, dialects)
