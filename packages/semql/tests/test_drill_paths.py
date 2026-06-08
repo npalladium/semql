@@ -8,7 +8,7 @@ metadata for downstream consumers.
 
 The validator just enforces that every dimension name in every
 path resolves to a real dimension on the cube — so a typo in the
-catalogue fails fast instead of producing a broken UI affordance.
+catalog fails fast instead of producing a broken UI affordance.
 """
 
 from __future__ import annotations

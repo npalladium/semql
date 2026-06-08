@@ -1,7 +1,7 @@
 """Tests for percentile aggregations (F6).
 
 ``median`` / ``p75`` / ``p90`` / ``p95`` extend ``AggLiteral`` and
-route through ``BackendStrategy.emit_percentile`` so each dialect can
+route through ``BackendDialect.emit_percentile`` so each dialect can
 emit its native shape:
 
 - Postgres / DuckDB / Snowflake: ``PERCENTILE_CONT(q) WITHIN GROUP (ORDER BY ...)``

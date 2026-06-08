@@ -25,7 +25,7 @@ def test_public_surface_includes_core_types() -> None:
         "TimeWindow",
         "CompareWindow",
         # compile
-        "Compiled",
+        "CompiledQuery",
         "compile_query",
         "MAX_UNGROUPED_ROWS",
         # errors
@@ -48,7 +48,7 @@ def test_public_surface_includes_core_types() -> None:
         "VizDecision",
         "VizColumn",
         # prompt
-        "render_catalogue_block",
+        "render_catalog_block",
         "build_planner_prompt_fragment",
         "build_router_prompt_fragment",
         # catalog

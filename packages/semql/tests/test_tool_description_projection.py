@@ -1,7 +1,7 @@
 """Tests for ``project_tool_descriptions`` — the cache-friendly
 per-cube MCP tool-description layout (P6 follow-up).
 
-Mirrors :class:`CataloguePrompt` at the tool-schema layer: the static
+Mirrors :class:`CatalogPrompt` at the tool-schema layer: the static
 ``invariant`` segment holds descriptions for cubes with no
 ``required_roles`` (identical for every viewer — cache them); the
 ``viewer_gated`` segment holds the role-gated cubes the viewer is

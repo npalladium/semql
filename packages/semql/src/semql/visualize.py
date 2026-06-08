@@ -1,16 +1,16 @@
-"""Deterministic visualization decision from a `Compiled` bundle.
+"""Deterministic visualization decision from a `CompiledQuery` bundle.
 
 Given a compiled query, we know:
   - Per-output-column kind, display name, unit, display_unit, format
-    (from ``Compiled.column_meta``).
-  - Which cubes the query touched (from ``Compiled.touched_cube_names``)
+    (from ``CompiledQuery.column_meta``).
+  - Which cubes the query touched (from ``CompiledQuery.touched_cube_names``)
     so we can apply any ``Cube.default_chart_type`` override.
   - How many rows the query produced (passed in as ``n_rows``).
   - The originating ``SemanticQuery`` for shape facts the compiler
     doesn't surface (``ungrouped`` flag, granularity).
 
 That's enough to pick chart type, axes, formats, and labels without
-re-resolving the query against the catalogue. The function returns a
+re-resolving the query against the catalog. The function returns a
 ``VizDecision``; callers can serialise it as a hint for a presenter
 LLM or apply it directly.
 """
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from semql.compile import ColumnMeta, Compiled
+from semql.compile import ColumnMeta, CompiledQuery
 from semql.model import ChartTypeLiteral, Cube, FormatLiteral
 from semql.spec import SemanticQuery
 
@@ -30,7 +30,7 @@ BAR_MAX_BARS = 30
 
 @dataclass
 class VizColumn:
-    """Per-output-column presentation metadata. Order matches `Compiled.columns`.
+    """Per-output-column presentation metadata. Order matches `CompiledQuery.columns`.
 
     ``unit`` is the storage unit (e.g. ``"seconds"``) and ``display_unit``
     is the unit the value should be rendered in (e.g. ``"hours"``). The
@@ -170,7 +170,7 @@ def _viz_column(meta: ColumnMeta) -> VizColumn:
 
 def decide_visualization(
     query: SemanticQuery,
-    compiled: Compiled,
+    compiled: CompiledQuery,
     n_rows: int,
     *,
     catalog: dict[str, Cube],
@@ -178,11 +178,11 @@ def decide_visualization(
     """Return chart_type + axis labels + per-column formats for a query.
 
     Reads from ``compiled.column_meta`` and ``compiled.touched_cube_names``
-    — no catalogue re-resolution. ``catalog`` is consulted only to look
+    — no catalog re-resolution. ``catalog`` is consulted only to look
     up ``Cube.default_chart_type`` for the touched cubes.
 
     ``query`` carries shape facts the compiler doesn't surface on
-    ``Compiled`` (``ungrouped`` flag, time-dimension granularity).
+    ``CompiledQuery`` (``ungrouped`` flag, time-dimension granularity).
     ``n_rows`` is the actual row count; pass ``0`` for dry-run / explain
     paths.
     """

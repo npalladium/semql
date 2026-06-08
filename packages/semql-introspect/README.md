@@ -5,7 +5,7 @@ Bootstrap a [semql](../semql) `Catalog` from a live database.
 Reads Information Schema, emits Python `Cube` stubs with heuristic
 measure / dimension / time-dimension inference and foreign-key derived
 joins. Designed for greenfield adoption — a team with 200 tables can
-generate the mechanical 80% of a catalogue in seconds, then hand-edit
+generate the mechanical 80% of a catalog in seconds, then hand-edit
 the heuristic guesses.
 
 ## Usage

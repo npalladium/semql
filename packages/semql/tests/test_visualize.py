@@ -79,11 +79,11 @@ def _catalog(*cubes: Cube) -> dict[str, Cube]:
 
 
 def _decide(query: SemanticQuery, n_rows: int, *, catalog: dict[str, Cube]) -> VizDecision:
-    """Compile the query against the catalogue and feed the resulting
-    ``Compiled`` bundle to ``decide_visualization``. Tests pass through
-    this wrapper so they don't have to construct a ``Compiled`` by hand
+    """Compile the query against the catalog and feed the resulting
+    ``CompiledQuery`` bundle to ``decide_visualization``. Tests pass through
+    this wrapper so they don't have to construct a ``CompiledQuery`` by hand
     every time — the round-trip via the real compiler is also a useful
-    integration check that ``Compiled.column_meta`` carries the right
+    integration check that ``CompiledQuery.column_meta`` carries the right
     information for the visualiser."""
     from semql.compile import compile_query
 

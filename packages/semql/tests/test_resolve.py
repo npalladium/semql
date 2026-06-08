@@ -1,14 +1,14 @@
 """Unit tests for ``semql._resolve``.
 
 The resolver is the single source of truth for parsing ``cube.field``
-references against the catalogue. Both ``compile.py`` and
+references against the catalog. Both ``compile.py`` and
 ``visualize.py`` depend on its contract:
 
 - The regex permits only ``[a-z_][a-z0-9_]*`` segments (case-insensitive).
 - Unknown identifiers raise ``UnknownIdentifierError`` with structured
   attrs (``kind``, ``name``, ``cube``, ``hint``).
 - The error message lists the known candidates so the reader can pick
-  one without re-grepping the catalogue.
+  one without re-grepping the catalog.
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def test_resolve_unknown_cube_includes_known_list(small_catalog: dict[str, Cube]
     assert err.kind == "cube"
     assert err.name == "orderz"
     assert "Known cubes:" in str(err)
-    # The catalogue's known cubes are listed in the message.
+    # The catalog's known cubes are listed in the message.
     assert "orders" in str(err)
     assert "customers" in str(err)
 

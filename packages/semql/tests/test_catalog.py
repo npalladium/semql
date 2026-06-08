@@ -89,7 +89,7 @@ def test_catalog_compile_delegates() -> None:
 def test_catalog_prompt_returns_fragment() -> None:
     cat = Catalog([_orders()])
     prompt = cat.prompt()
-    # Catalogue block must include the cube and its measure/dimension.
+    # Catalog block must include the cube and its measure/dimension.
     assert "orders" in prompt
     assert "revenue" in prompt
     assert "region" in prompt

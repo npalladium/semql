@@ -5,7 +5,7 @@ cubes (dimensions, measures, time-dimensions, joins) once; emit
 correct, parameterised SQL for Postgres, ClickHouse, DuckDB and
 (via the strategy seam) Snowflake / BigQuery.
 
-`semql` does **no I/O**: catalogues are Python data; the compiler
+`semql` does **no I/O**: catalogs are Python data; the compiler
 returns SQL + bound params; running the SQL is the caller's job.
 Prompt-fragment rendering for LLM planners ships in the core
 (`semql.prompt`). Sibling packages add MCP exposure (`semql-mcp`)
@@ -83,7 +83,7 @@ resolves it (along with `{schema}`-style context placeholders and
   as parameters, never inline as literals.
 - **MCP-ready** — `Catalog.prompt()` produces the planner system-prompt
   fragment; `semql-mcp` wraps it as a server.
-- **Pluggable backends** — `BackendStrategy` Protocol lets out-of-tree
+- **Pluggable backends** — `BackendDialect` Protocol lets out-of-tree
   Snowflake / BigQuery adapters slot in without forking the compiler.
 
 ## Philosophy
@@ -92,7 +92,7 @@ See `PHILOSOPHY.md` at the repo root. Highlights:
 - Correct SQL, not optimal. The query planner is the database's job.
 - The emitted SQL must read like something a human could have written.
 - `compile()` fails at the first problem; `validate()` collects them all.
-- The catalogue is data; reflection isn't an afterthought.
+- The catalog is data; reflection isn't an afterthought.
 
 ## Status
 

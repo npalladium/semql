@@ -7,11 +7,11 @@ round-trips.
 
 The ``filter`` field uses raw SQL with the same ``{alias}``
 placeholder convention as ``Segment.sql`` and ``base_predicate`` —
-catalogue authors write SQL, planners reference the result by name.
+catalog authors write SQL, planners reference the result by name.
 
 sqlglot renders ``exp.Filter`` natively on Postgres / DuckDB /
 BigQuery / ClickHouse and transpiles to ``COUNT(IFF(...))`` on
-Snowflake — no per-strategy work needed.
+Snowflake — no per-dialect work needed.
 """
 
 from __future__ import annotations

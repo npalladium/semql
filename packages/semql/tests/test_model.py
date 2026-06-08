@@ -1,6 +1,6 @@
 """Unit tests for ``semql.model``.
 
-The model defines the catalogue's value-object types; their invariants
+The model defines the catalog's value-object types; their invariants
 (frozen, type literals, defaults) are part of the public surface and
 gate every downstream layer. Catching a literal-renaming or
 frozen-flag-flip here is cheaper than catching it via compile errors
@@ -178,7 +178,7 @@ def test_time_dimension_defaults() -> None:
 def test_separate_cubes_dont_share_default_lists() -> None:
     """Mutable defaults must be per-instance, not shared. Pydantic v2
     handles this correctly by default; pin the invariant so a refactor
-    doesn't smear state across catalogue cubes."""
+    doesn't smear state across catalog cubes."""
     a = Cube(name="a", backend=Backend.POSTGRES, table="t", alias="a")
     b = Cube(name="b", backend=Backend.POSTGRES, table="t", alias="b")
     assert a.measures is not b.measures

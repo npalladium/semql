@@ -220,7 +220,7 @@ def test_catalog_prompt_returns_planner_fragment() -> None:
 
     text = _run(call())
     assert isinstance(text, str)
-    assert "SEMANTIC CATALOGUE" in text
+    assert "SEMANTIC CATALOG" in text
     assert "orders.revenue" in text
 
 

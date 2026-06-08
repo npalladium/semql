@@ -1,4 +1,4 @@
-"""DOT-source generation for catalogue ER diagrams.
+"""DOT-source generation for catalog ER diagrams.
 
 Pure-Python — no third-party imports. ``render_dot(catalog)`` walks
 the cubes and joins and produces a string consumable by any Graphviz
@@ -105,7 +105,7 @@ def _node_id(cube: Cube) -> str:
 
 
 def _cubes_in_scope(catalog: Catalog, *, only_exposed: bool) -> list[Cube]:
-    """Filter the catalogue for rendering. META reflection cubes are
+    """Filter the catalog for rendering. META reflection cubes are
     always excluded — they're an introspection mechanism, not part of
     the data model. ``only_exposed=True`` (default) also drops cubes
     flagged ``expose_in_prompt=False`` so the diagram matches what the
@@ -127,7 +127,7 @@ def render_dot(
     rankdir: RankDir = "LR",
     title: str | None = None,
 ) -> str:
-    """Render the catalogue as a Graphviz DOT source string.
+    """Render the catalog as a Graphviz DOT source string.
 
     ``only_exposed`` (default ``True``) mirrors the planner-prompt
     filter — only cubes flagged ``expose_in_prompt=True`` appear.

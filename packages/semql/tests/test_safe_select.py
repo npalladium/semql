@@ -2,7 +2,7 @@
 
 The compiler emits a single ``SELECT`` by construction (the sqlglot AST
 path doesn't expose a way to interleave DDL/DML). ``is_safe_select``
-runs as a post-hoc check the caller can apply to ``Compiled.sql`` for
+runs as a post-hoc check the caller can apply to ``CompiledQuery.sql`` for
 defence-in-depth: if a future refactor ever lets through a non-SELECT
 statement, this catches it before the SQL hits the database.
 """

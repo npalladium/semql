@@ -21,33 +21,33 @@ from semql import (
 )
 
 
-def test_router_decision_semantic_path_carries_cubes_views() -> None:
+def test_router_decision_semantic_route_carries_cubes_views() -> None:
     d = RouterDecision(
-        path="semantic",
+        route_to="semantic",
         cubes=["orders"],
         views=["revenue_overview"],
         reasoning="The question asks for revenue rollup.",
     )
-    assert d.path == "semantic"
+    assert d.route_to == "semantic"
     assert d.cubes == ["orders"]
     assert d.views == ["revenue_overview"]
 
 
-def test_router_decision_raw_path_has_empty_surfaces() -> None:
-    d = RouterDecision(path="raw")
+def test_router_decision_raw_route_has_empty_surfaces() -> None:
+    d = RouterDecision(route_to="raw")
     assert d.cubes == []
     assert d.views == []
 
 
-def test_router_decision_rejects_unknown_path() -> None:
+def test_router_decision_rejects_unknown_route() -> None:
     with pytest.raises(ValidationError):
-        RouterDecision(path="hybrid")  # type: ignore[arg-type]
+        RouterDecision(route_to="hybrid")  # type: ignore[arg-type]
 
 
 def test_router_decision_is_frozen() -> None:
-    d = RouterDecision(path="semantic")
+    d = RouterDecision(route_to="semantic")
     with pytest.raises(ValidationError):
-        d.path = "raw"
+        d.route_to = "raw"
 
 
 def test_query_step_intent_is_closed_literal() -> None:

@@ -1,4 +1,4 @@
-"""Tests for ``View`` — curated catalogue facades.
+"""Tests for ``View`` — curated catalog facades.
 
 A view exposes a *renamed* subset of measures / dimensions drawn
 from one or more underlying cubes. The planner addresses the view
@@ -7,7 +7,7 @@ references back to the underlying cube fields before resolution.
 
 Two practical benefits:
 
-1. **Prompt trimming.** When a catalogue has 30 cubes but only
+1. **Prompt trimming.** When a catalog has 30 cubes but only
    five matter for a given question shape, expose a view that
    names just those fields. The planner prompt shrinks; the
    planner stays inside what's modelled.
@@ -155,7 +155,7 @@ def test_view_can_rename_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prompt — views appear in the catalogue block.
+# Prompt — views appear in the catalog block.
 # ---------------------------------------------------------------------------
 
 

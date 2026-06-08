@@ -3,7 +3,7 @@
 The DOT path is pure Python — no graphviz binary needed — so these
 tests pin the output shape across every supported relationship,
 filtering option, and edge case (joins to filtered-out cubes,
-META cubes, empty catalogues).
+META cubes, empty catalogs).
 """
 
 from __future__ import annotations
@@ -80,9 +80,9 @@ def test_render_dot_sets_record_node_shape() -> None:
 
 
 def test_render_dot_optional_title_emitted_as_label() -> None:
-    out = render_dot(Catalog([_orders(), _customers()]), title="My Catalogue")
+    out = render_dot(Catalog([_orders(), _customers()]), title="My Catalog")
     assert "label=" in out
-    assert "My Catalogue" in out
+    assert "My Catalog" in out
     assert "labelloc=t" in out
 
 
@@ -300,7 +300,7 @@ def test_edges_to_filtered_out_cubes_are_dropped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Empty / single-cube catalogues
+# Empty / single-cube catalogs
 # ---------------------------------------------------------------------------
 
 

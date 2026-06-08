@@ -20,7 +20,7 @@ from semql import (
     AuthContext,
     Backend,
     Catalog,
-    CataloguePrompt,
+    CatalogPrompt,
     Cube,
     Dimension,
     Lookup,
@@ -72,10 +72,10 @@ def _mixed_catalog() -> Catalog:
 # ---------------------------------------------------------------------------
 
 
-def test_segments_returns_catalogue_prompt() -> None:
+def test_segments_returns_catalog_prompt() -> None:
     cat = _mixed_catalog()
     segs = cat.prompt_segments()
-    assert isinstance(segs, CataloguePrompt)
+    assert isinstance(segs, CatalogPrompt)
     assert isinstance(segs.static, str)
     assert isinstance(segs.overlay, str)
 

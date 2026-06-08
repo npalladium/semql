@@ -91,6 +91,6 @@ def test_filter_uuid_in_accepts_list_of_uuids() -> None:
 def test_prompt_fragment_surfaces_uuid_type() -> None:
     cat = _cat()
     prompt = cat.prompt()
-    # The catalogue render shows `type=uuid` so the LLM knows to quote
+    # The catalog render shows `type=uuid` so the LLM knows to quote
     # and bind literally rather than parse.
     assert "type=uuid" in prompt

@@ -1,4 +1,4 @@
-"""Unit tests for ``semql.prompt`` — catalogue, planner, and router fragments.
+"""Unit tests for ``semql.prompt`` — catalog, planner, and router fragments.
 
 The fragments are the LLM-facing contract: an unexpected change here
 shows up as a planner that suddenly emits worse SemanticQuery specs.
@@ -13,7 +13,7 @@ from semql.model import Backend, Cube, Dimension, Join, Measure, TimeDimension, 
 from semql.prompt import (
     build_planner_prompt_fragment,
     build_router_prompt_fragment,
-    render_catalogue_block,
+    render_catalog_block,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,18 +72,18 @@ def _hidden() -> Cube:
 
 
 # ---------------------------------------------------------------------------
-# render_catalogue_block — exposed / hidden, sections
+# render_catalog_block — exposed / hidden, sections
 # ---------------------------------------------------------------------------
 
 
 def test_render_only_exposed_default() -> None:
-    rendered = render_catalogue_block({"orders": _orders(), "internal": _hidden()})
+    rendered = render_catalog_block({"orders": _orders(), "internal": _hidden()})
     assert "### orders" in rendered
     assert "### internal" not in rendered
 
 
 def test_render_full_with_only_exposed_false() -> None:
-    rendered = render_catalogue_block(
+    rendered = render_catalog_block(
         {"orders": _orders(), "internal": _hidden()}, only_exposed=False
     )
     assert "### orders" in rendered
@@ -91,16 +91,16 @@ def test_render_full_with_only_exposed_false() -> None:
 
 
 def test_render_empty_catalog_returns_empty_string() -> None:
-    assert render_catalogue_block({}) == ""
+    assert render_catalog_block({}) == ""
 
 
 def test_render_only_hidden_cubes_returns_empty_string() -> None:
-    assert render_catalogue_block({"internal": _hidden()}) == ""
+    assert render_catalog_block({"internal": _hidden()}) == ""
 
 
 def test_render_includes_section_headers() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
-    assert "## SEMANTIC CATALOGUE" in rendered
+    rendered = render_catalog_block({"orders": _orders()})
+    assert "## SEMANTIC CATALOG" in rendered
     assert "**Measures:**" in rendered
     assert "**Dimensions:**" in rendered
     assert "**Time dimensions:**" in rendered
@@ -108,12 +108,12 @@ def test_render_includes_section_headers() -> None:
 
 
 def test_render_cube_description_shown() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "One row per order." in rendered
 
 
 def test_render_measure_lists_unit_agg_description() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "`orders.revenue`" in rendered
     assert "[currency]" in rendered
     assert "`agg=sum`" in rendered
@@ -121,19 +121,19 @@ def test_render_measure_lists_unit_agg_description() -> None:
 
 
 def test_render_dimension_lists_type() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "`orders.region`" in rendered
     assert "`type=string`" in rendered
 
 
 def test_render_time_dimension_lists_granularities() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "`orders.created_at`" in rendered
     assert "`granularities=hour|day|week|month`" in rendered
 
 
 def test_render_join_includes_relationship() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "→ `customers`" in rendered
     assert "(many_to_one)" in rendered
 
@@ -145,14 +145,14 @@ def test_render_join_includes_relationship() -> None:
 
 def test_required_filters_callout_present_when_declared() -> None:
     cube = _orders(required=["region"])
-    rendered = render_catalogue_block({"orders": cube})
+    rendered = render_catalog_block({"orders": cube})
     assert "**Required filters:**" in rendered
     assert "`orders.region`" in rendered
     assert "compile fails" in rendered
 
 
 def test_required_filters_callout_absent_when_none() -> None:
-    rendered = render_catalogue_block({"orders": _orders(required=[])})
+    rendered = render_catalog_block({"orders": _orders(required=[])})
     assert "**Required filters:**" not in rendered
 
 
@@ -162,17 +162,17 @@ def test_required_filters_callout_absent_when_none() -> None:
 
 
 def test_display_name_suffix_on_cube() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "(human: Customer Orders)" in rendered
 
 
 def test_display_name_suffix_on_measure() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "(human: Total Revenue)" in rendered
 
 
 def test_display_name_suffix_on_dimension() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+    rendered = render_catalog_block({"orders": _orders()})
     assert "(human: Sales Region)" in rendered
 
 
@@ -193,9 +193,9 @@ def test_planner_fragment_contains_spec_contract() -> None:
     assert "order:" in rendered
 
 
-def test_planner_fragment_contains_catalogue() -> None:
+def test_planner_fragment_contains_catalog() -> None:
     rendered = build_planner_prompt_fragment({"orders": _orders()})
-    assert "## SEMANTIC CATALOGUE" in rendered
+    assert "## SEMANTIC CATALOG" in rendered
     assert "`orders.revenue`" in rendered
 
 
@@ -206,12 +206,12 @@ def test_planner_fragment_contains_raw_fallback() -> None:
 
 def test_planner_fragment_omits_introspection_by_default() -> None:
     rendered = build_planner_prompt_fragment({"orders": _orders()})
-    assert "## Introspecting the catalogue" not in rendered
+    assert "## Introspecting the catalog" not in rendered
 
 
 def test_planner_fragment_with_introspection_includes_meta_cubes() -> None:
     rendered = build_planner_prompt_fragment({"orders": _orders()}, include_introspection=True)
-    assert "## Introspecting the catalogue" in rendered
+    assert "## Introspecting the catalog" in rendered
     assert "`catalog_cubes`" in rendered
     assert "`catalog_measures`" in rendered
     assert "`catalog_dimensions`" in rendered
@@ -251,14 +251,14 @@ def test_router_fragment_header_present() -> None:
 
 def test_router_fragment_topic_summary_default_on() -> None:
     rendered = build_router_prompt_fragment({"orders": _orders()})
-    assert "## Catalogue topics" in rendered
+    assert "## Catalog topics" in rendered
     assert "`orders`" in rendered
     assert "Customer Orders" in rendered  # display_name suffix
 
 
 def test_router_fragment_topic_summary_can_be_disabled() -> None:
     rendered = build_router_prompt_fragment({"orders": _orders()}, include_topic_summary=False)
-    assert "## Catalogue topics" not in rendered
+    assert "## Catalog topics" not in rendered
 
 
 def test_router_fragment_only_exposed_default() -> None:
@@ -319,9 +319,9 @@ def test_router_fragment_views_section_follows_topic_summary_toggle() -> None:
         include_topic_summary=False,
         views=views,
     )
-    # When the topic summary is off, the view list (same catalogue-content
+    # When the topic summary is off, the view list (same catalog-content
     # signal) also disappears — the router stays pure routing rules.
-    assert "## Catalogue topics" not in rendered
+    assert "## Catalog topics" not in rendered
     assert "## Views" not in rendered
 
 
@@ -345,7 +345,7 @@ def test_router_fragment_view_without_description_renders_cleanly() -> None:
 def test_planner_fragment_with_empty_catalog_still_renders_contract() -> None:
     rendered = build_planner_prompt_fragment({})
     assert "## Semantic path" in rendered
-    # Catalogue block is empty but the surrounding sections remain.
+    # Catalog block is empty but the surrounding sections remain.
     assert "## When to fall back to raw SQL" in rendered
 
 
@@ -364,8 +364,8 @@ def test_router_fragment_with_empty_catalog_has_no_topic_lines() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_catalogue_block_ends_with_single_newline() -> None:
-    rendered = render_catalogue_block({"orders": _orders()})
+def test_render_catalog_block_ends_with_single_newline() -> None:
+    rendered = render_catalog_block({"orders": _orders()})
     assert rendered.endswith("\n")
     assert not rendered.endswith("\n\n")
 

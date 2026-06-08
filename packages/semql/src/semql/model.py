@@ -1,17 +1,17 @@
-"""Type definitions for the semantic catalogue.
+"""Type definitions for the semantic catalog.
 
 A `Cube` declares one logical table: where its rows live (`backend`,
 `table`), the always-on predicate that defines membership
 (`base_predicate`), the measures/dimensions/time-dimensions exposed,
 and the join edges to other cubes.
 
-`expose_in_prompt` controls whether `render_catalogue_block` includes
+`expose_in_prompt` controls whether `render_catalog_block` includes
 the cube in the system-prompt fragment shown to the planner. The
-catalogue is intentionally wider than the prompt — every cube the
+catalog is intentionally wider than the prompt — every cube the
 compiler accepts doesn't need to be in the planner's vocabulary. Cubes
 flagged `False` are reachable via joins from exposed cubes and still
 compile cleanly when the planner names them; they just don't appear in
-the catalogue rendering.
+the catalog rendering.
 
 `metadata` is a user-owned escape hatch (k8s-annotation flavoured): an
 opaque ``dict[str, str]`` SemQL never reads, validates, or surfaces.
@@ -45,7 +45,7 @@ class Backend(StrEnum):
     DUCKDB = "duckdb"
     BIGQUERY = "bigquery"
     SNOWFLAKE = "snowflake"
-    META = "meta"  # reflection over the catalogue itself; see introspect.py
+    META = "meta"  # reflection over the catalog itself; see introspect.py
 
 
 StabilityLiteral = Literal["stable", "beta", "deprecated"]
@@ -92,7 +92,7 @@ Metadata = dict[str, str]
 
 
 class BaseField(BaseModel):
-    """Shared supertype for catalogue fields.
+    """Shared supertype for catalog fields.
 
     Every named, addressable artefact on a cube — measures, dimensions,
     time dimensions, segments — carries the same identity / presentation
@@ -181,7 +181,7 @@ class Dimension(BaseField):
     format: FormatLiteral | None = None
     # Names another cube whose ``primary_key`` this dimension references.
     # The Catalog auto-derives a ``many_to_one`` Join from this cube's
-    # FK to the named cube's PK — saving the catalogue author the
+    # FK to the named cube's PK — saving the catalog author the
     # repetition. An explicit Join with the same ``to`` wins.
     foreign_key: str | None = None
 
@@ -307,7 +307,7 @@ class Join(BaseModel):
     metadata: Metadata = Field(default_factory=dict)
 
 
-class TableRef(BaseModel):
+class PhysicalTable(BaseModel):
     """A plain ``[schema.]table`` reference.
 
     Identical in meaning to the legacy ``Cube.table`` shorthand; goes
@@ -358,9 +358,9 @@ class DerivedTable(BaseModel):
     uniqueness across all cubes.
 
     DerivedTable is the second place raw SQL legitimately enters the
-    catalogue (the first is ``Measure.sql``). The compiler surfaces the
+    catalog (the first is ``Measure.sql``). The compiler surfaces the
     resolved SQL of both the main ``sql`` and every CTE on
-    :attr:`semql.compile.Compiled.derived_sources` so static checks
+    :attr:`semql.compile.CompiledQuery.derived_sources` so static checks
     (``is_safe_select``, dialect snapshots) cover every raw fragment,
     not just the outer SELECT."""
 
@@ -382,14 +382,14 @@ class DerivedTable(BaseModel):
         return self
 
 
-CubeSource = TableRef | DerivedTable
+CubeSource = PhysicalTable | DerivedTable
 
 
 class Cube(BaseModel):
     name: str
     backend: Backend
     # Shorthand for a plain-table source: ``Cube(table="schema.t", ...)``
-    # is equivalent to ``Cube(source=TableRef(table="schema.t"), ...)``.
+    # is equivalent to ``Cube(source=PhysicalTable(table="schema.t"), ...)``.
     # Exactly one of ``table`` / ``source`` must be specified; mixing a
     # non-empty ``table`` with a ``DerivedTable`` source raises.
     table: str = ""
@@ -418,7 +418,7 @@ class Cube(BaseModel):
     default_chart_type: ChartTypeLiteral | None = None
     metadata: Metadata = Field(default_factory=dict)
     # Tenant isolation strategy — see the ``TenancyMode`` docstring.
-    # Defaults to ``"schema"`` so existing catalogues that rely on
+    # Defaults to ``"schema"`` so existing catalogs that rely on
     # ``{tenant_schema}`` substitution keep working.
     tenancy: TenancyMode = "schema"
     # The column that carries the tenant identifier in DISCRIMINATOR
@@ -608,7 +608,7 @@ class Cube(BaseModel):
     def _check_source_consistency(self) -> Cube:
         """Exactly one source declaration: ``table`` (shorthand) or
         ``source`` (explicit). Setting both is OK only when ``source`` is
-        a ``TableRef`` whose ``table`` matches; mixing a ``table`` value
+        a ``PhysicalTable`` whose ``table`` matches; mixing a ``table`` value
         with a ``DerivedTable`` is rejected."""
         has_table = bool(self.table)
         has_source = self.source is not None
@@ -619,11 +619,11 @@ class Cube(BaseModel):
                 "(derived source)."
             )
         if has_table and has_source:
-            if isinstance(self.source, TableRef):
+            if isinstance(self.source, PhysicalTable):
                 if self.source.table != self.table:
                     raise ValueError(
                         f"Cube {self.name!r}: ``table={self.table!r}`` "
-                        "disagrees with ``source=TableRef(table="
+                        "disagrees with ``source=PhysicalTable(table="
                         f"{self.source.table!r})``. Specify only one."
                     )
             else:
@@ -649,7 +649,7 @@ class Cube(BaseModel):
             offenders: list[str] = []
             if "{tenant_schema}" in self.table:
                 offenders.append("table")
-            if isinstance(self.source, TableRef) and "{tenant_schema}" in self.source.table:
+            if isinstance(self.source, PhysicalTable) and "{tenant_schema}" in self.source.table:
                 offenders.append("source.table")
             if isinstance(self.source, DerivedTable) and "{tenant_schema}" in self.source.sql:
                 offenders.append("source.sql")
@@ -672,12 +672,12 @@ class Cube(BaseModel):
         """Canonical source spec.
 
         Returns ``self.source`` when explicitly set, otherwise wraps
-        ``self.table`` in a :class:`TableRef`. Use this from the compiler
-        / backend strategy so the ``table`` / ``source`` shorthand
+        ``self.table`` in a :class:`PhysicalTable`. Use this from the compiler
+        / backend dialect so the ``table`` / ``source`` shorthand
         distinction stays a model concern."""
         if self.source is not None:
             return self.source
-        return TableRef(table=self.table)
+        return PhysicalTable(table=self.table)
 
     def field_names(self) -> set[str]:
         names: set[str] = set()
@@ -722,7 +722,7 @@ class AuthContext(BaseModel):
       ``security_sql="{t}.assignee_id = {ctx.viewer_id}"`` once and
       have it bound as a parameter (never as a SQL literal).
 
-    ``metadata`` is the same caller-owned escape hatch the catalogue
+    ``metadata`` is the same caller-owned escape hatch the catalog
     types carry: opaque string→string the platform never reads.
     """
 
@@ -764,13 +764,13 @@ class Lookup(BaseModel):
     flavours:
 
     - **Static**: ``values=("EMEA", "APAC", "NA")``. Values live in the
-      catalogue.
+      catalog.
     - **Dynamic**: ``loader=lambda ctx: db.fetch_regions(...)``. The
-      loader fires when ``Catalog.prompt(...)`` renders the catalogue
+      loader fires when ``Catalog.prompt(...)`` renders the catalog
       block, so the rendered values can vary per viewer / tenant.
 
     ``max_inline`` caps how many values are inlined into the prompt.
-    Beyond it the rendered catalogue tells the planner to call a
+    Beyond it the rendered catalog tells the planner to call a
     ``resolve_<dim>`` tool (or :func:`semql.lookups.resolve`) instead.
 
     Loaders are an I/O entry point — they live in
@@ -815,7 +815,7 @@ class Lookup(BaseModel):
 
 
 class View(BaseModel):
-    """A curated catalogue facade.
+    """A curated catalog facade.
 
     A view exposes a renamed subset of measures / dimensions drawn
     from one or more underlying cubes. Two practical uses:
@@ -883,7 +883,7 @@ __all__ = [
     "ScopePredicate",
     "Segment",
     "StabilityLiteral",
-    "TableRef",
+    "PhysicalTable",
     "TenancyMode",
     "TimeDimension",
     "View",

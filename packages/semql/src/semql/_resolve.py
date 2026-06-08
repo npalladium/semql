@@ -1,7 +1,7 @@
 """Shared identifier resolution for the semantic layer.
 
 Both `compile.py` and `visualize.py` parse the planner's `cube.field`
-references against the catalogue. Keeping a single resolver here makes
+references against the catalog. Keeping a single resolver here makes
 the validation, regex shape, and error class consistent across both
 modules.
 """

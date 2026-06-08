@@ -1,7 +1,7 @@
 """Belt-and-braces guard on emitted SQL.
 
 The compiler emits a single ``SELECT`` by construction. ``is_safe_select``
-runs a post-hoc check on ``Compiled.sql`` (or any other SQL string)
+runs a post-hoc check on ``CompiledQuery.sql`` (or any other SQL string)
 that a downstream caller wants to gate before it hits the database.
 The guard is paranoid by design — multi-statement payloads,
 malformed SQL, and any non-SELECT shape (INSERT / UPDATE / DELETE /

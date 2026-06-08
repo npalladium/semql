@@ -1,4 +1,4 @@
-"""Tests for the user-owned ``metadata`` field on catalogue types.
+"""Tests for the user-owned ``metadata`` field on catalog types.
 
 The metadata field is a k8s-annotation-style escape hatch: opaque
 ``dict[str, str]`` that callers can stash any context they want in
@@ -10,7 +10,7 @@ for a downstream UI). SemQL guarantees it will *not*:
 - Appear in the reflection META cubes.
 
 It must, however, round-trip cleanly through ``model_copy``,
-serialisation, and the eventual catalogue documentation generator.
+serialisation, and the eventual catalog documentation generator.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _orders(**meta_overrides: dict[str, str]) -> Cube:
 
 @pytest.mark.parametrize("cls", [Cube, Measure, Dimension, TimeDimension, Join])
 def test_metadata_defaults_to_empty_dict(cls: type[BaseModel]) -> None:
-    """Every catalogue type carries a ``metadata`` field that defaults to {}."""
+    """Every catalog type carries a ``metadata`` field that defaults to {}."""
     assert "metadata" in cls.model_fields, f"{cls.__name__} is missing the metadata field"
 
 

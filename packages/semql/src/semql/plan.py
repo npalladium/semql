@@ -6,7 +6,7 @@ Each role in the SemQL prompt pipeline emits a structured value:
   question maps to. Consumed by the Query Generator.
 - ``QueryPlan`` — one or more ``QueryStep``s, each tagged with an
   ``intent`` (headline / breakdown / compare / context) so the
-  Presenter knows what role each result plays. Compiled into SQL.
+  Presenter knows what role each result plays. CompiledQuery into SQL.
 - ``Presentation`` — the user-facing narrative + highlights + caveats
   that goes back to the asker. Pairs with ``VizDecision`` (from
   ``semql.visualize``) which separately picks the chart shape.
@@ -29,23 +29,23 @@ from semql.spec import SemanticQuery
 
 # Router output ----------------------------------------------------------------
 
-RouterPath = Literal["semantic", "raw"]
+RouteTo = Literal["semantic", "raw"]
 """Where the question gets answered. ``semantic`` routes through the
-catalogue + compiler; ``raw`` falls back to caller-emitted SQL for
-shapes the catalogue can't express (window functions, recursive CTEs,
+catalog + compiler; ``raw`` falls back to caller-emitted SQL for
+shapes the catalog can't express (window functions, recursive CTEs,
 pivots, columns not in the model)."""
 
 
 class RouterDecision(BaseModel):
-    """The first stage's output: which path, and on what surface.
+    """The first stage's output: which route, and on what surface.
 
-    When ``path == "semantic"``, ``cubes`` and/or ``views`` name the
-    catalogue surface the Query Generator should scope to (a trimmed
-    prompt fragment instead of the full catalogue keeps subsequent
+    When ``route_to == "semantic"``, ``cubes`` and/or ``views`` name the
+    catalog surface the Query Generator should scope to (a trimmed
+    prompt fragment instead of the full catalog keeps subsequent
     stages crisp).
 
-    When ``path == "raw"``, both lists are empty — the question doesn't
-    fit the catalogue and the caller is responsible for the SQL.
+    When ``route_to == "raw"``, both lists are empty — the question doesn't
+    fit the catalog and the caller is responsible for the SQL.
 
     ``reasoning`` is the LLM's own justification; carry it through
     rather than discarding so a downstream "why did you route this
@@ -54,7 +54,7 @@ class RouterDecision(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True)
-    path: RouterPath
+    route_to: RouteTo
     cubes: list[str] = Field(default_factory=list)
     views: list[str] = Field(default_factory=list)
     reasoning: str | None = None
@@ -173,5 +173,5 @@ __all__ = [
     "QueryPlan",
     "QueryStep",
     "RouterDecision",
-    "RouterPath",
+    "RouteTo",
 ]

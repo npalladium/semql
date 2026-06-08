@@ -42,7 +42,7 @@ class UnknownIdentifierError(CompileError):
     ``kind`` is ``"cube"`` or ``"field"``. ``name`` is the unknown
     identifier as it appeared in the query. ``cube`` is the parent
     cube name for field misses (``None`` for cube misses). ``hint``
-    is the nearest catalogue identifier if one was found, else None.
+    is the nearest catalog identifier if one was found, else None.
     """
 
     def __init__(
@@ -62,7 +62,7 @@ class UnknownIdentifierError(CompileError):
 
 
 class JoinPathError(CompileError):
-    """Raised when the catalogue has no join path between two touched cubes."""
+    """Raised when the catalog has no join path between two touched cubes."""
 
     def __init__(self, message: str, *, root_cube: str, target_cube: str) -> None:
         super().__init__(message)
@@ -88,7 +88,7 @@ class FilterTypeError(CompileError):
 
 
 class PlaceholderError(CompileError):
-    """Raised when a ``{key}`` placeholder in catalogue SQL is unknown."""
+    """Raised when a ``{key}`` placeholder in catalog SQL is unknown."""
 
     def __init__(
         self,

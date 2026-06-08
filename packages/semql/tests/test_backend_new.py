@@ -18,13 +18,13 @@ from typing import Any
 
 import pytest
 from semql.backend import (
-    BackendStrategy,
-    BigQueryStrategy,
-    DuckDBStrategy,
-    SnowflakeStrategy,
+    BackendDialect,
+    BigQueryDialect,
+    DuckDBDialect,
+    SnowflakeDialect,
     SqlResolver,
+    dialect_for,
     render,
-    strategy_for,
 )
 from semql.model import Backend, Cube, Dimension, Measure
 from sqlglot import exp
@@ -47,17 +47,17 @@ def _orders() -> Cube:
 
 
 def test_bigquery_placeholder_renders_at_prefix() -> None:
-    s = BigQueryStrategy()
+    s = BigQueryDialect()
     assert render(s.placeholder("p0", "string"), Backend.BIGQUERY) == "@p0"
 
 
 def test_snowflake_placeholder_renders_colon_prefix() -> None:
-    s = SnowflakeStrategy()
+    s = SnowflakeDialect()
     assert render(s.placeholder("p0", "string"), Backend.SNOWFLAKE) == ":p0"
 
 
 def test_duckdb_placeholder_renders_dollar_prefix() -> None:
-    s = DuckDBStrategy()
+    s = DuckDBDialect()
     assert render(s.placeholder("p0", "string"), Backend.DUCKDB) == "$p0"
 
 
@@ -69,9 +69,9 @@ def test_duckdb_placeholder_renders_dollar_prefix() -> None:
 @pytest.mark.parametrize(
     ("strategy_cls", "backend"),
     [
-        (BigQueryStrategy, Backend.BIGQUERY),
-        (SnowflakeStrategy, Backend.SNOWFLAKE),
-        (DuckDBStrategy, Backend.DUCKDB),
+        (BigQueryDialect, Backend.BIGQUERY),
+        (SnowflakeDialect, Backend.SNOWFLAKE),
+        (DuckDBDialect, Backend.DUCKDB),
     ],
 )
 def test_trunc_emits_date_trunc(strategy_cls: type, backend: Backend) -> None:
@@ -95,7 +95,7 @@ def test_bigquery_emit_contains_transpiles_ilike_to_lower_like() -> None:
         bound.append((value, dim_type))
         return exp.Placeholder(this=f"p{len(bound) - 1}")
 
-    s = BigQueryStrategy()
+    s = BigQueryDialect()
     node = s.emit_contains(exp.column("email", table="x"), "@acme.com", bind)
     out = render(node, Backend.BIGQUERY)
     # BigQuery has no native ILIKE; sqlglot rewrites to LOWER LIKE LOWER.
@@ -110,7 +110,7 @@ def test_snowflake_emit_contains_uses_native_ilike() -> None:
         bound.append((value, dim_type))
         return exp.Placeholder(this=f"p{len(bound) - 1}")
 
-    s = SnowflakeStrategy()
+    s = SnowflakeDialect()
     node = s.emit_contains(exp.column("email", table="x"), "@acme.com", bind)
     out = render(node, Backend.SNOWFLAKE)
     assert out == "x.email ILIKE :p0"
@@ -124,7 +124,7 @@ def test_duckdb_emit_contains_uses_native_ilike() -> None:
         bound.append((value, dim_type))
         return exp.Placeholder(this=f"p{len(bound) - 1}")
 
-    s = DuckDBStrategy()
+    s = DuckDBDialect()
     node = s.emit_contains(exp.column("email", table="x"), "@acme.com", bind)
     out = render(node, Backend.DUCKDB)
     assert out == "x.email ILIKE $p0"
@@ -139,9 +139,9 @@ def test_duckdb_emit_contains_uses_native_ilike() -> None:
 @pytest.mark.parametrize(
     ("strategy_cls", "backend"),
     [
-        (BigQueryStrategy, Backend.BIGQUERY),
-        (SnowflakeStrategy, Backend.SNOWFLAKE),
-        (DuckDBStrategy, Backend.DUCKDB),
+        (BigQueryDialect, Backend.BIGQUERY),
+        (SnowflakeDialect, Backend.SNOWFLAKE),
+        (DuckDBDialect, Backend.DUCKDB),
     ],
 )
 def test_emit_source_renders_aliased_table(strategy_cls: type, backend: Backend) -> None:
@@ -158,14 +158,14 @@ def test_emit_source_renders_aliased_table(strategy_cls: type, backend: Backend)
 
 
 def test_new_strategies_satisfy_protocol() -> None:
-    for s in (BigQueryStrategy(), SnowflakeStrategy(), DuckDBStrategy()):
-        assert isinstance(s, BackendStrategy)
+    for s in (BigQueryDialect(), SnowflakeDialect(), DuckDBDialect()):
+        assert isinstance(s, BackendDialect)
 
 
-def test_strategy_for_returns_new_defaults() -> None:
-    assert isinstance(strategy_for(Backend.BIGQUERY), BigQueryStrategy)
-    assert isinstance(strategy_for(Backend.SNOWFLAKE), SnowflakeStrategy)
-    assert isinstance(strategy_for(Backend.DUCKDB), DuckDBStrategy)
+def test_dialect_for_returns_new_defaults() -> None:
+    assert isinstance(dialect_for(Backend.BIGQUERY), BigQueryDialect)
+    assert isinstance(dialect_for(Backend.SNOWFLAKE), SnowflakeDialect)
+    assert isinstance(dialect_for(Backend.DUCKDB), DuckDBDialect)
 
 
 # ---------------------------------------------------------------------------

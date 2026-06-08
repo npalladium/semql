@@ -1,7 +1,7 @@
-"""Tests for dimension-value catalogues — ``Lookup`` model + Catalog wiring.
+"""Tests for dimension-value catalogs — ``Lookup`` model + Catalog wiring.
 
 A ``Lookup`` declares the finite set of valid values for a string
-dimension. Static lookups inline values in the catalogue; dynamic
+dimension. Static lookups inline values in the catalog; dynamic
 lookups resolve via a ``loader(ResolutionContext)`` at prompt-render
 time. The compiler never fires loaders — they're a presentation-layer
 concern.

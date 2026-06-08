@@ -2,7 +2,7 @@
 merge plan when a query's touched cubes span backends.
 
 The sans-io counterpart of :func:`semql.compile.compile_query` for
-federated queries. Each fragment is a normal :class:`Compiled` for its
+federated queries. Each fragment is a normal :class:`CompiledQuery` for its
 backend; the merge SQL is always DuckDB dialect — DuckDB is the lingua
 franca of the federation layer (both for our in-process executor and
 for sans-io callers who want to materialise results into DuckDB-
@@ -14,7 +14,7 @@ v1 restrictions, refused with :class:`FederationError`:
   cubes on other backends contribute lookup attributes only.
 - Bridge joins between partitions must be equality on a single column
   pair, with both sides declared as ``Dimension``\\s on their cubes
-  (the federation layer cannot project columns the catalogue hasn't
+  (the federation layer cannot project columns the catalog hasn't
   named).
 - ``q.where`` (the boolean predicate tree) and ``q.compare`` are not
   supported in cross-source v1.
@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import TYPE_CHECKING, Literal
 
-from semql.compile import ColumnMeta, Compiled, compile_query
+from semql.compile import ColumnMeta, CompiledQuery, compile_query
 from semql.errors import FederationError
 from semql.introspect import resolve_query
 from semql.model import Backend, Cube, Dimension, Join, Measure
@@ -58,7 +58,7 @@ FederationMode = Literal["distributive", "raw_rows"]
 """
 
 if TYPE_CHECKING:
-    from semql.backend import BackendStrategy
+    from semql.backend import BackendDialect
     from semql.introspect import PolicyFn, ScopeFn
     from semql.model import AuthContext, View
 
@@ -86,15 +86,15 @@ class MergePlan:
 class FederatedPlan:
     """A query that touches cubes on multiple backends.
 
-    ``fragments[i]`` is a :class:`Compiled` to run against its
+    ``fragments[i]`` is a :class:`CompiledQuery` to run against its
     respective backend. Results are loaded into a DuckDB table named
     ``frag_i`` and the ``merge.sql`` produces the final shape.
 
     ``columns`` and ``column_meta`` describe the final output shape
-    after the merge — same role they play on :class:`Compiled`.
+    after the merge — same role they play on :class:`CompiledQuery`.
     """
 
-    fragments: list[Compiled]
+    fragments: list[CompiledQuery]
     merge: MergePlan
     columns: list[str]
     column_meta: list[ColumnMeta]
@@ -119,7 +119,7 @@ class _Bridge:
     ``left_cube`` is the cube the ``Join`` is declared on; ``right_cube``
     is its target. ``left_col`` / ``right_col`` are the column names on
     each side. ``left_dim`` / ``right_dim`` are the dimension names that
-    expose those columns (the catalogue must declare them — see module
+    expose those columns (the catalog must declare them — see module
     docstring)."""
 
     left_cube: Cube
@@ -1448,7 +1448,7 @@ def _compile_raw_rows(
     context: dict[str, str] | None,
     group_by_alias: bool,
     having_alias: bool,
-    strategies: dict[Backend, BackendStrategy] | None,
+    dialects: dict[Backend, BackendDialect] | None,
     viewer: AuthContext | None,
     policy: PolicyFn | None,
     scope_fns: dict[str, ScopeFn] | None,
@@ -1473,7 +1473,7 @@ def _compile_raw_rows(
     if q.where is not None:
         partitions, cross_partition_clauses = _route_where_tree(q.where, partitions)
 
-    fragments: list[Compiled] = []
+    fragments: list[CompiledQuery] = []
     for plan in partitions:
         scoped = _scoped_catalog(plan.cubes)
         c = compile_query(
@@ -1482,7 +1482,7 @@ def _compile_raw_rows(
             context=context,
             group_by_alias=group_by_alias,
             having_alias=having_alias,
-            strategies=strategies,
+            dialects=dialects,
             views=None,
             viewer=viewer,
             policy=policy,
@@ -1574,7 +1574,7 @@ def compile_federated_query(
     context: dict[str, str] | None = None,
     group_by_alias: bool = True,
     having_alias: bool = False,
-    strategies: dict[Backend, BackendStrategy] | None = None,
+    dialects: dict[Backend, BackendDialect] | None = None,
     views: dict[str, View] | None = None,
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
@@ -1583,7 +1583,7 @@ def compile_federated_query(
 ) -> FederatedPlan:
     """Compile a query whose touched cubes span multiple backends.
 
-    Returns a :class:`FederatedPlan` with one :class:`Compiled`
+    Returns a :class:`FederatedPlan` with one :class:`CompiledQuery`
     fragment per backend and a DuckDB merge SQL that joins them.
 
     Single-backend queries succeed too — the returned plan has a single
@@ -1656,7 +1656,7 @@ def compile_federated_query(
             context=context,
             group_by_alias=group_by_alias,
             having_alias=having_alias,
-            strategies=strategies,
+            dialects=dialects,
             views=views,
             viewer=viewer,
             policy=policy,
@@ -1695,7 +1695,7 @@ def compile_federated_query(
     bridges = _find_bridges(touched, catalog)
     if not bridges:
         raise FederationError(
-            "Touched cubes span multiple backends but the catalogue "
+            "Touched cubes span multiple backends but the catalog "
             "declares no cross-backend Join between them. Add a "
             "many_to_one Join (or a foreign_key dimension that "
             "auto-derives one).",
@@ -1723,7 +1723,7 @@ def compile_federated_query(
             context=context,
             group_by_alias=group_by_alias,
             having_alias=having_alias,
-            strategies=strategies,
+            dialects=dialects,
             viewer=viewer,
             policy=policy,
             scope_fns=scope_fns,
@@ -1737,7 +1737,7 @@ def compile_federated_query(
         partitions.append(plan)
 
     # Compile each fragment.
-    fragments: list[Compiled] = []
+    fragments: list[CompiledQuery] = []
     for plan in partitions:
         scoped = _scoped_catalog(plan.cubes)
         c = compile_query(
@@ -1746,7 +1746,7 @@ def compile_federated_query(
             context=context,
             group_by_alias=group_by_alias,
             having_alias=having_alias,
-            strategies=strategies,
+            dialects=dialects,
             views=None,
             viewer=viewer,
             policy=policy,

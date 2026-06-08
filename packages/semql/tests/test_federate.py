@@ -85,7 +85,7 @@ def _federated_catalog() -> dict[str, Cube]:
 
 
 # ---------------------------------------------------------------------------
-# Single-backend degenerate path — wraps Compiled in a one-fragment plan.
+# Single-backend degenerate path — wraps CompiledQuery in a one-fragment plan.
 # ---------------------------------------------------------------------------
 
 
@@ -101,7 +101,7 @@ def test_single_backend_query_returns_one_fragment_plan() -> None:
     assert len(plan.fragments) == 1
     assert plan.fragments[0].backend is Backend.POSTGRES
     assert plan.merge.sql == "SELECT * FROM frag_0"
-    # Columns + meta match the underlying Compiled.
+    # Columns + meta match the underlying CompiledQuery.
     assert plan.columns == plan.fragments[0].columns
     assert [m.name for m in plan.column_meta] == plan.columns
 
@@ -161,7 +161,7 @@ def test_merge_sql_joins_fragments_on_bridge_keys() -> None:
 
 def test_final_columns_match_user_query_shape() -> None:
     """``FederatedPlan.columns`` is the user-facing output column order
-    — same convention as ``Compiled.columns`` (dims, then time, then
+    — same convention as ``CompiledQuery.columns`` (dims, then time, then
     measures)."""
     catalog = _federated_catalog()
     plan = compile_federated_query(
@@ -317,7 +317,7 @@ def test_refuses_multi_column_join_key() -> None:
 
 def test_refuses_join_key_not_declared_as_dimension() -> None:
     """If the FK column isn't declared as a Dimension, federation can't
-    project it. Catalogue author must opt in by declaring the dim."""
+    project it. Catalog author must opt in by declaring the dim."""
     orders = _orders().model_copy(
         update={
             "dimensions": [

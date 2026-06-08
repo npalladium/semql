@@ -238,7 +238,7 @@ def _build_default() -> Registry:
     r.register("mb", "gb", 1.0 / 1000.0)
     r.register("gb", "tb", 1.0 / 1000.0)
 
-    # Aliases — short forms that appear in real-world catalogues.
+    # Aliases — short forms that appear in real-world catalogs.
     for alias, canonical in (
         ("s", "seconds"),
         ("sec", "seconds"),

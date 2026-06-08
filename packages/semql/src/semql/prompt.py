@@ -1,10 +1,10 @@
-"""Render catalogue + spec contract as a prompt fragment for LLM planners.
+"""Render catalog + spec contract as a prompt fragment for LLM planners.
 
-`render_catalogue_block` — pure markdown listing of cubes/measures/
+`render_catalog_block` — pure markdown listing of cubes/measures/
 dimensions/joins. Shows only cubes flagged `expose_in_prompt=True` by
-default; pass `only_exposed=False` for a full catalogue listing.
+default; pass `only_exposed=False` for a full catalog listing.
 
-`build_planner_prompt_fragment` — wraps the catalogue with the spec
+`build_planner_prompt_fragment` — wraps the catalog with the spec
 contract (what fields `SemanticQuery` takes) and the semantic-vs-raw
 guidance. Returns a *fragment*: the caller splices it into the broader
 system prompt alongside role description, data-source context, etc.
@@ -60,7 +60,7 @@ def _render_lookup_line(dim_ref: str, lookup: Lookup, ctx: ResolutionContext | N
     )
 
 
-_CATALOGUE_HEADER = (
+_CATALOG_HEADER = (
     "Cubes you can query via the semantic layer. Reference fields as "
     "`cube.field`. The compiler emits SQL — never write SQL on the "
     "semantic path."
@@ -119,15 +119,15 @@ def _retrieval_header_preamble(
         retrieval_threshold=retrieval_threshold,
     ):
         return (
-            f"## SEMANTIC CATALOGUE (top {top_k} cubes for your question)",
+            f"## SEMANTIC CATALOG (top {top_k} cubes for your question)",
             (
-                "Retrieval-filtered subset of the catalogue ranked against "
+                "Retrieval-filtered subset of the catalog ranked against "
                 "the user's question. Reference fields as `cube.field`. "
                 "If a needed cube is missing, fall back to listing the "
-                "full catalogue."
+                "full catalog."
             ),
         )
-    return ("## SEMANTIC CATALOGUE", _CATALOGUE_HEADER)
+    return ("## SEMANTIC CATALOG", _CATALOG_HEADER)
 
 
 def _filter_by_retrieval(
@@ -203,7 +203,7 @@ def _render_cube_block(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_catalogue_block(
+def render_catalog_block(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
@@ -223,7 +223,7 @@ def render_catalogue_block(
     # historically appeared in the planner fragment when callers opted
     # into introspection (downstream ``build_planner_prompt_fragment``
     # gates the META section with ``include_introspection``, but the
-    # catalogue block itself stays inclusive — META cubes carry
+    # catalog block itself stays inclusive — META cubes carry
     # ``expose_in_prompt=False`` so ``only_exposed=True`` hides them
     # by default anyway).
     cubes = _drop_deprecated(
@@ -260,7 +260,7 @@ def render_catalogue_block(
             retriever=retriever,
             top_k=top_k,
         )
-    catalogue_body = _render_cube_block(
+    catalog_body = _render_cube_block(
         cubes,
         dict(lookups or {}),
         ctx,
@@ -271,10 +271,10 @@ def render_catalogue_block(
     # per-cube listings so the planner reads vocabulary before fields.
     domain = _render_domain_context(glossary, relations)
     if not domain:
-        return catalogue_body
-    if not catalogue_body:
+        return catalog_body
+    if not catalog_body:
         return domain
-    return domain + "\n" + catalogue_body
+    return domain + "\n" + catalog_body
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +283,8 @@ def render_catalogue_block(
 
 
 @dataclass(frozen=True)
-class CataloguePrompt:
-    """Two-segment rendering of the catalogue for prompt caching.
+class CatalogPrompt:
+    """Two-segment rendering of the catalog for prompt caching.
 
     ``static`` is identical for every viewer — only cubes with empty
     ``required_roles`` appear here. Splice it above your Anthropic /
@@ -319,7 +319,7 @@ def _is_public(cube: Cube) -> bool:
     return not cube.required_roles
 
 
-def render_catalogue_segments(
+def render_catalog_segments(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
@@ -334,8 +334,8 @@ def render_catalogue_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-) -> CataloguePrompt:
-    """Split the catalogue into a static + per-viewer overlay rendering.
+) -> CatalogPrompt:
+    """Split the catalog into a static + per-viewer overlay rendering.
 
     Static segment: cubes with empty ``required_roles`` (publicly
     visible). Stable across viewer changes — cache it.
@@ -388,7 +388,7 @@ def render_catalogue_segments(
             retriever=retriever,
             top_k=top_k,
         )
-    catalogue_body = _render_cube_block(
+    catalog_body = _render_cube_block(
         public_cubes,
         lookups_by_dim,
         ctx,
@@ -398,10 +398,7 @@ def render_catalogue_segments(
     # Domain context (glossary + cross-cube relations) is viewer-
     # invariant, so it lives in the static segment above the cubes.
     domain = _render_domain_context(glossary, relations)
-    if domain and catalogue_body:
-        static = domain + "\n" + catalogue_body
-    else:
-        static = domain or catalogue_body
+    static = domain + "\n" + catalog_body if domain and catalog_body else domain or catalog_body
 
     # Overlay holds the additional cubes this viewer has been authorised
     # to see beyond the public set. With viewer=None we treat the overlay
@@ -420,19 +417,19 @@ def render_catalogue_segments(
                 header="## CUBES VISIBLE TO YOU",
                 preamble=(
                     "Role-gated cubes you can access beyond the public "
-                    f"catalogue above: {names}. Reference them the same "
+                    f"catalog above: {names}. Reference them the same "
                     "way (`cube.field`)."
                 ),
             )
 
-    return CataloguePrompt(static=static, overlay=overlay)
+    return CatalogPrompt(static=static, overlay=overlay)
 
 
 @dataclass(frozen=True)
 class ToolDescriptionProjection:
     """Per-cube MCP tool descriptions, partitioned for prompt caching.
 
-    Mirrors :class:`CataloguePrompt` at the tool-schema layer. ``invariant``
+    Mirrors :class:`CatalogPrompt` at the tool-schema layer. ``invariant``
     holds the static set: cubes with empty ``required_roles``, whose
     description is the same for every viewer — cache them aggressively
     on the MCP client side. ``viewer_gated`` holds the per-viewer
@@ -442,7 +439,7 @@ class ToolDescriptionProjection:
     per-cube ``query_<cube>`` tool).
 
     Both maps are keyed by ``cube.name`` so a consumer can correlate
-    them with the catalogue prompt segments (which list cubes by name)
+    them with the catalog prompt segments (which list cubes by name)
     and with the tool registrations on the MCP side.
     """
 
@@ -521,7 +518,13 @@ def project_tool_descriptions(
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
 ) -> ToolDescriptionProjection:
-    """Split per-cube MCP tool descriptions into invariant + viewer-gated.
+    """Return tool descriptions projected to the visible cubes (relational projection).
+
+    "Project" here is the relational-algebra sense — pick the columns/rows
+    that match a predicate, drop the rest. Despite the bare name, this has
+    nothing to do with "this project" / a project directory.
+
+    Splits per-cube MCP tool descriptions into invariant + viewer-gated.
 
     ``invariant`` segment: cubes with empty ``required_roles``, identical
     for every viewer. MCP clients should cache these schemas aggressively.
@@ -530,9 +533,12 @@ def project_tool_descriptions(
     ``viewer_sees``) that aren't in the invariant set. Without a viewer,
     this segment is empty.
 
-    Auth invariant — like :func:`render_catalogue_segments`, role-gated
+    Auth invariant — like :func:`render_catalog_segments`, role-gated
     cubes only appear when the viewer authorises them, so a viewer never
-    learns names of cubes they can't access via this projection."""
+    learns names of cubes they can't access via this projection.
+
+    See also :data:`filter_tool_descriptions` — same callable, more
+    discoverable name."""
     all_cubes = _drop_deprecated(
         list(
             iter_cubes(
@@ -556,7 +562,14 @@ def project_tool_descriptions(
     return ToolDescriptionProjection(invariant=invariant, viewer_gated=viewer_gated)
 
 
-def catalogue_prompt_hash(
+filter_tool_descriptions = project_tool_descriptions
+"""Discoverable alias for :func:`project_tool_descriptions`.
+
+Same callable, more readable name when "project" reads as "this project"
+rather than the relational-algebra sense."""
+
+
+def catalog_prompt_hash(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
@@ -565,7 +578,7 @@ def catalogue_prompt_hash(
     glossary: list[GlossaryEntry] | None = None,
     relations: str = "",
 ) -> str:
-    """SHA256 hex digest of the static catalogue segment.
+    """SHA256 hex digest of the static catalog segment.
 
     Stable across viewer changes — call this to key your own
     prompt-fragment cache so a measure rename or new public cube
@@ -574,7 +587,7 @@ def catalogue_prompt_hash(
     resolved values change for the given ``ctx``. Glossary edits
     and the cross-cube ``relations`` narrative also flow into the
     hash so editing them busts the cache."""
-    segments = render_catalogue_segments(
+    segments = render_catalog_segments(
         catalog,
         only_exposed=only_exposed,
         viewer=None,
@@ -603,7 +616,7 @@ def _render_cube(
 ) -> list[str]:
     # Beta cubes carry an annotation so the planner can deprioritise.
     # Deprecated cubes are filtered out of the prompt entirely by the
-    # caller (``render_catalogue_block``); they don't appear here.
+    # caller (``render_catalog_block``); they don't appear here.
     stability_tag = " `[beta]`" if cube.stability == "beta" else ""
     header = f"### {cube.name} ({cube.backend.value}){_human(cube.display_name)}{stability_tag}"
     out: list[str] = [header]
@@ -699,7 +712,7 @@ _RAW_TRIGGERS: tuple[str, ...] = (
     "Pivots (rows → columns).",
     "Cross-backend joins — Phase 1 compiler rejects these.",
     "Forecast / predictive shapes.",
-    "Columns the catalogue doesn't model.",
+    "Columns the catalog doesn't model.",
 )
 
 
@@ -717,7 +730,7 @@ all enforced for you.
 
 Fields:
 - `measures: list[str]` — qualified names like `orders.revenue`.
-  Aggregated automatically per the catalogue's `agg` field.
+  Aggregated automatically per the catalog's `agg` field.
 - `dimensions: list[str]` — qualified names. Form the GROUP BY when
   measures are present; form the SELECT when ungrouped.
 - `time_dimension: {dimension, granularity?, range, fill_nulls_with?}` —
@@ -748,15 +761,15 @@ _RAW_FALLBACK = _raw_triggers_block(
     "Prefer the semantic path. Fall back to raw SQL only when the "
     "question needs:"
 ) + (
-    "\n\nFalling back is fine — the catalogue earns share by being "
+    "\n\nFalling back is fine — the catalog earns share by being "
     "preferred where it works, not by being the only option."
 )
 
 
 _INTROSPECTION = """\
-## Introspecting the catalogue
+## Introspecting the catalog
 
-The catalogue is itself queryable through three META cubes:
+The catalog is itself queryable through three META cubes:
 - `catalog_cubes` — one row per cube (name, backend, exposed, alias).
 - `catalog_measures` — one row per (cube, measure).
 - `catalog_dimensions` — one row per (cube, dim or time_dim); `is_time`
@@ -813,21 +826,21 @@ def build_planner_prompt_fragment(
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
-    Returns a fragment that includes the spec contract, the catalogue
+    Returns a fragment that includes the spec contract, the catalog
     block, and the raw-fallback rule. Splice into your broader system
     prompt alongside role description, data-source context, etc.
 
-    ``viewer`` + ``policy`` (when set) shrink the catalogue block to
+    ``viewer`` + ``policy`` (when set) shrink the catalog block to
     only the cubes the viewer is authorised to see — keeps the planner
     from suggesting a query it can't run.
 
-    ``lookups`` + ``ctx`` inline dimension-value catalogues underneath
+    ``lookups`` + ``ctx`` inline dimension-value catalogs underneath
     their dimensions. Dynamic ``Lookup`` loaders fire here (the only
     I/O path in the prompt builder).
     """
     parts: list[str] = [
         _SPEC_CONTRACT,
-        render_catalogue_block(
+        render_catalog_block(
             catalog,
             only_exposed=only_exposed,
             viewer=viewer,
@@ -868,14 +881,14 @@ def build_planner_prompt_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-) -> CataloguePrompt:
+) -> CatalogPrompt:
     """Cacheable variant of :func:`build_planner_prompt_fragment`.
 
     Splits the planner fragment into a static and a per-viewer overlay
     segment so consumers can route them to two prompt-cache zones
     (Anthropic ``cache_control: ephemeral`` / Bedrock ``cachePoint``).
 
-    Static = spec contract + public-cube catalogue + views + raw-fallback
+    Static = spec contract + public-cube catalog + views + raw-fallback
     + optional introspection. Identical across viewers; safe to cache.
 
     Overlay = role-gated cubes the viewer is authorised to see (plus a
@@ -885,7 +898,7 @@ def build_planner_prompt_segments(
     so they live in the static segment. If view-level auth lands later
     this contract gains a per-viewer view block in the overlay.
     """
-    segments = render_catalogue_segments(
+    segments = render_catalog_segments(
         catalog,
         only_exposed=only_exposed,
         viewer=viewer,
@@ -910,7 +923,7 @@ def build_planner_prompt_segments(
     static = "\n\n".join(p for p in static_parts if p) + "\n"
 
     overlay = segments.overlay.rstrip() + "\n" if segments.overlay else ""
-    return CataloguePrompt(static=static, overlay=overlay)
+    return CatalogPrompt(static=static, overlay=overlay)
 
 
 _ROUTER_OUTPUT_SCHEMA = """\
@@ -929,7 +942,7 @@ Emit a `RouterDecision`:
 
 When `path = "semantic"`, list ONLY the cubes / views the next stage
 will need (most questions need 1-3). The downstream Query Generator
-sees a catalogue trimmed to your picks, so being precise here shrinks
+sees a catalog trimmed to your picks, so being precise here shrinks
 its prompt and sharpens its output.
 """
 
@@ -946,7 +959,7 @@ def build_router_prompt_fragment(
     """Fragment for the path-routing decision (semantic vs raw SQL).
 
     Optionally appends a one-liner per exposed cube so the router has a
-    sense of what's catalogue-expressible without the full measures tree.
+    sense of what's catalog-expressible without the full measures tree.
     When ``views`` is provided, a parallel one-liner list lets the
     router pick a curated facade instead of (or in addition to) the
     raw cubes.
@@ -957,8 +970,8 @@ def build_router_prompt_fragment(
     router_header = _raw_triggers_block(
         "## Path routing — semantic vs raw SQL\n\n"
         "Prefer the semantic path when the question maps cleanly to the "
-        "catalogue's measures, dimensions, and filters. Drop to raw SQL "
-        "only when the question needs SQL shapes the catalogue can't express:"
+        "catalog's measures, dimensions, and filters. Drop to raw SQL "
+        "only when the question needs SQL shapes the catalog can't express:"
     ) + (
         "\n\nIf you're unsure, try the semantic path first — the compiler's "
         "error message will tell you exactly which identifier is missing."
@@ -966,7 +979,7 @@ def build_router_prompt_fragment(
 
     parts: list[str] = [router_header]
     if include_topic_summary:
-        topics: list[str] = ["## Catalogue topics"]
+        topics: list[str] = ["## Catalog topics"]
         for cube in iter_cubes(
             catalog,
             include_meta=True,
@@ -1052,7 +1065,7 @@ def build_query_generator_prompt_fragment(
     ``QueryPlan`` (one or more ``QueryStep`` with typed intent).
 
     ``scope_to`` is the retrieval-pass parameter: when set, the
-    rendered catalogue includes only the named cubes (and any views
+    rendered catalog includes only the named cubes (and any views
     in the provided ``views`` dict whose name appears in ``scope_to``).
     Pair with the Router's ``cubes`` + ``views`` output to shrink the
     Generator's prompt to the surface that question actually needs.
@@ -1070,7 +1083,7 @@ def build_query_generator_prompt_fragment(
 
     parts: list[str] = [
         _SPEC_CONTRACT,
-        render_catalogue_block(
+        render_catalog_block(
             scoped_catalog,
             only_exposed=only_exposed,
             viewer=viewer,
@@ -1177,7 +1190,7 @@ Emit a `DrilldownSuggestions`:
 
 3-5 suggestions is the sweet spot. Each must be a runnable
 `SemanticQuery` against this cube (or its joined neighbours).
-Favour drills the catalogue's `drill_paths` already suggests, but
+Favour drills the catalog's `drill_paths` already suggests, but
 add cross-cube drills (via declared joins) when they'd be revealing."""
 
 
@@ -1213,7 +1226,7 @@ def build_drilldown_prompt_fragment(
         path_block = "\n".join(f"  - {' → '.join(path)}" for path in cube.drill_paths)
         parts.append(
             "## Declared drill paths\n"
-            "These hierarchies are catalogue-blessed; prefer suggestions "
+            "These hierarchies are catalog-blessed; prefer suggestions "
             "that walk them:\n" + path_block
         )
 
@@ -1237,5 +1250,5 @@ __all__ = [
     "build_presenter_prompt_fragment",
     "build_query_generator_prompt_fragment",
     "build_router_prompt_fragment",
-    "render_catalogue_block",
+    "render_catalog_block",
 ]

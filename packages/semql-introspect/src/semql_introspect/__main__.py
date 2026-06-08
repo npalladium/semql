@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="semql-introspect",
         description=(
-            "Generate a semql cube catalogue from a live database. "
+            "Generate a semql cube catalog from a live database. "
             "Reads Information Schema, applies heuristic measure / "
             "dimension inference, and emits Python."
         ),

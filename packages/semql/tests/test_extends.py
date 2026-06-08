@@ -7,7 +7,7 @@ Other cube-level settings (backend, table, alias, base_predicate,
 tenancy, joins) are not inherited — they're cube-specific.
 
 Inheritance is resolved once at ``Catalog`` construction. By the
-time the compiler sees the catalogue, each cube carries its full
+time the compiler sees the catalog, each cube carries its full
 merged field list.
 """
 

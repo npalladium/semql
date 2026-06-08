@@ -14,7 +14,7 @@ from semql.model import Backend
 from semql.prompt import (
     build_planner_prompt_fragment,
     build_router_prompt_fragment,
-    render_catalogue_block,
+    render_catalog_block,
 )
 
 
@@ -58,36 +58,36 @@ def _cat() -> dict[str, Cube]:
 
 
 def test_cube_display_name_surfaces_in_catalog_block() -> None:
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     assert "Customer Orders" in rendered
 
 
 def test_measure_display_name_surfaces() -> None:
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     assert "Total Revenue" in rendered
 
 
 def test_dimension_display_name_surfaces() -> None:
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     assert "Sales Region" in rendered
 
 
 def test_time_dimension_display_name_surfaces() -> None:
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     assert "Order Date" in rendered
 
 
 def test_identifier_still_primary_when_display_name_set() -> None:
     """The machine identifier must still appear — display_name is a
     suffix, not a replacement, so the LLM still knows what to reference."""
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     assert "`orders.revenue`" in rendered
     assert "`orders.region`" in rendered
 
 
 def test_field_without_display_name_renders_without_suffix() -> None:
     """No display_name → no `(human: ...)`-style noise on that line."""
-    rendered = render_catalogue_block(_cat())
+    rendered = render_catalog_block(_cat())
     # 'count' has no display_name — make sure that line stays clean.
     count_lines = [line for line in rendered.splitlines() if "`orders.count`" in line]
     assert count_lines, "expected to find the orders.count line"

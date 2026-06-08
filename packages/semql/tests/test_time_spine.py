@@ -10,7 +10,7 @@ Phase A scope:
   supported" error.
 
 The compiler wraps the inner aggregation in a CTE, builds a parallel
-spine CTE via ``BackendStrategy.emit_time_spine``, and the outer
+spine CTE via ``BackendDialect.emit_time_spine``, and the outer
 SELECT does ``spine LEFT JOIN agg`` with ``COALESCE(measure, fill)``
 per measure.
 """

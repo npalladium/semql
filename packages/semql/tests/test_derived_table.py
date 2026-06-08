@@ -21,7 +21,7 @@ from semql import (
     NamedCTE,
     SemanticQuery,
 )
-from semql.model import TableRef
+from semql.model import PhysicalTable
 
 # ---------------------------------------------------------------------------
 # Model: Cube.source / Cube.table shorthand consistency
@@ -30,7 +30,7 @@ from semql.model import TableRef
 
 def test_cube_table_shorthand_resolves_to_tableref() -> None:
     cube = Cube(name="c", backend=Backend.POSTGRES, table="schema.t", alias="c")
-    assert isinstance(cube.resolved_source, TableRef)
+    assert isinstance(cube.resolved_source, PhysicalTable)
     assert cube.resolved_source.table == "schema.t"
 
 
@@ -67,7 +67,7 @@ def test_cube_accepts_redundant_tableref_when_equal() -> None:
         name="c",
         backend=Backend.POSTGRES,
         table="schema.t",
-        source=TableRef(table="schema.t"),
+        source=PhysicalTable(table="schema.t"),
         alias="c",
     )
 
@@ -78,7 +78,7 @@ def test_cube_rejects_conflicting_table_and_tableref() -> None:
             name="c",
             backend=Backend.POSTGRES,
             table="foo",
-            source=TableRef(table="bar"),
+            source=PhysicalTable(table="bar"),
             alias="c",
         )
 

@@ -2,11 +2,11 @@
 # sqlglot's ``Expression`` and friends live in ``sqlglot.expressions``
 # but aren't re-exported via ``__all__``. They're public by convention
 # and by sqlglot's own type stubs.
-"""Per-backend strategy objects — the dialect-specific seam.
+"""Per-backend dialect objects — the dialect-specific seam.
 
 The compiler stays dialect-agnostic for the parts it can: identifier
 resolution, join graph BFS, GROUP BY composition, parameter-name
-allocation, ordering. The strategy owns the rest, and emits sqlglot
+allocation, ordering. The dialect owns the rest, and emits sqlglot
 AST nodes (not strings):
 
 - ``placeholder(name, dim_type)`` — bound-param node
@@ -34,9 +34,10 @@ import sqlglot
 from sqlglot import TokenType as _TT
 from sqlglot import exp
 
-from semql.dialect import dialect_for, placeholder_for
+from semql.dialect import dialect_for as sqlglot_dialect_for
+from semql.dialect import placeholder_for
 from semql.introspect import build_meta_values
-from semql.model import Backend, Cube, DerivedTable, TableRef
+from semql.model import Backend, Cube, DerivedTable, PhysicalTable
 
 ParamBinder = Callable[[Any, str], exp.Placeholder]
 """Bind ``(value, dim_type)`` and return an ``exp.Placeholder`` node for it."""
@@ -46,8 +47,8 @@ SqlResolver = Callable[[str], str]
 
 
 @runtime_checkable
-class BackendStrategy(Protocol):
-    """Structural contract every backend strategy honours.
+class BackendDialect(Protocol):
+    """Structural contract every backend dialect honours.
 
     Strategies are stateless and pure: each method returns a sqlglot
     AST node (and, in ``emit_contains``, may invoke ``bind`` to
@@ -121,7 +122,7 @@ def _aliased_source(cube: Cube, resolve_sql: SqlResolver) -> exp.Expression:
     return _aliased_table(cube, src, resolve_sql)
 
 
-def _aliased_table(cube: Cube, src: TableRef, resolve_sql: SqlResolver) -> exp.Table:
+def _aliased_table(cube: Cube, src: PhysicalTable, resolve_sql: SqlResolver) -> exp.Table:
     """Build a ``Table`` AST node for ``cube`` with its alias attached."""
     resolved = resolve_sql(src.table)
     # Build the Table node manually rather than via exp.to_table() so that
@@ -144,7 +145,7 @@ def _aliased_derived(cube: Cube, src: DerivedTable, resolve_sql: SqlResolver) ->
     the cube's own dialect so backend-specific shapes (ClickHouse ARRAY
     JOIN, BigQuery UNNEST, etc.) survive the round-trip."""
     resolved = resolve_sql(src.sql)
-    parsed = sqlglot.parse_one(resolved, dialect=dialect_for(cube.backend))
+    parsed = sqlglot.parse_one(resolved, dialect=sqlglot_dialect_for(cube.backend))
     if not isinstance(parsed, exp.Subquery):
         parsed = exp.Subquery(this=parsed)
     parsed.set("alias", exp.TableAlias(this=exp.to_identifier(cube.alias)))
@@ -152,7 +153,7 @@ def _aliased_derived(cube: Cube, src: DerivedTable, resolve_sql: SqlResolver) ->
 
 
 def _meta_subquery(cube: Cube, catalog: dict[str, Cube]) -> exp.Subquery:
-    """Build a ``Subquery`` AST node over the catalogue snapshot for ``cube``."""
+    """Build a ``Subquery`` AST node over the catalog snapshot for ``cube``."""
     body = build_meta_values(cube.name, catalog)
     sub = sqlglot.parse_one(body, dialect="postgres")
     if not isinstance(sub, exp.Subquery):
@@ -161,7 +162,7 @@ def _meta_subquery(cube: Cube, catalog: dict[str, Cube]) -> exp.Subquery:
     return sub
 
 
-class _StdSqlStrategy:
+class _StdSqlDialect:
     """Shared base for backends whose dialect is handled correctly by
     sqlglot's stock renderer — Postgres, DuckDB, BigQuery, Snowflake.
 
@@ -232,13 +233,13 @@ class _StdSqlStrategy:
         return inner
 
 
-class PostgresStrategy(_StdSqlStrategy):
+class PostgresDialect(_StdSqlDialect):
     """Postgres convention. Placeholders render as ``%(name)s``."""
 
     backend = Backend.POSTGRES
 
 
-class DuckDBStrategy(_StdSqlStrategy):
+class DuckDBDialect(_StdSqlDialect):
     """DuckDB convention. Placeholders render as ``$name`` (the canonical
     DuckDB named-parameter syntax). Otherwise identical to Postgres —
     DuckDB shares ``ILIKE``, ``date_trunc``, and the aliased-table FROM
@@ -247,7 +248,7 @@ class DuckDBStrategy(_StdSqlStrategy):
     backend = Backend.DUCKDB
 
 
-class BigQueryStrategy(_StdSqlStrategy):
+class BigQueryDialect(_StdSqlDialect):
     """BigQuery convention. Placeholders render as ``@name``. sqlglot
     transpiles the ``ILIKE`` AST to ``LOWER(...) LIKE LOWER(...)`` on
     emit, so case-insensitive contains still works against a column."""
@@ -304,7 +305,7 @@ class BigQueryStrategy(_StdSqlStrategy):
         return inner
 
 
-class SnowflakeStrategy(_StdSqlStrategy):
+class SnowflakeDialect(_StdSqlDialect):
     """Snowflake convention. Placeholders render as ``:name``. ``ILIKE``
     and ``date_trunc`` are native to Snowflake — no transpilation needed."""
 
@@ -356,7 +357,7 @@ class SnowflakeStrategy(_StdSqlStrategy):
         return inner
 
 
-class ClickHouseStrategy:
+class ClickHouseDialect:
     """ClickHouse convention. Placeholders are typed (``{name:Type}``);
     truncation uses the ``toStartOf<Hour|Day|Week|Month>`` family;
     ``contains`` passes the raw substring and emits
@@ -431,7 +432,7 @@ class ClickHouseStrategy:
         return inner
 
 
-class MetaStrategy:
+class MetaDialect:
     """Reflection cubes — materialised as a ``VALUES`` subquery at compile
     time. Inherits Postgres parameter and truncation conventions for the
     (rare) cases the compiler emits one against a META cube."""
@@ -451,7 +452,7 @@ class MetaStrategy:
         # META cubes are caller-constructed VALUES tables and don't
         # carry numeric measures in practice — but satisfy the protocol
         # with the ANSI shape so a percentile measure on a META cube
-        # doesn't crash the strategy lookup.
+        # doesn't crash the dialect lookup.
         return exp.WithinGroup(
             this=exp.Anonymous(this="PERCENTILE_CONT", expressions=[exp.Literal.number(q)]),
             expression=exp.Order(expressions=[exp.Ordered(this=expr)]),
@@ -484,33 +485,33 @@ class MetaStrategy:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULTS: dict[Backend, BackendStrategy] = {
-    Backend.POSTGRES: PostgresStrategy(),
-    Backend.CLICKHOUSE: ClickHouseStrategy(),
-    Backend.META: MetaStrategy(),
-    Backend.DUCKDB: DuckDBStrategy(),
-    Backend.BIGQUERY: BigQueryStrategy(),
-    Backend.SNOWFLAKE: SnowflakeStrategy(),
+_DEFAULTS: dict[Backend, BackendDialect] = {
+    Backend.POSTGRES: PostgresDialect(),
+    Backend.CLICKHOUSE: ClickHouseDialect(),
+    Backend.META: MetaDialect(),
+    Backend.DUCKDB: DuckDBDialect(),
+    Backend.BIGQUERY: BigQueryDialect(),
+    Backend.SNOWFLAKE: SnowflakeDialect(),
 }
 
 
-def strategy_for(
+def dialect_for(
     backend: Backend,
-    overrides: dict[Backend, BackendStrategy] | None = None,
-) -> BackendStrategy:
-    """Look up the strategy for ``backend``, honouring ``overrides``.
+    overrides: dict[Backend, BackendDialect] | None = None,
+) -> BackendDialect:
+    """Look up the dialect for ``backend``, honouring ``overrides``.
 
     Callers (tests, downstream packages) can pass ``overrides`` to
-    swap in a different strategy without touching the global registry —
-    e.g. a ``RecordingStrategy`` for delegation tests, or a custom
-    ``SnowflakeStrategy`` shipped from outside this repo.
+    swap in a different dialect without touching the global registry —
+    e.g. a ``RecordingDialect`` for delegation tests, or a custom
+    ``SnowflakeDialect`` shipped from outside this repo.
     """
     if overrides is not None and backend in overrides:
         return overrides[backend]
     if backend in _DEFAULTS:
         return _DEFAULTS[backend]
     raise KeyError(
-        f"No registered BackendStrategy for {backend!r}. "
+        f"No registered BackendDialect for {backend!r}. "
         "Pass one via the `strategies` kwarg on compile_query."
     )
 
@@ -524,22 +525,22 @@ def render(node: exp.Expression, backend: Backend) -> str:
     production code that consumes our SQL both expect the lowercase
     form."""
     return node.sql(
-        dialect=dialect_for(backend),
+        dialect=sqlglot_dialect_for(backend),
         pretty=False,
         normalize_functions=False,
     )
 
 
 __all__ = [
-    "BackendStrategy",
-    "BigQueryStrategy",
-    "ClickHouseStrategy",
-    "DuckDBStrategy",
-    "MetaStrategy",
+    "BackendDialect",
+    "BigQueryDialect",
+    "ClickHouseDialect",
+    "DuckDBDialect",
+    "MetaDialect",
     "ParamBinder",
-    "PostgresStrategy",
-    "SnowflakeStrategy",
+    "PostgresDialect",
+    "SnowflakeDialect",
     "SqlResolver",
     "render",
-    "strategy_for",
+    "dialect_for",
 ]

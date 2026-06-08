@@ -182,14 +182,14 @@ def stage_router() -> RouterDecision:
     print(textwrap.indent(head.rstrip(), "  "))
     print("  ... [output schema follows]")
 
-    section("Catalogue surface visible to this viewer")
+    section("Catalog surface visible to this viewer")
     for c in iter_cubes(CATALOG, viewer=VIEWER):
         print(f"  - {c.name} ({c.backend.value})")
     print("\n  (finance_ledger is hidden — viewer lacks 'finance' role)")
 
     section("Stubbed LLM output (what pydantic-ai would parse)")
     decision = RouterDecision(
-        path="semantic",
+        route_to="semantic",
         cubes=["orders"],
         views=["revenue_overview"],
         reasoning="Revenue-by-time question maps cleanly to the orders cube.",
@@ -358,7 +358,7 @@ def stage_drilldown() -> DrilldownSuggestions:
                         range=("2026-03-01", "2026-04-01"),
                     ),
                 ),
-                rationale="Catalogue declares region→status drill_path; region first.",
+                rationale="Catalog declares region→status drill_path; region first.",
             ),
             DrilldownSuggestion(
                 label="Top 10 orders in March",

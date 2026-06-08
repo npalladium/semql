@@ -1,12 +1,12 @@
-"""Catalogue introspection — two complementary surfaces.
+"""Catalog introspection — two complementary surfaces.
 
-**SQL surface** (``META_CUBES`` and friends): the catalogue itself as
+**SQL surface** (``META_CUBES`` and friends): the catalog itself as
 queryable ``Backend.META`` cubes. ``_emit_cube_source`` in ``compile.py``
 materialises these as ``VALUES`` literals so a planner can ask
 "which measures are seconds-typed?" via an ordinary ``SemanticQuery``.
 
 **Python surface** (``iter_cubes``, ``iter_fields``, ``iter_joins``,
-``resolve_field``): walk the catalogue from Python. Every downstream
+``resolve_field``): walk the catalog from Python. Every downstream
 tool (prompt rendering, MCP exposure, ER diagrams, live-DB validation)
 needs to filter META cubes, honour ``expose_in_prompt``, and iterate
 fields/joins. These primitives centralise the patterns so consumers
@@ -76,7 +76,7 @@ def _rows_to_values(rows: Iterable[tuple[str, ...]], columns: list[str]) -> str:
 
 
 def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
-    """Materialise the catalogue snapshot as a VALUES subquery for the
+    """Materialise the catalog snapshot as a VALUES subquery for the
     given META cube. Called from `compile._emit_cube_source`."""
     if cube_name == "catalog_cubes":
         rows = [
@@ -162,7 +162,7 @@ CATALOG_CUBES = Cube(
         Dimension(name="description", sql="{cc}.description", type="string"),
         Dimension(name="alias", sql="{cc}.alias", type="string"),
     ],
-    description="One row per cube in the catalogue.",
+    description="One row per cube in the catalog.",
 )
 
 CATALOG_MEASURES = Cube(
@@ -208,7 +208,7 @@ META_CUBES: list[Cube] = [CATALOG_CUBES, CATALOG_MEASURES, CATALOG_DIMENSIONS]
 
 
 # ---------------------------------------------------------------------------
-# Python introspection — iterate over a catalogue's shape
+# Python introspection — iterate over a catalog's shape
 # ---------------------------------------------------------------------------
 
 
@@ -254,7 +254,7 @@ def iter_cubes(
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
 ) -> Iterator[Cube]:
-    """Yield cubes from a catalogue with consistent filtering.
+    """Yield cubes from a catalog with consistent filtering.
 
     ``include_meta=False`` (default) skips ``Backend.META`` reflection
     cubes — the right default for any tool that walks real database
@@ -284,7 +284,7 @@ def iter_fields(cube: Cube) -> Iterator[BaseField]:
     """Yield every addressable field on a cube, in declaration order.
 
     Order: measures, dimensions, time_dimensions, segments — the same
-    grouping the catalogue uses in its rendering and validation paths.
+    grouping the catalog uses in its rendering and validation paths.
     ``isinstance(f, Measure)`` etc. still narrows because ``BaseField``
     is a structural supertype, not a discriminator."""
     yield from cube.measures

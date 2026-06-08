@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from semql.compile import MAX_UNGROUPED_ROWS, Compiled, CompileError, compile_query
+from semql.compile import MAX_UNGROUPED_ROWS, CompiledQuery, CompileError, compile_query
 from semql.introspect import quote_literal
 from semql.model import Backend, Cube, Measure
 from semql.prompt import (
     build_planner_prompt_fragment,
     build_router_prompt_fragment,
-    render_catalogue_block,
+    render_catalog_block,
 )
 from semql.spec import CompareWindow, Filter, SemanticQuery, TimeWindow
 from semql.visualize import (
@@ -28,11 +28,11 @@ from semql.visualize import (
 from .conftest import CONTEXT
 
 # ---------------------------------------------------------------------------
-# Catalogue invariants
+# Catalog invariants
 # ---------------------------------------------------------------------------
 
 
-def test_catalogue_has_expected_cubes(catalog: dict[str, Cube]) -> None:
+def test_catalog_has_expected_cubes(catalog: dict[str, Cube]) -> None:
     assert {"orders", "customers", "products", "sessions", "restricted"}.issubset(catalog.keys())
 
 
@@ -44,16 +44,16 @@ def test_some_cubes_hidden_from_prompt(catalog: dict[str, Cube]) -> None:
     assert "products" in hidden_names
 
 
-def test_render_catalogue_block_shows_exposed_only(catalog: dict[str, Cube]) -> None:
-    rendered = render_catalogue_block(catalog)
+def test_render_catalog_block_shows_exposed_only(catalog: dict[str, Cube]) -> None:
+    rendered = render_catalog_block(catalog)
     assert "### orders" in rendered
     assert "### sessions" in rendered
     assert "### customers" not in rendered
     assert "### products" not in rendered
 
 
-def test_render_catalogue_block_full_includes_all(catalog: dict[str, Cube]) -> None:
-    rendered = render_catalogue_block(catalog, only_exposed=False)
+def test_render_catalog_block_full_includes_all(catalog: dict[str, Cube]) -> None:
+    rendered = render_catalog_block(catalog, only_exposed=False)
     assert "### customers" in rendered
     assert "### products" in rendered
     assert "### restricted" in rendered
@@ -547,7 +547,7 @@ def test_meta_cube_count_aggregates(catalog: dict[str, Cube]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_planner_fragment_contains_spec_and_catalogue(catalog: dict[str, Cube]) -> None:
+def test_planner_fragment_contains_spec_and_catalog(catalog: dict[str, Cube]) -> None:
     fragment = build_planner_prompt_fragment(catalog)
     assert "SemanticQuery" in fragment
     assert "### orders" in fragment
@@ -577,7 +577,7 @@ def test_router_fragment_lists_topics(catalog: dict[str, Cube]) -> None:
 
 def test_router_fragment_can_omit_topics(catalog: dict[str, Cube]) -> None:
     fragment = build_router_prompt_fragment(catalog, include_topic_summary=False)
-    assert "Catalogue topics" not in fragment
+    assert "Catalog topics" not in fragment
     assert "`orders`" not in fragment
     assert "semantic" in fragment  # routing criteria still present
 
@@ -591,7 +591,7 @@ def _compile_and_decide(
     q: SemanticQuery,
     catalog: dict[str, Cube],
     n_rows: int = 1,
-) -> tuple[Compiled, VizDecision]:
+) -> tuple[CompiledQuery, VizDecision]:
     out = compile_query(q, catalog, context=CONTEXT)
     viz = decide_visualization(q, out, n_rows=n_rows, catalog=catalog)
     return out, viz
@@ -772,7 +772,7 @@ def test_order_by_unknown_cube_field_rejected(catalog: dict[str, Cube]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Compiled.column_meta — per-output-column type + presentation metadata
+# CompiledQuery.column_meta — per-output-column type + presentation metadata
 # ---------------------------------------------------------------------------
 
 
@@ -794,8 +794,8 @@ def test_column_meta_classifies_measure_vs_dimension(catalog: dict[str, Cube]) -
 
 
 def test_column_meta_propagates_measure_unit(catalog: dict[str, Cube]) -> None:
-    """Whatever ``unit`` the catalogue's Measure declared rides through
-    to ``column_meta`` — no re-resolution against the catalogue needed."""
+    """Whatever ``unit`` the catalog's Measure declared rides through
+    to ``column_meta`` — no re-resolution against the catalog needed."""
     q = SemanticQuery(measures=["sessions.duration"], dimensions=["sessions.app_name"])
     out = compile_query(q, catalog, context=CONTEXT)
     dur = next(m for m in out.column_meta if m.name == "duration")

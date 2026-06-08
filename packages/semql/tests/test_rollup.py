@@ -11,7 +11,7 @@ all referenced dims / measures stored, every filter touches only
 stored columns, no joins / segments / compare windows. When multiple
 rollups fit, the one with the fewest stored dimensions wins (smallest
 table = fastest read). The applied rollup name is surfaced on
-``Compiled.applied_rollup`` for observability.
+``CompiledQuery.applied_rollup`` for observability.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # semql-validate-db
 
-Pre-deploy drift checker for [`semql`](../semql) catalogues. Runs cheap
+Pre-deploy drift checker for [`semql`](../semql) catalogs. Runs cheap
 probe queries against a live database and surfaces the class of bugs
 the compiler can't see — missing tables, dropped columns, broken join
 predicates, base-predicate drift.

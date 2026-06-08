@@ -4,7 +4,7 @@
 # but are public by convention and by sqlglot's type stubs.
 """Pure compiler from `SemanticQuery` to backend SQL.
 
-The compiler has no I/O. It reads the catalogue, resolves identifiers,
+The compiler has no I/O. It reads the catalog, resolves identifiers,
 emits a parameterised SQL string + params dict + output column list,
 and raises ``CompileError`` (or a more specific leaf) on unknown
 references, unreachable joins, or unsupported shapes.
@@ -12,9 +12,9 @@ references, unreachable joins, or unsupported shapes.
 The body composes a sqlglot ``exp.Select`` AST and renders it via the
 target backend's dialect. Per-cube fragments (dim SQL, measure SQL,
 ``base_predicate``, ``Join.on``) are parsed by sqlglot under the
-catalogue cube's declared backend; dialect-specific shapes
+catalog cube's declared backend; dialect-specific shapes
 (``placeholder``, ``trunc``, ``contains``, ``emit_source``) come from
-the ``BackendStrategy`` and slot into the AST as nodes.
+the ``BackendDialect`` and slot into the AST as nodes.
 
 Scope (Phase 1):
 - Single-backend queries (cross-backend rejected).
@@ -46,11 +46,11 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from semql._resolve import resolve_field as _resolve_field_raw
-from semql.backend import BackendStrategy, strategy_for
+from semql.backend import BackendDialect, dialect_for
 
 # Importing from semql.dialect also registers the ClickHouse placeholder
 # override against the ``clickhouse`` dialect name (side effect on import).
-from semql.dialect import dialect_for
+from semql.dialect import dialect_for as sqlglot_dialect_for
 from semql.errors import (
     CompileError,
     CrossBackendError,
@@ -89,16 +89,16 @@ ColumnKind = Literal["measure", "dimension", "time", "computed"]
 class ColumnMeta:
     """Per-output-column type + presentation metadata.
 
-    Sits on :class:`Compiled` in the same order as ``columns`` so a
+    Sits on :class:`CompiledQuery` in the same order as ``columns`` so a
     consumer (dashboard, MCP server, presenter LLM) can render a result
-    row without re-resolving against the catalogue. ``kind`` tags the
+    row without re-resolving against the catalog. ``kind`` tags the
     column's role; ``unit`` / ``display_unit`` / ``format`` mirror the
     fields on ``Measure`` / ``Dimension``; ``display_name`` carries the
     human-friendly label (catalog ``display_name`` or a humanised
     fallback) so visualisers don't need to call ``humanize`` themselves.
 
     ``computed`` covers compare-mode derivatives (``foo_delta``,
-    ``foo_pct_change``) — values the catalogue doesn't directly name
+    ``foo_pct_change``) — values the catalog doesn't directly name
     but the compiler emits. Their ``format`` is set inline (e.g.
     ``"percent"`` for pct_change) so renderers don't need to guess.
     """
@@ -112,7 +112,7 @@ class ColumnMeta:
 
 
 @dataclass
-class Compiled:
+class CompiledQuery:
     backend: Backend
     sql: str
     params: dict[str, Any]
@@ -120,11 +120,11 @@ class Compiled:
     column_meta: list[ColumnMeta] = dc_field(default_factory=lambda: [])
     # Names of every cube the query touched, in first-mention order.
     # Lets downstream tools (visualiser, MCP envelope) avoid re-running
-    # the resolver against the catalogue for cube-level facts.
+    # the resolver against the catalog for cube-level facts.
     touched_cube_names: list[str] = dc_field(default_factory=lambda: [])
     # Resolved SQL of every ``DerivedTable`` source the query touched,
     # in first-mention order matching ``touched_cube_names``. Surfaces
-    # the *second* place raw SQL legitimately enters the catalogue
+    # the *second* place raw SQL legitimately enters the catalog
     # (the first is the outer ``sql``) so callers running
     # :func:`semql.safe.is_safe_select` or dialect snapshots see every
     # raw fragment, not just the compiler-generated SELECT. Plain-table
@@ -196,7 +196,7 @@ def _apply_with_clause(
     UNNEST) survive the round-trip. No-op when ``ctes`` is empty."""
     if not ctes:
         return select_node
-    dialect = dialect_for(backend)
+    dialect = sqlglot_dialect_for(backend)
     out: exp.Select = select_node
     for name, body_sql in ctes:
         out = out.with_(name, as_=body_sql, dialect=dialect)
@@ -366,7 +366,7 @@ def _find_join_path(
                     break
     raise JoinPathError(
         f"No join path from cube {root!r} to {target!r}. "
-        "Declare a Join in the catalogue or restructure the query.",
+        "Declare a Join in the catalog or restructure the query.",
         root_cube=root,
         target_cube=target,
     )
@@ -406,7 +406,7 @@ def _resolve_sql(
         name = m.group(1)
         if name not in lookup:
             raise PlaceholderError(
-                f"Unknown placeholder {{{name}}} in catalogue SQL. Known: {sorted(lookup)}.",
+                f"Unknown placeholder {{{name}}} in catalog SQL. Known: {sorted(lookup)}.",
                 placeholder=name,
                 known=sorted(lookup),
             )
@@ -421,7 +421,7 @@ def _resolve_sql(
 
 
 # Percentile aggregation literals → continuous quantile values for the
-# strategy's ``emit_percentile`` hook. ``median`` is the q=0.5 case;
+# dialect's ``emit_percentile`` hook. ``median`` is the q=0.5 case;
 # the p75 / p90 / p95 covers the long-tail diagnostic shape.
 _PERCENTILE_AGGS: dict[str, float] = {
     "median": 0.5,
@@ -549,12 +549,12 @@ def _filter_node(
     f: Filter,
     field: exp.Expression,
     field_type: str,
-    strategy: BackendStrategy,
+    dialect: BackendDialect,
     bind: Callable[[Any, str], exp.Placeholder],
 ) -> exp.Expression:
     """Build a predicate node for a Filter.
 
-    Dialect-specific shapes (``contains``) go through the strategy. Type
+    Dialect-specific shapes (``contains``) go through the dialect. Type
     checks raise ``FilterTypeError`` with structured attrs."""
     op = f.op
     if op == "is_null":
@@ -573,7 +573,7 @@ def _filter_node(
         ) from exc
 
     if op == "contains":
-        return strategy.emit_contains(field, str(f.values[0]), bind)
+        return dialect.emit_contains(field, str(f.values[0]), bind)
 
     placeholders: list[exp.Placeholder] = [bind(v, field_type) for v in f.values]
 
@@ -620,16 +620,16 @@ def _compile_where_tree(
 
 
 def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
-    """Parse a catalogue SQL fragment into a sqlglot AST node.
+    """Parse a catalog SQL fragment into a sqlglot AST node.
 
     Used for dim/measure/time-dimension expressions, ``Join.on``, and
     ``base_predicate``. Any parse failure surfaces as a ``CompileError``
-    naming the offending fragment so the catalogue author can fix it."""
+    naming the offending fragment so the catalog author can fix it."""
     try:
         return sqlglot.parse_one(sql, dialect=dialect)  # type: ignore[return-value]
     except ParseError as exc:
         raise CompileError(
-            f"Could not parse catalogue SQL fragment {sql!r} under dialect {dialect!r}: {exc}"
+            f"Could not parse catalog SQL fragment {sql!r} under dialect {dialect!r}: {exc}"
         ) from exc
 
 
@@ -925,7 +925,7 @@ class _CompileEnv:
         context: dict[str, str] | None,
         group_by_alias: bool,
         having_alias: bool,
-        strategies: dict[Backend, BackendStrategy] | None,
+        dialects: dict[Backend, BackendDialect] | None,
         views: dict[str, View] | None,
         viewer: AuthContext | None,
         policy: PolicyFn | None,
@@ -938,7 +938,7 @@ class _CompileEnv:
         # covers the query, we rewrite the catalog dict to point the
         # touched cube at the rollup's physical_table; every downstream
         # stage then compiles against the rollup transparently. The
-        # picked name is surfaced on ``Compiled.applied_rollup``.
+        # picked name is surfaced on ``CompiledQuery.applied_rollup``.
         self.applied_rollup: str | None = None
         picked = pick_rollup(q, catalog)
         if picked is not None:
@@ -950,7 +950,7 @@ class _CompileEnv:
         self.catalog = catalog
         self.group_by_alias = group_by_alias
         self.having_alias = having_alias
-        self.strategies = strategies
+        self.dialects = dialects
         self.viewer = viewer
         self.policy = policy
         self.scope_fns = scope_fns
@@ -1014,8 +1014,8 @@ class _CompileEnv:
         self.root = self.cubes_in_from[0]
 
         self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
-        self.strategy = strategy_for(self.backend, strategies)
-        self.dialect = dialect_for(self.backend)
+        self.dialect = dialect_for(self.backend, dialects)
+        self.sqlglot_dialect = sqlglot_dialect_for(self.backend)
 
         # Param binder state. Memoise ``(value, dim_type) → placeholder``
         # so a filter value referenced in both compare-mode CTEs binds
@@ -1060,11 +1060,11 @@ class _CompileEnv:
         """Allocate (or reuse) a parameter placeholder for ``value``."""
         key = (value, dim_type)
         if key in self._binds:
-            return self.strategy.placeholder(self._binds[key], dim_type)
+            return self.dialect.placeholder(self._binds[key], dim_type)
         name = f"p{len(self.params)}"
         self.params[name] = value
         self._binds[key] = name
-        return self.strategy.placeholder(name, dim_type)
+        return self.dialect.placeholder(name, dim_type)
 
     def resolve_in_ctx(self, sql: str) -> str:
         """Apply ``{alias}`` / ``{ctx.X}`` substitution to a raw SQL fragment."""
@@ -1072,7 +1072,7 @@ class _CompileEnv:
 
     def parse(self, sql: str) -> exp.Expression:
         """Resolve + parse a SQL fragment in the env's dialect."""
-        return _parse_fragment(self.resolve_in_ctx(sql), self.dialect)
+        return _parse_fragment(self.resolve_in_ctx(sql), self.sqlglot_dialect)
 
     def _resolve_security_sql(self, cube: Cube, raw: str) -> str:
         """Substitute ``{alias}`` and ``{ctx.X}`` in a ``security_sql``
@@ -1089,7 +1089,7 @@ class _CompileEnv:
                     "compile context."
                 )
             return self.bind(self.ctx[key], "string").sql(
-                dialect=self.dialect, normalize_functions=False
+                dialect=self.sqlglot_dialect, normalize_functions=False
             )
 
         return _CTX_PLACEHOLDER_RE.sub(_ctx_repl, resolved)
@@ -1119,7 +1119,7 @@ class _CompileEnv:
 
         if cube.security_sql:
             resolved_sql = self._resolve_security_sql(cube, cube.security_sql)
-            predicates.append(_parse_fragment(resolved_sql, self.dialect))
+            predicates.append(_parse_fragment(resolved_sql, self.sqlglot_dialect))
 
         # ScopeFn-injected row-level predicate. Only fires when both
         # ``viewer`` and ``cube.scope`` are set and a function is
@@ -1137,7 +1137,9 @@ class _CompileEnv:
                             f"the resolution context: {missing}."
                         )
                     predicates.append(
-                        _parse_fragment(self._resolve_security_sql(cube, pred.sql), self.dialect)
+                        _parse_fragment(
+                            self._resolve_security_sql(cube, pred.sql), self.sqlglot_dialect
+                        )
                     )
 
         if not predicates:
@@ -1202,14 +1204,14 @@ class _CompileEnv:
         else:
             inner = self.parse(m.sql)
 
-        # Percentile family routes through the strategy because the
+        # Percentile family routes through the dialect because the
         # SQL shape varies per dialect (PERCENTILE_CONT WITHIN GROUP
         # on PG/DuckDB/Snowflake; APPROX_QUANTILES[OFFSET] on BigQuery;
         # quantile(q)(expr) on ClickHouse). Plain aggs use the
         # dialect-agnostic exp.Sum / Count / etc. nodes via _agg_node.
         if m.agg in _PERCENTILE_AGGS:
             q_val = _PERCENTILE_AGGS[m.agg]
-            agg: exp.Expression = self.strategy.emit_percentile(q_val, inner)
+            agg: exp.Expression = self.dialect.emit_percentile(q_val, inner)
         else:
             agg = _agg_node(m, inner)
         if m.filter:
@@ -1248,13 +1250,13 @@ class _CompileEnv:
         sel = sel.from_(
             self.wrap_for_tenancy(
                 self.root,
-                self.strategy.emit_source(self.root, self.catalog, self.resolve_in_ctx),
+                self.dialect.emit_source(self.root, self.catalog, self.resolve_in_ctx),
             )
         )
         for _, tgt, j in self.join_edges:
-            tgt_strategy = strategy_for(tgt.backend, self.strategies)
+            tgt_dialect = dialect_for(tgt.backend, self.dialects)
             target_source = self.wrap_for_tenancy(
-                tgt, tgt_strategy.emit_source(tgt, self.catalog, self.resolve_in_ctx)
+                tgt, tgt_dialect.emit_source(tgt, self.catalog, self.resolve_in_ctx)
             )
             sel = sel.join(target_source, on=self.parse(j.on), join_type="left")
         return sel
@@ -1272,7 +1274,7 @@ class _CompileEnv:
             granularity = q.time_dimension.granularity
             assert granularity is not None
             assert self.time_col_name is not None
-            trunc_node = self.strategy.trunc(granularity, self.parse(self.time_dim.sql))
+            trunc_node = self.dialect.trunc(granularity, self.parse(self.time_dim.sql))
             sel = sel.select(exp.alias_(trunc_node, self.time_col_name))
 
         for (cube_owner, m), col_name in zip(
@@ -1346,7 +1348,7 @@ class _CompileEnv:
             fld_type = "time"
         else:
             fld_type = "string"
-        return _filter_node(f, fld_node, fld_type, self.strategy, self.bind)
+        return _filter_node(f, fld_node, fld_type, self.dialect, self.bind)
 
     def _group_by_stage(self, sel: exp.Select) -> exp.Select:
         """Emit GROUP BY when the query has measures and isn't
@@ -1372,10 +1374,10 @@ class _CompileEnv:
             if self.group_by_alias:
                 sel = sel.group_by(exp.column(self.time_col_name))
             else:
-                sel = sel.group_by(self.strategy.trunc(granularity, self.parse(self.time_dim.sql)))
+                sel = sel.group_by(self.dialect.trunc(granularity, self.parse(self.time_dim.sql)))
         return sel
 
-    def emit(self) -> Compiled:
+    def emit(self) -> CompiledQuery:
         """Dispatch to the compare or non-compare emission helper."""
         if self.q.compare is not None:
             return _emit_compare_query(self)
@@ -1435,7 +1437,7 @@ def _resolve_compare_outer_ref(
     )
 
 
-def _emit_compare_query(env: _CompileEnv) -> Compiled:
+def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
     """Compose the current/prior FULL OUTER JOIN compare-mode output.
 
     Two CTEs (``current`` / ``prior``) wrap the same inner select with
@@ -1588,7 +1590,7 @@ def _emit_compare_query(env: _CompileEnv) -> Compiled:
         col = _resolve_compare_outer_ref(
             hf.dimension, outer_columns, measure_col_names, what="HAVING"
         )
-        outer = outer.having(_filter_node(hf, exp.column(col), "number", env.strategy, env.bind))
+        outer = outer.having(_filter_node(hf, exp.column(col), "number", env.dialect, env.bind))
 
     if q.limit is not None:
         outer = outer.limit(int(q.limit))
@@ -1598,7 +1600,7 @@ def _emit_compare_query(env: _CompileEnv) -> Compiled:
     outer = _apply_with_clause(
         outer, _collect_hoisted_ctes(env.touched, env.resolve_in_ctx), env.backend
     )
-    sql = outer.sql(dialect=env.dialect, pretty=False, normalize_functions=False)
+    sql = outer.sql(dialect=env.sqlglot_dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
         outer_columns,
         env.dim_fields,
@@ -1609,7 +1611,7 @@ def _emit_compare_query(env: _CompileEnv) -> Compiled:
         time_col_name,
         is_compare=True,
     )
-    return Compiled(
+    return CompiledQuery(
         backend=env.backend,
         sql=sql,
         params=env.params,
@@ -1621,7 +1623,7 @@ def _emit_compare_query(env: _CompileEnv) -> Compiled:
     )
 
 
-def _emit_simple_query(env: _CompileEnv) -> Compiled:
+def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     """Compose the single-SELECT (non-compare) output.
 
     Builds the inner aggregating SELECT via ``env.build_inner``,
@@ -1687,7 +1689,7 @@ def _emit_simple_query(env: _CompileEnv) -> Compiled:
         else:
             target_node = measure_alias_map[lookup_name].copy()
         select_node = select_node.having(
-            _filter_node(hf, target_node, "number", env.strategy, env.bind)
+            _filter_node(hf, target_node, "number", env.dialect, env.bind)
         )
 
     # Time spine — wrap the aggregation in a CTE and LEFT JOIN a
@@ -1724,7 +1726,7 @@ def _emit_simple_query(env: _CompileEnv) -> Compiled:
         assert granularity_val is not None
         start_ph = env.bind(time_range_for_query[0], "time")
         end_ph = env.bind(time_range_for_query[1], "time")
-        spine_inner = env.strategy.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
+        spine_inner = env.dialect.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
 
         outer = exp.Select()
         outer = outer.with_("agg", select_node)
@@ -1786,7 +1788,7 @@ def _emit_simple_query(env: _CompileEnv) -> Compiled:
         _collect_hoisted_ctes(env.touched, env.resolve_in_ctx),
         env.backend,
     )
-    sql = select_node.sql(dialect=env.dialect, pretty=False, normalize_functions=False)
+    sql = select_node.sql(dialect=env.sqlglot_dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
         columns,
         env.dim_fields,
@@ -1797,7 +1799,7 @@ def _emit_simple_query(env: _CompileEnv) -> Compiled:
         time_col_name,
         is_compare=False,
     )
-    return Compiled(
+    return CompiledQuery(
         backend=env.backend,
         sql=sql,
         params=env.params,
@@ -1859,14 +1861,14 @@ def compile_query(
     context: dict[str, str] | None = None,
     group_by_alias: bool = True,
     having_alias: bool = False,
-    strategies: dict[Backend, BackendStrategy] | None = None,
+    dialects: dict[Backend, BackendDialect] | None = None,
     views: dict[str, View] | None = None,
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
     scope_fns: dict[str, ScopeFn] | None = None,
     _allow_unbounded_ungrouped: bool = False,
-) -> Compiled:
-    """Compile a SemanticQuery to a Compiled bundle.
+) -> CompiledQuery:
+    """Compile a SemanticQuery to a CompiledQuery bundle.
 
     ``catalog`` — dict of cube name → Cube (build from ``Catalog.as_dict()``).
     ``context`` — optional string substitutions applied to ``{key}``
@@ -1876,8 +1878,8 @@ def compile_query(
         SELECT output alias. Set False to repeat the resolved expression.
     ``having_alias`` — when False (default), HAVING repeats the aggregate
         expression. Set True only when you control the backend.
-    ``strategies`` — optional per-backend strategy overrides. Pass a
-        ``RecordingStrategy`` for tests; pass a custom Snowflake / BigQuery
+    ``dialects`` — optional per-backend dialect overrides. Pass a
+        ``RecordingDialect`` for tests; pass a custom Snowflake / BigQuery
         adapter for out-of-tree backends without touching the global registry.
     ``viewer`` — optional ``AuthContext``. When set, queries touching a
         cube the viewer can't see (``Cube.required_roles`` ANY-match +
@@ -1897,7 +1899,7 @@ def compile_query(
         context=context,
         group_by_alias=group_by_alias,
         having_alias=having_alias,
-        strategies=strategies,
+        dialects=dialects,
         views=views,
         viewer=viewer,
         policy=policy,
@@ -1908,7 +1910,7 @@ def compile_query(
 
 
 __all__ = [
-    "Compiled",
+    "CompiledQuery",
     "CompileError",
     "CrossBackendError",
     "FilterTypeError",

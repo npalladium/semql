@@ -11,7 +11,7 @@ The two pieces here:
   renderer expects (``"postgres"``, ``"clickhouse"``, ...).
 - ``placeholder_for(name, dim_type, backend)`` — an ``exp.Placeholder``
   AST node whose ``.sql(dialect=...)`` output matches the
-  ``BackendStrategy.placeholder`` strings used today
+  ``BackendDialect.placeholder`` strings used today
   (``%(p0)s`` for Postgres, ``{p0:String}`` for ClickHouse).
 
 Stock sqlglot renders ``exp.Placeholder(this="p0", kind=String)`` as
@@ -30,9 +30,9 @@ from sqlglot.dialects.dialect import Dialect
 from semql.model import Backend
 
 # Mirrors the mapping in ``backend.py``. Duplicated here on purpose —
-# the strategy lives in string-land; this module lives in sqlglot-land.
+# the dialect lives in string-land; this module lives in sqlglot-land.
 # Once Commit 2 lands and the compiler uses sqlglot for emission, the
-# strategy's typed-placeholder path will delegate here.
+# dialect's typed-placeholder path will delegate here.
 _CH_DIM_TYPE_TO_CH_TYPE: dict[str, str] = {
     "string": "String",
     "number": "Float64",
@@ -97,7 +97,7 @@ def placeholder_for(name: str, dim_type: str, backend: Backend) -> exp.Placehold
     """Build an ``exp.Placeholder`` AST for the given backend.
 
     The returned node's ``.sql(dialect=dialect_for(backend))`` matches
-    the strings the existing ``BackendStrategy.placeholder`` emits. Use
+    the strings the existing ``BackendDialect.placeholder`` emits. Use
     this when constructing predicates / projections via sqlglot AST in
     a future Commit-2 path."""
     p = exp.Placeholder(this=name)

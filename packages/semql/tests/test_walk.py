@@ -1,4 +1,4 @@
-"""Tests for the Python-side catalogue-walking primitives in
+"""Tests for the Python-side catalog-walking primitives in
 ``semql.introspect``: ``iter_cubes``, ``iter_fields``, ``iter_joins``,
 ``resolve_field``. These primitives are the seam every downstream
 tool (prompt, MCP, ERD, validate-db) calls into — pinning their

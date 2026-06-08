@@ -58,7 +58,7 @@ class ExecutionResult:
 
     ``columns`` and ``column_meta`` are pass-throughs from the plan so a
     consumer that wants formatted output (units, percent, etc.) has
-    everything it needs without re-resolving against the catalogue.
+    everything it needs without re-resolving against the catalog.
     """
 
     columns: list[str]

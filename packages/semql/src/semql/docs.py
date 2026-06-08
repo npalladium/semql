@@ -1,6 +1,6 @@
 """Per-cube markdown documentation generator.
 
-``semql.prompt`` already renders the catalogue as an LLM-facing
+``semql.prompt`` already renders the catalog as an LLM-facing
 fragment — terse, with directive language ("the compiler emits
 SQL — never write SQL on the semantic path"). This module renders
 the same data for *human* documentation: full descriptions, all
@@ -20,10 +20,10 @@ from semql.catalog import Catalog
 def render_catalog_markdown(
     catalog: Catalog,
     *,
-    title: str = "Catalogue",
+    title: str = "Catalog",
     include_meta: bool = False,
 ) -> str:
-    """Render the full catalogue as a navigable markdown document.
+    """Render the full catalog as a navigable markdown document.
 
     ``include_meta`` toggles whether the META reflection cubes appear
     in the output. Off by default — most consumers want their own
@@ -68,7 +68,7 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
         out.append(cube.description)
         out.append("")
 
-    # The "facts" block — every catalogue-level setting on one card.
+    # The "facts" block — every catalog-level setting on one card.
     from semql.model import DerivedTable as _DT
 
     src = cube.resolved_source

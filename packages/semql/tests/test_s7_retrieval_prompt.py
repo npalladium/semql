@@ -1,9 +1,9 @@
 """S7 slice 7 — retrieval-mode prompt rendering.
 
-Verifies that ``Catalog.prompt`` / ``render_catalogue_*`` narrow the
-catalogue to the top-k retrieved cubes when a ``user_query`` +
+Verifies that ``Catalog.prompt`` / ``render_catalog_*`` narrow the
+catalog to the top-k retrieved cubes when a ``user_query`` +
 ``retriever`` are supplied AND the catalog has more grounding content
-than ``retrieval_threshold``. Below the threshold the full catalogue
+than ``retrieval_threshold``. Below the threshold the full catalog
 renders — retrieval would just artificially trim a short prompt.
 """
 
@@ -53,8 +53,8 @@ class _StaticRetriever:
 # ---------------------------------------------------------------------------
 
 
-def test_below_threshold_renders_full_catalogue() -> None:
-    """Catalogue with few questions stays full even when retriever is
+def test_below_threshold_renders_full_catalog() -> None:
+    """Catalog with few questions stays full even when retriever is
     supplied — small prompts don't benefit from retrieval."""
     cubes = [
         _cube(name="orders", questions=["q1", "q2"]),
@@ -95,7 +95,7 @@ def test_retrieval_inactive_without_user_query() -> None:
     cubes = [_cube(name="orders", questions=[f"q{i}" for i in range(60)])]
     cat = Catalog(cubes)
     retriever = _StaticRetriever([])  # would return nothing
-    # No user_query → retrieval inactive → full catalogue renders.
+    # No user_query → retrieval inactive → full catalog renders.
     p = cat.prompt(retriever=retriever)
     assert "orders" in p
 
@@ -156,7 +156,7 @@ def test_saved_queries_count_toward_threshold() -> None:
 
 
 def test_retrieval_mode_annotates_header() -> None:
-    """When retrieval kicks in the catalogue header surfaces a
+    """When retrieval kicks in the catalog header surfaces a
     "top-k cubes for your question" annotation so the LLM knows it's
     looking at a filtered subset."""
     cubes = [
@@ -208,7 +208,7 @@ def test_retrieval_cannot_promote_role_gated_cube() -> None:
 
 def test_catalog_with_retrieval_feeds_prompt() -> None:
     """End-to-end: build retriever from catalog, feed it back into
-    prompt rendering, get a narrowed catalogue."""
+    prompt rendering, get a narrowed catalog."""
     cubes = [
         _cube(
             name="orders",

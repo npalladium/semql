@@ -213,7 +213,7 @@ The Pydantic validator rejects it; users hit a 500 if you ship that.
   (`avg_processing_time_seconds` → `format=duration`).
 - A rate-style measure stored as a fraction needs the percent
   rendering (`conversion_rate` → `format=percent`).
-- Currency / multi-currency catalogues need the explicit hint.
+- Currency / multi-currency catalogs need the explicit hint.
 
 Setting it for every field bloats the prompt and gives the LLM
 duplicate context. Skip when the name + dim type already say it.
@@ -438,7 +438,7 @@ the response with the matching model.
 
 | Role | Fragment | Output |
 |---|---|---|
-| Router | `build_router_prompt_fragment(catalog, viewer=...)` | `RouterDecision { path, cubes, views }` |
+| Router | `build_router_prompt_fragment(catalog, viewer=...)` | `RouterDecision { route_to, cubes, views }` |
 | Generator | `build_query_generator_prompt_fragment(catalog, scope_to=decision.cubes+decision.views, viewer=...)` | `QueryPlan { steps: list[QueryStep] }` |
 | Presenter | `build_presenter_prompt_fragment(query_labels=..., result_summary=...)` | `Presentation { summary, highlights, caveats }` |
 | Drilldown | `build_drilldown_prompt_fragment(cube, focused_row=...)` | `DrilldownSuggestions { suggestions }` |

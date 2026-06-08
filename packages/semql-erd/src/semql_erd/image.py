@@ -2,7 +2,7 @@
 # ``graphviz`` ships no type stubs; pyright reports every method
 # return as Unknown. The functions wrap it tightly enough that local
 # inference covers the actual contract.
-"""PNG/SVG rendering for catalogue ER diagrams.
+"""PNG/SVG rendering for catalog ER diagrams.
 
 Shells out to Graphviz via the optional ``graphviz`` Python bindings.
 Install with ``pip install "semql-erd[image]"`` and a system ``dot``
@@ -28,7 +28,7 @@ def render_image(
     rankdir: RankDir = "LR",
     title: str | None = None,
 ) -> Path:
-    """Render the catalogue as a PNG / SVG / PDF image at ``path``.
+    """Render the catalog as a PNG / SVG / PDF image at ``path``.
 
     Calls the system ``dot`` binary via the ``graphviz`` Python
     bindings. Raises ``ImportError`` if the optional ``image`` extra

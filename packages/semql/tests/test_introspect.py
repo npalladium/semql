@@ -1,9 +1,9 @@
 """Unit tests for ``semql.introspect``.
 
 The reflection cubes (``CATALOG_CUBES`` / ``CATALOG_MEASURES`` /
-``CATALOG_DIMENSIONS``) materialise the catalogue snapshot as a
+``CATALOG_DIMENSIONS``) materialise the catalog snapshot as a
 ``VALUES`` subquery at compile time so meta queries route through the
-same compiler the rest of the catalogue does. The contracts here are:
+same compiler the rest of the catalog does. The contracts here are:
 
 - ``quote_literal`` is the only thing producing SQL string literals;
   apostrophe escaping must be airtight.
@@ -140,7 +140,7 @@ def test_meta_values_for_empty_catalog_cubes_returns_where_false() -> None:
 
 
 def test_meta_values_for_catalog_measures_with_no_measures() -> None:
-    """A catalogue with cubes but no measures produces the empty-shape
+    """A catalog with cubes but no measures produces the empty-shape
     VALUES literal."""
     empty = {
         "x": Cube(name="x", backend=Backend.POSTGRES, table="x", alias="x"),

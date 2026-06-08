@@ -1,7 +1,7 @@
 """Tests for auto-inferred joins from primary_key + foreign_key
 declarations.
 
-Catalogue authors who already model entities (orders.customer_id →
+Catalog authors who already model entities (orders.customer_id →
 customers.id) shouldn't have to repeat the join. Declaring
 ``Cube(primary_key="id")`` and ``Dimension(foreign_key="customers")``
 gives the Catalog enough to derive the Join edge.

@@ -2,7 +2,7 @@
 
 We spin up two in-memory DuckDB databases (acting as Postgres and
 BigQuery for the sake of the test — both speak DuckDB, but the
-catalogue says they're different backends so the federated compiler
+catalog says they're different backends so the federated compiler
 emits two fragments and a merge SQL). The engine wires both via
 ``DuckDBAdapter`` and runs the plan end-to-end.
 
@@ -59,7 +59,7 @@ class _DialectTranslatingAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Catalogue + fixtures: orders on "Postgres", customers on "BigQuery".
+# Catalog + fixtures: orders on "Postgres", customers on "BigQuery".
 # Both run in DuckDB in the test.
 # ---------------------------------------------------------------------------
 
@@ -329,7 +329,7 @@ def test_engine_repeatable_runs_dont_leak_state(
 
 
 # ---------------------------------------------------------------------------
-# MergePlan + Compiled sanity (would catch a regression in the plan IR
+# MergePlan + CompiledQuery sanity (would catch a regression in the plan IR
 # that broke executor assumptions).
 # ---------------------------------------------------------------------------
 

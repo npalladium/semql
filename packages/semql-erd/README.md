@@ -1,12 +1,12 @@
 # semql-erd
 
-ER-diagram generator for [`semql`](../semql) catalogues. Walks the
+ER-diagram generator for [`semql`](../semql) catalogs. Walks the
 cubes and joins in a `Catalog` and emits a [Graphviz](https://graphviz.org)
 DOT source (and convenience PNG/SVG when the `graphviz` Python bindings
 + system `dot` binary are available).
 
 Useful when:
-- The catalogue is past 10 cubes and reading the YAML/Python isn't
+- The catalog is past 10 cubes and reading the YAML/Python isn't
   enough to see the join shape at a glance.
 - A PR touches a `Join` and the reviewer wants a visual diff of the
   before / after graph.

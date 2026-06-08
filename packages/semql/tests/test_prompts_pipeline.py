@@ -85,7 +85,7 @@ def test_generator_fragment_includes_spec_and_schema() -> None:
     assert "breakdown" in rendered
 
 
-def test_generator_scope_to_trims_catalogue() -> None:
+def test_generator_scope_to_trims_catalog() -> None:
     rendered = build_query_generator_prompt_fragment(_catalog(), scope_to=["orders"])
     assert "### orders" in rendered
     assert "### customers" not in rendered  # excluded by scope_to

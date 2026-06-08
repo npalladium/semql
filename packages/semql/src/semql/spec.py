@@ -1,7 +1,7 @@
 """The query spec the planner emits and the compiler consumes.
 
 All identifiers are *qualified* — `cube.field`. The compiler resolves
-them against the catalogue; unknown identifiers raise `CompileError`
+them against the catalog; unknown identifiers raise `CompileError`
 naming the offending field.
 """
 

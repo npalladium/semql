@@ -21,7 +21,7 @@ Two functions:
 The integration point in ``compile_query`` calls these two functions
 inside ``_CompileEnv.__init__`` so every downstream stage sees the
 rewritten catalog uniformly. The applied rollup name is surfaced on
-``Compiled.applied_rollup`` for observability.
+``CompiledQuery.applied_rollup`` for observability.
 """
 
 from __future__ import annotations

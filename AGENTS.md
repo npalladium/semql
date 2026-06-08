@@ -10,7 +10,7 @@ SemQL itself.
 packages/
   semql/             # core: catalog, compiler, auth, introspection, prompt pipeline
   semql-mcp/         # FastMCP-backed MCPServer exposing a Catalog
-  semql-erd/         # graphviz ER-diagram generator for catalogues
+  semql-erd/         # graphviz ER-diagram generator for catalogs
   semql-validate-db/ # pre-deploy drift check (LIMIT 0 probes per cube/join)
 demos/
   pipeline_demo.py    # end-to-end Router → Generator → Compile → Presenter → Drilldown
@@ -32,11 +32,11 @@ TODOS.org             # open work, DAG, ribbon (gitignored)
 The `semql` package is organised around three layers:
 
 1. **Model layer** (`model.py`, `spec.py`, `plan.py`) — frozen Pydantic
-   value types. Catalogue types (Cube/Measure/Dimension/...), spec
+   value types. Catalog types (Cube/Measure/Dimension/...), spec
    types (SemanticQuery/Filter/TimeWindow/...), and prompt-pipeline
    output types (RouterDecision/QueryPlan/Presentation/...).
 2. **Compiler layer** (`compile.py`, `backend.py`, `dialect.py`) —
-   pure `SemanticQuery + Catalog → Compiled(sql, params, columns)`.
+   pure `SemanticQuery + Catalog → CompiledQuery(sql, params, columns)`.
    Per-backend strategies own dialect quirks. Auth (viewer + roles +
    ScopeFn) injects predicates inside the isolation subquery.
 3. **Discovery layer** (`introspect.py`) — walk-the-catalog primitives
@@ -126,7 +126,7 @@ which can use relative imports.
 
 ### Model design
 
-- Catalogue value types (`Measure`, `Dimension`, `TimeDimension`,
+- Catalog value types (`Measure`, `Dimension`, `TimeDimension`,
   `Segment`, `Join`) are frozen Pydantic models. Construct, never
   mutate.
 - Spec value types (`SemanticQuery`, `Filter`, `TimeWindow`,
@@ -135,17 +135,17 @@ which can use relative imports.
   `description`, `display_name`, `metadata`) live on `BaseField`.
   Subclasses add only their type-specific fields.
 - The user-owned `metadata: dict[str, str]` field on every
-  catalogue type is opaque to SemQL — k8s-annotation flavoured.
+  catalog type is opaque to SemQL — k8s-annotation flavoured.
   Never read or validate its contents.
 
 ### Compiler
 
 - Pure: no I/O, no globals, no time-of-day. The compiler turns
-  `SemanticQuery + Catalog` into `Compiled(sql, params, columns)`.
+  `SemanticQuery + Catalog` into `CompiledQuery(sql, params, columns)`.
 - Identifier resolution → join graph BFS → sqlglot AST composition →
   dialect render. Each phase is independently testable.
 - Dialect-specific shapes (placeholder syntax, `date_trunc`,
-  contains) come from `BackendStrategy` — not branches in the
+  contains) come from `BackendDialect` — not branches in the
   compiler body.
 
 ### Commits
@@ -164,7 +164,7 @@ or `-A`. Commit messages omit empty template fields.
 - Don't bypass the compiler with hand-built SQL strings — emit
   sqlglot AST and let the dialect renderer handle it.
 - Don't add a new field's value as a SQL literal — bind it via the
-  `bind(value, dim_type)` closure so it appears in `Compiled.params`.
+  `bind(value, dim_type)` closure so it appears in `CompiledQuery.params`.
 - Don't change PHILOSOPHY.md invariants without an explicit
   discussion in the PR — they're load-bearing.
 

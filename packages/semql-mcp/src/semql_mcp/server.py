@@ -10,7 +10,7 @@
 
 The server exposes the compiler / validator / prompt-renderer surfaces
 as MCP tools so an LLM (or any MCP client) can plan and reason about
-semantic queries against the catalogue.
+semantic queries against the catalog.
 
 By default the server is **compile-only**: ``semql`` is pure, so is
 this server, and callers run the emitted SQL against whatever backend
@@ -108,7 +108,7 @@ class MCPServer:
         @self.mcp.tool(
             name="query_semantic",
             description=(
-                "Compile a SemanticQuery against the catalogue and return "
+                "Compile a SemanticQuery against the catalog and return "
                 "the emitted SQL, the bound parameters, and the output "
                 "column names. Pass ``context`` for ``{schema}`` / "
                 "``{ctx.X}`` substitution at compile time."
@@ -164,8 +164,8 @@ class MCPServer:
         @self.mcp.tool(
             name="catalog_prompt",
             description=(
-                "Render the planner prompt fragment for this catalogue — "
-                "what an LLM planner would see to learn the catalogue's "
+                "Render the planner prompt fragment for this catalog — "
+                "what an LLM planner would see to learn the catalog's "
                 "vocabulary and the SemanticQuery contract."
             ),
         )

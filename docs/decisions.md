@@ -16,7 +16,7 @@ definitions from YAML files. The question recurs: should `semql`
 ship a YAML loader, or expose one through an optional extra
 (`pip install semql[yaml]`)?
 
-**Decision.** Neither. Python is the native catalogue language. A
+**Decision.** Neither. Python is the native catalog language. A
 YAML loader sits outside core and outside extras — if and when
 demand is real, it ships as a separate package (`semql-yaml`).
 
@@ -63,7 +63,7 @@ in the prior six months.
 .with_table("orders").with_measure(...)` API on top of the
 Pydantic constructor? Some users prefer chained-call ergonomics.
 
-**Decision.** No. Pydantic kwargs are the only catalogue-authoring
+**Decision.** No. Pydantic kwargs are the only catalog-authoring
 API. There is no fluent layer, no shorthand factory, no DSL.
 
 **Why.** Two reasons. First, kwarg construction with type hints +
@@ -80,7 +80,7 @@ of `Cube(...)`. Don't pull it into core.
 
 ---
 
-## D4. Catalogue value types are frozen Pydantic models
+## D4. Catalog value types are frozen Pydantic models
 
 **Context.** Should `Measure`, `Dimension`, `Cube`, `SemanticQuery`,
 etc. be frozen?
@@ -89,7 +89,7 @@ etc. be frozen?
 everywhere except `Cube` itself (which has too many fields and
 internal cross-validation to lock down right now).
 
-**Why.** Catalogue and spec objects are value types in the
+**Why.** Catalog and spec objects are value types in the
 Evans/Fowler sense — equality is structural, identity is
 irrelevant, and mutation invites consistency bugs the compiler
 can't catch (rebinding `query.measures` after compile started would

@@ -71,7 +71,7 @@ def test_clickhouse_placeholder_typed_suffix() -> None:
 
 # ---------------------------------------------------------------------------
 # Round-trip parse — the canary that catches anything sqlglot's parser
-# can't handle from our catalogue SQL conventions.
+# can't handle from our catalog SQL conventions.
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +119,7 @@ def _make_test_cubes() -> list[Cube]:
 
 
 @pytest.mark.parametrize("cube", _make_test_cubes())
-def test_catalogue_fragments_round_trip_through_sqlglot(cube: Cube) -> None:
+def test_catalog_fragments_round_trip_through_sqlglot(cube: Cube) -> None:
     """Parse → render → parse every dim / measure / time_dim SQL fragment
     under the cube's declared backend. Failures here mean a future
     ``compile_query`` switch onto the sqlglot AST path can't form the
@@ -134,7 +134,7 @@ def test_catalogue_fragments_round_trip_through_sqlglot(cube: Cube) -> None:
         resolved = _resolve_braces(raw, cube.alias)
         first = sqlglot.parse_one(resolved, dialect=dialect)
         rendered = first.sql(dialect=dialect)
-        # If sqlglot can parse + render the catalogue's SQL once, it must
+        # If sqlglot can parse + render the catalog's SQL once, it must
         # parse the rendered output too — otherwise the migration would
         # silently turn parseable SQL into unparseable SQL.
         sqlglot.parse_one(rendered, dialect=dialect)

@@ -7,10 +7,10 @@ provides convenience methods that wrap the lower-level
 
 Construction-time validation:
 - No duplicate cube names.
-- Every ``Join.to`` resolves to a cube in the catalogue.
+- Every ``Join.to`` resolves to a cube in the catalog.
 
 Both are reasons a query would fail at compile time later — surfacing
-them at catalogue construction means the planner and MCP layer can
+them at catalog construction means the planner and MCP layer can
 trust the input.
 """
 
@@ -39,8 +39,8 @@ from semql.units import DEFAULT_REGISTRY, Registry
 _T = TypeVar("_T", bound=BaseField)
 
 if TYPE_CHECKING:
-    from semql.compile import Compiled
-    from semql.prompt import CataloguePrompt
+    from semql.compile import CompiledQuery
+    from semql.prompt import CatalogPrompt
     from semql.retrieve import EmbeddingProvider, Retriever
     from semql.spec import SemanticQuery
 
@@ -226,7 +226,7 @@ class Catalog:
             for fld in (*cube.measures, *cube.dimensions):
                 self._check_unit_pair(cube, fld)
 
-        # Lookups: dimension-value catalogues addressable by qualified
+        # Lookups: dimension-value catalogs addressable by qualified
         # ``cube.dim``. Each Lookup's dimension must resolve to a real
         # ``string``-typed Dimension on a real cube — typo or type
         # mismatches surface here instead of at prompt-render time.
@@ -401,7 +401,7 @@ class Catalog:
         *,
         context: dict[str, str] | None = None,
         viewer: AuthContext | None = None,
-    ) -> Compiled:
+    ) -> CompiledQuery:
         """Compile a ``SemanticQuery`` against this catalog. Thin wrapper
         around ``semql.compile.compile_query``.
 
@@ -439,7 +439,7 @@ class Catalog:
         """Render the planner prompt fragment for this catalog. Thin
         wrapper around ``semql.prompt.build_planner_prompt_fragment``.
 
-        When ``viewer`` is provided, the catalogue block shrinks to the
+        When ``viewer`` is provided, the catalog block shrinks to the
         cubes the viewer is allowed to see.
 
         ``ctx`` is the resolution context for dimension-value lookups —
@@ -450,7 +450,7 @@ class Catalog:
 
         Retrieval mode (S7): when both ``user_query`` and ``retriever``
         are set AND the catalog has more than ``retrieval_threshold``
-        questions across cubes + saved queries, the catalogue block is
+        questions across cubes + saved queries, the catalog block is
         narrowed to the top-``top_k`` cubes the retriever returns. Below
         the threshold the prompt is small enough to splice in full.
         Saved-query question counts are pulled from
@@ -486,7 +486,7 @@ class Catalog:
         retriever: Retriever | None = None,
         top_k: int = 10,
         retrieval_threshold: int = 50,
-    ) -> CataloguePrompt:
+    ) -> CatalogPrompt:
         """Render the planner prompt as a cacheable two-segment object.
 
         Splits into a viewer-invariant ``static`` segment (publicly
@@ -528,13 +528,13 @@ class Catalog:
         """SHA256 hex digest of the static (viewer-invariant) prompt segment.
 
         Stable across viewer changes — call this to key your own
-        prompt-fragment cache so a catalogue mutation (renamed measure,
+        prompt-fragment cache so a catalog mutation (renamed measure,
         new public cube, edited lookup) invalidates entries even when
         the viewer (and overlay) hasn't changed. Loader-backed lookups
         change the hash when their resolved values change for ``ctx``."""
-        from semql.prompt import catalogue_prompt_hash
+        from semql.prompt import catalog_prompt_hash
 
-        return catalogue_prompt_hash(
+        return catalog_prompt_hash(
             self._by_name,
             only_exposed=only_exposed,
             lookups=self.lookups,

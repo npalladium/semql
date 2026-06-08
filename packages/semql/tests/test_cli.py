@@ -83,7 +83,7 @@ def test_cli_params_format_json_prints_json_line(capsys: pytest.CaptureFixture[s
 
 def test_cli_context_passes_through(capsys: pytest.CaptureFixture[str]) -> None:
     """``--context schema=prod`` should substitute ``{schema}`` in the
-    catalogue. We don't have a schema-templated cube in the fixture,
+    catalog. We don't have a schema-templated cube in the fixture,
     so just verify the flag parses without error."""
     rc = main(
         [

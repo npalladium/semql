@@ -1,8 +1,8 @@
 # pyright: reportPrivateImportUsage=false
-"""Strategy DI tests: prove that compile.py actually delegates, and
-that callers can swap in a custom strategy.
+"""Dialect DI tests: prove that compile.py actually delegates, and
+that callers can swap in a custom dialect.
 
-Without these the strategy extraction can regress silently —
+Without these the dialect extraction can regress silently —
 compile.py could grow an inline dialect branch and the existing
 test_compile assertions wouldn't catch it.
 """
@@ -14,9 +14,9 @@ from typing import Any, cast
 
 from semql import Cube, Dimension, Filter, Measure, SemanticQuery, TimeWindow
 from semql.backend import (
-    BackendStrategy,
+    BackendDialect,
     ParamBinder,
-    PostgresStrategy,
+    PostgresDialect,
     SqlResolver,
 )
 from semql.compile import compile_query
@@ -24,22 +24,22 @@ from semql.model import Backend
 from sqlglot import exp
 
 
-def _as_strategy_map(
+def _as_dialect_map(
     s: object, backend: Backend = Backend.POSTGRES
-) -> dict[Backend, BackendStrategy]:
-    """Helper: cast a structurally-conformant strategy into the
+) -> dict[Backend, BackendDialect]:
+    """Helper: cast a structurally-conformant dialect into the
     Protocol-typed dict the compiler accepts. mypy can't infer Protocol
     conformance inside a dict literal, so we name it here once."""
-    return {backend: cast(BackendStrategy, s)}
+    return {backend: cast(BackendDialect, s)}
 
 
 @dataclass
-class RecordingStrategy:
-    """Wraps a real strategy and records every method call. The wrapped
-    strategy still does the actual work, so the compiler output is
+class RecordingDialect:
+    """Wraps a real dialect and records every method call. The wrapped
+    dialect still does the actual work, so the compiler output is
     unchanged."""
 
-    inner: BackendStrategy
+    inner: BackendDialect
     placeholder_calls: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     trunc_calls: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     contains_calls: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
@@ -55,7 +55,7 @@ class RecordingStrategy:
 
     def trunc(self, granularity: str, e: exp.Expression) -> exp.Expression:
         # Stringify the expression for the recorded call so assertions stay
-        # readable. The inner strategy still drives the actual node shape.
+        # readable. The inner dialect still drives the actual node shape.
         self.trunc_calls.append((granularity, e.sql(dialect="postgres")))
         return self.inner.trunc(granularity, e)
 
@@ -94,17 +94,17 @@ def _orders_catalog() -> dict[str, Cube]:
 
 
 def test_compiler_delegates_placeholder_for_filter_value() -> None:
-    rec = RecordingStrategy(PostgresStrategy())
+    rec = RecordingDialect(PostgresDialect())
     q = SemanticQuery(
         measures=["orders.count"],
         filters=[Filter(dimension="orders.region", op="eq", values=["us"])],
     )
-    compile_query(q, _orders_catalog(), strategies=_as_strategy_map(rec))
+    compile_query(q, _orders_catalog(), dialects=_as_dialect_map(rec))
     assert rec.placeholder_calls == [("p0", "string")]
 
 
 def test_compiler_delegates_trunc_only_when_granularity_set() -> None:
-    rec = RecordingStrategy(PostgresStrategy())
+    rec = RecordingDialect(PostgresDialect())
     catalog = _orders_catalog()
     orders = catalog["orders"]
     # Add a time dimension to exercise trunc().
@@ -125,13 +125,13 @@ def test_compiler_delegates_trunc_only_when_granularity_set() -> None:
             ),
         ),
         catalog,
-        strategies=_as_strategy_map(rec),
+        dialects=_as_dialect_map(rec),
     )
     assert rec.trunc_calls == []
 
     # With granularity → exactly one trunc call (SELECT projection;
     # GROUP BY reuses the alias by default).
-    rec2 = RecordingStrategy(PostgresStrategy())
+    rec2 = RecordingDialect(PostgresDialect())
     compile_query(
         SemanticQuery(
             measures=["orders.count"],
@@ -142,46 +142,46 @@ def test_compiler_delegates_trunc_only_when_granularity_set() -> None:
             ),
         ),
         catalog,
-        strategies=_as_strategy_map(rec2),
+        dialects=_as_dialect_map(rec2),
     )
     assert len(rec2.trunc_calls) == 1
     assert rec2.trunc_calls[0][0] == "day"
 
 
 def test_compiler_delegates_emit_contains_only_when_op_is_contains() -> None:
-    rec = RecordingStrategy(PostgresStrategy())
+    rec = RecordingDialect(PostgresDialect())
     q = SemanticQuery(
         measures=["orders.count"],
         filters=[Filter(dimension="orders.region", op="eq", values=["us"])],
     )
-    compile_query(q, _orders_catalog(), strategies=_as_strategy_map(rec))
+    compile_query(q, _orders_catalog(), dialects=_as_dialect_map(rec))
     assert rec.contains_calls == []
 
-    rec2 = RecordingStrategy(PostgresStrategy())
+    rec2 = RecordingDialect(PostgresDialect())
     q2 = SemanticQuery(
         measures=["orders.count"],
         filters=[Filter(dimension="orders.region", op="contains", values=["us"])],
     )
-    compile_query(q2, _orders_catalog(), strategies=_as_strategy_map(rec2))
+    compile_query(q2, _orders_catalog(), dialects=_as_dialect_map(rec2))
     assert len(rec2.contains_calls) == 1
     # field is the resolved AST stringified; alias substitution already happened.
     assert rec2.contains_calls[0] == ("o.region", "us")
 
 
 def test_compiler_delegates_emit_source_for_every_from_cube() -> None:
-    rec = RecordingStrategy(PostgresStrategy())
+    rec = RecordingDialect(PostgresDialect())
     q = SemanticQuery(measures=["orders.count"])
-    compile_query(q, _orders_catalog(), strategies=_as_strategy_map(rec))
+    compile_query(q, _orders_catalog(), dialects=_as_dialect_map(rec))
     assert rec.source_calls == ["orders"]
 
 
 # ---------------------------------------------------------------------------
-# Strategy-override test — third-party backend pattern. Documents the
+# Dialect-override test — third-party backend pattern. Documents the
 # DI surface for a downstream Snowflake / BigQuery adapter.
 # ---------------------------------------------------------------------------
 
 
-class _FakeSnowflakeStrategy:
+class _FakeSnowflakeDialect:
     backend = Backend.SNOWFLAKE
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:  # noqa: ARG002
@@ -218,8 +218,8 @@ class _FakeSnowflakeStrategy:
 
 
 def test_third_party_strategy_through_override_kwarg() -> None:
-    """A downstream Snowflake adapter only needs to define a strategy
-    and pass it via ``strategies={...}`` — no fork of semql required."""
+    """A downstream Snowflake adapter only needs to define a dialect
+    and pass it via ``dialects={...}`` — no fork of semql required."""
     orders = Cube(
         name="orders",
         backend=Backend.SNOWFLAKE,
@@ -235,7 +235,7 @@ def test_third_party_strategy_through_override_kwarg() -> None:
             filters=[Filter(dimension="orders.region", op="eq", values=["us"])],
         ),
         catalog,
-        strategies=_as_strategy_map(_FakeSnowflakeStrategy(), backend=Backend.SNOWFLAKE),
+        dialects=_as_dialect_map(_FakeSnowflakeDialect(), backend=Backend.SNOWFLAKE),
     )
     # The Snowflake placeholder convention (`:name`) shows up in the SQL.
     assert ":p0" in out.sql

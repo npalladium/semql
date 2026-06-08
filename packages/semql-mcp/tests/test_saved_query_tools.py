@@ -99,7 +99,7 @@ def test_no_saved_query_tools_when_catalog_has_none() -> None:
 
 def test_saved_query_tool_carries_description() -> None:
     """The SavedQuery.description shows up as the tool's docstring so
-    a planner reading the tool catalogue knows what each saved query
+    a planner reading the tool catalog knows what each saved query
     answers."""
     s = _server(_catalog_with_saved())
 

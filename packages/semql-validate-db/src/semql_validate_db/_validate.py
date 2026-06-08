@@ -1,4 +1,4 @@
-"""Catalogue ↔ database drift checker.
+"""Catalog ↔ database drift checker.
 
 The compiler is intentionally pure (no I/O). This package picks up the
 class of bugs the compiler can't see: an upstream column rename, a
@@ -136,7 +136,7 @@ def _validate_required_filters(cube: Cube) -> list[DbValidationError]:
     """Static check: every ``required_filters`` entry must name a real
     dimension on the cube.
 
-    This is technically catalogue-internal (no DB query needed), but
+    This is technically catalog-internal (no DB query needed), but
     pre-deploy is the right surface for it — surfacing here means a CI
     gate catches the typo even when the static-validation pass missed."""
     dim_names = {d.name for d in cube.dimensions}

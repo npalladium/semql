@@ -30,7 +30,7 @@ ClickHouse / DuckDB / BigQuery / Snowflake.
 |---|---|
 | `semql` | Core: catalog, compiler, auth, prompt fragments, introspection |
 | `semql-mcp` | MCP server wrapping a catalog |
-| `semql-erd` | Graphviz ER-diagram generator for catalogues |
+| `semql-erd` | Graphviz ER-diagram generator for catalogs |
 | `semql-validate-db` | Pre-deploy drift check against a live database |
 
 ## Install
