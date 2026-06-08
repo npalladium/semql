@@ -195,6 +195,59 @@ class Segment(BaseField):
     resolves to ``o.status = 'paid'`` at compile time."""
 
 
+class Rollup(BaseModel):
+    """Pre-aggregated rollup table for a Cube.
+
+    Declares a materialised table holding rows pre-grouped by a subset
+    of the cube's dimensions and (optionally) a time-bucket dimension.
+    The compiler matches a query whose dimensions / measures / time
+    granularity match the rollup's grain and routes the SQL against
+    ``physical_table`` instead of the cube's base table — a substantial
+    speed-up on large fact tables.
+
+    Phase-1 matching is exact-grain: every requested dim must appear
+    in ``dimensions``, every requested measure in ``measures``, the
+    query's time granularity (if any) must equal ``granularity``, and
+    every filter must touch only stored dims / the time column. The
+    compiler picks the smallest matching rollup; if none match, the
+    base table is used.
+
+    Column-naming convention: every stored column is named after its
+    source field's local name. ``revenue`` (a SUM measure) is stored
+    as a column literally named ``revenue``; ``region`` as ``region``;
+    a ``started_at`` time dim materialised at ``day`` granularity is
+    ``started_at_day``. The compiler relies on this naming.
+
+    Measure-agg constraint: only re-aggregatable distributive aggs are
+    allowed at registration (``sum``, ``count``, ``min``, ``max``).
+    ``avg`` / ``ratio`` / ``count_distinct`` / percentile aggs are
+    refused — re-aggregating them across a rollup grain is either
+    wrong (avg-of-avgs) or impossible without storing additional
+    state (sketches / decomposed components)."""
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    physical_table: str
+    alias: str = "r"
+    dimensions: list[str] = []
+    time_dimension: str | None = None
+    granularity: GranularityLiteral | None = None
+    measures: list[str] = []
+    metadata: Metadata = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_time_pair(self) -> Rollup:
+        if (self.time_dimension is None) != (self.granularity is None):
+            raise ValueError(
+                f"Rollup {self.name!r}: ``time_dimension`` and "
+                "``granularity`` must both be set or both be unset — "
+                "a time dim without a bucket grain is meaningless, "
+                "and a grain without a time dim has no column to "
+                "address."
+            )
+        return self
+
+
 class Join(BaseModel):
     """A directed edge from one cube to another.
 
@@ -365,6 +418,75 @@ class Cube(BaseModel):
     # rule from the cube definition — a single scope ("reportees of
     # viewer") can apply to N cubes that name the same scope.
     scope: str | None = None
+    # Materialised rollup tables that pre-aggregate this cube at one
+    # or more grains. The compiler matches a query against each
+    # rollup; on a fit, the query is rewritten to read the rollup's
+    # ``physical_table`` instead of ``table`` — typically orders of
+    # magnitude faster on large fact tables. See :class:`Rollup` for
+    # the matching rules and naming convention.
+    rollups: list[Rollup] = []
+
+    @model_validator(mode="after")
+    def _check_rollups(self) -> Cube:
+        """Every rollup names existing measures/dimensions; aggs must be
+        re-aggregatable; names unique; time_dim if set must be a real
+        TimeDimension on this cube."""
+        if not self.rollups:
+            return self
+        dim_by_name = {d.name: d for d in self.dimensions}
+        measure_by_name = {m.name: m for m in self.measures}
+        td_by_name = {td.name: td for td in self.time_dimensions}
+        # Distributive aggs that re-aggregate trivially over a rollup
+        # grain: SUM-of-SUMs, COUNT-of-COUNTs (as SUM), MIN, MAX.
+        # Everything else (avg/ratio/count_distinct/percentiles) needs
+        # extra state or a different aggregation entirely; refuse.
+        REAGG_OK = {"sum", "count", "min", "max"}
+        seen: set[str] = set()
+        for r in self.rollups:
+            if r.name in seen:
+                raise ValueError(f"Cube {self.name!r}: duplicate rollup name {r.name!r}.")
+            seen.add(r.name)
+            for d in r.dimensions:
+                if d not in dim_by_name:
+                    raise ValueError(
+                        f"Cube {self.name!r}, rollup {r.name!r}: "
+                        f"dimension {d!r} is not declared on this cube. "
+                        f"Known dimensions: {sorted(dim_by_name)}."
+                    )
+            for m in r.measures:
+                if m not in measure_by_name:
+                    raise ValueError(
+                        f"Cube {self.name!r}, rollup {r.name!r}: "
+                        f"measure {m!r} is not declared on this cube. "
+                        f"Known measures: {sorted(measure_by_name)}."
+                    )
+                agg = measure_by_name[m].agg
+                if agg not in REAGG_OK:
+                    raise ValueError(
+                        f"Cube {self.name!r}, rollup {r.name!r}: measure "
+                        f"{m!r} has agg={agg!r}, which can't be re-aggregated "
+                        f"over a rollup grain. Allowed aggs: "
+                        f"{sorted(REAGG_OK)}. Drop the measure from the "
+                        "rollup or store decomposed state in a separate rollup."
+                    )
+            if r.time_dimension is not None and r.time_dimension not in td_by_name:
+                raise ValueError(
+                    f"Cube {self.name!r}, rollup {r.name!r}: time_dimension "
+                    f"{r.time_dimension!r} is not declared on this cube. "
+                    f"Known time_dimensions: {sorted(td_by_name)}."
+                )
+            if (
+                r.time_dimension is not None
+                and r.granularity is not None
+                and r.granularity not in td_by_name[r.time_dimension].granularities
+            ):
+                raise ValueError(
+                    f"Cube {self.name!r}, rollup {r.name!r}: granularity "
+                    f"{r.granularity!r} not permitted on time_dimension "
+                    f"{r.time_dimension!r} (allowed: "
+                    f"{td_by_name[r.time_dimension].granularities})."
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_drill_paths(self) -> Cube:

@@ -76,6 +76,7 @@ from semql.model import (
     TimeDimension,
     View,
 )
+from semql.rollup import apply_rollup, pick_rollup
 from semql.spec import BoolExpr, Filter, InlineDerived, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
@@ -129,6 +130,10 @@ class Compiled:
     # raw fragment, not just the compiler-generated SELECT. Plain-table
     # cubes contribute nothing here.
     derived_sources: list[str] = dc_field(default_factory=lambda: [])
+    # Name of the rollup the compiler routed the query against, when
+    # rollup routing fired. ``None`` means the query went to the base
+    # tables. See :mod:`semql.rollup` for the matching rules.
+    applied_rollup: str | None = None
 
 
 def _collect_derived_sources(
@@ -908,6 +913,18 @@ class _CompileEnv:
     ) -> None:
         _validate_query_invariants(q, allow_unbounded_ungrouped=allow_unbounded_ungrouped)
 
+        # Rollup routing — check before resolution. When a rollup
+        # covers the query, we rewrite the catalog dict to point the
+        # touched cube at the rollup's physical_table; every downstream
+        # stage then compiles against the rollup transparently. The
+        # picked name is surfaced on ``Compiled.applied_rollup``.
+        self.applied_rollup: str | None = None
+        picked = pick_rollup(q, catalog)
+        if picked is not None:
+            rollup_cube, rollup = picked
+            catalog = apply_rollup(catalog, rollup_cube, rollup)
+            self.applied_rollup = rollup.name
+
         self.q = q
         self.catalog = catalog
         self.group_by_alias = group_by_alias
@@ -1578,6 +1595,7 @@ def _emit_compare_query(env: _CompileEnv) -> Compiled:
         column_meta=cm,
         touched_cube_names=[c.name for c in env.touched],
         derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
+        applied_rollup=env.applied_rollup,
     )
 
 
@@ -1765,6 +1783,7 @@ def _emit_simple_query(env: _CompileEnv) -> Compiled:
         column_meta=cm,
         touched_cube_names=[c.name for c in env.touched],
         derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
+        applied_rollup=env.applied_rollup,
     )
 
 
