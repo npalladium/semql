@@ -20,6 +20,7 @@ references, cross-backend refusals).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from typing import TYPE_CHECKING, Any
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 MAX_UNGROUPED_ROWS = 1000
 
+_BACKTICK_RE = re.compile(r"`([a-z_][a-z0-9_]*)`")
 
 ErrorCode = str  # documented values listed in this module's docstring
 
@@ -56,6 +58,16 @@ class ValidationError:
     value: Any = None
     hint: str | None = None
     extra: dict[str, Any] = _dc_field(default_factory=dict[str, Any])
+
+
+@dataclass(frozen=True)
+class ValidationWarning(ValidationError):
+    """An advisory warning returned by :func:`validate`.
+
+    Subclasses :class:`ValidationError` so existing ``isinstance(e,
+    ValidationError)`` checks keep working. Filter by severity with
+    ``[e for e in errors if isinstance(e, ValidationWarning)]``.
+    """
 
 
 def _catalog_dict(catalog: Catalog | dict[str, Cube]) -> dict[str, Cube]:
@@ -211,7 +223,7 @@ def validate(
             )
         elif c.stability == "beta":
             errors.append(
-                ValidationError(
+                ValidationWarning(
                     code="cube_beta",
                     message=(
                         f"Cube {c.name!r} is flagged beta — its surface may "
@@ -235,7 +247,46 @@ def validate(
             )
         )
 
+    # Backtick-name resolution check. Scan relations narratives for
+    # `token` patterns and warn when the token doesn't resolve to a
+    # cube name, measure, or dimension in the catalog.
+    known_tokens: set[str] = set(cat)
+    for cube in cat.values():
+        for m in cube.measures:
+            known_tokens.add(m.name)
+        for dim in cube.dimensions:
+            known_tokens.add(dim.name)
+        for td in cube.time_dimensions:
+            known_tokens.add(td.name)
+
+    def _check_relations_text(text: str, source_cube: str | None) -> None:
+        for match in _BACKTICK_RE.finditer(text):
+            token = match.group(1)
+            if token not in known_tokens:
+                errors.append(
+                    ValidationWarning(
+                        code="unresolved_backtick",
+                        message=(
+                            f"Backtick name `{token}` in "
+                            + (f"cube {source_cube!r} " if source_cube else "catalog ")
+                            + "relations does not resolve to any known cube, "
+                            "measure, or dimension."
+                        ),
+                        cube=source_cube,
+                    )
+                )
+
+    for cube in cat.values():
+        if cube.relations:
+            _check_relations_text(cube.relations, cube.name)
+
+    # Also check catalog-level relations when a full Catalog is passed.
+    from semql.catalog import Catalog as _Catalog
+
+    if isinstance(catalog, _Catalog) and catalog.relations:
+        _check_relations_text(catalog.relations, None)
+
     return errors
 
 
-__all__ = ["MAX_UNGROUPED_ROWS", "ValidationError", "validate"]
+__all__ = ["MAX_UNGROUPED_ROWS", "ValidationError", "ValidationWarning", "validate"]

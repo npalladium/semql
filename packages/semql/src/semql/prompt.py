@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from semql.introspect import PolicyFn, iter_cubes, viewer_sees
 from semql.model import AuthContext, Cube, GlossaryEntry, Lookup, ResolutionContext, View
@@ -188,6 +188,7 @@ def _render_cube_block(
     *,
     header: str,
     preamble: str,
+    cube_prompt_hooks: list[object] | None = None,
 ) -> str:
     """Render a list of cubes under a header, with optional preamble.
 
@@ -199,6 +200,11 @@ def _render_cube_block(
     lines: list[str] = [header, preamble, ""]
     for cube in cubes:
         lines.extend(_render_cube(cube, lookups_by_dim, ctx))
+        if cube_prompt_hooks:
+            for hook in cube_prompt_hooks:
+                extra = hook(cube)  # type: ignore[operator]
+                if extra:
+                    lines.append(extra)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -218,6 +224,7 @@ def render_catalog_block(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
+    cube_prompt_hooks: list[object] | None = None,
 ) -> str:
     # ``include_meta=True`` here is deliberate: META reflection cubes
     # historically appeared in the planner fragment when callers opted
@@ -266,6 +273,7 @@ def render_catalog_block(
         ctx,
         header=header,
         preamble=preamble,
+        cube_prompt_hooks=cube_prompt_hooks,
     )
     # Domain Context (glossary + cross-cube relations) sits above the
     # per-cube listings so the planner reads vocabulary before fields.
@@ -307,6 +315,57 @@ class CatalogPrompt:
             "\n" if (self.static or self.overlay) else ""
         )
 
+    def ephemeral(
+        self,
+        *,
+        current_date: str | None = None,
+        retrieved_snippets: list[str] | None = None,
+        extra: str | None = None,
+    ) -> str:
+        """Return the ephemeral (per-request, never cached) segment.
+
+        Only non-empty sections appear in the output. Returns ``""`` when
+        all kwargs are ``None`` so callers can short-circuit without
+        allocating.
+
+        ``current_date`` — ISO 8601 date string (e.g. ``"2026-06-08"``).
+        ``retrieved_snippets`` — RAG context lines; each becomes a bullet.
+        ``extra`` — free-form block appended verbatim after the above.
+        """
+        if current_date is None and retrieved_snippets is None and extra is None:
+            return ""
+        parts: list[str] = []
+        if current_date is not None:
+            parts.append(f"## Current context\n- Date: {current_date}")
+        if retrieved_snippets:
+            bullets = "\n".join(f"- {s}" for s in retrieved_snippets)
+            parts.append(f"## Retrieved context\n{bullets}")
+        result = "\n\n".join(parts)
+        if extra is not None:
+            result = (result + "\n\n" + extra) if result else extra
+        return result
+
+    def full(
+        self,
+        *,
+        current_date: str | None = None,
+        retrieved_snippets: list[str] | None = None,
+        extra: str | None = None,
+    ) -> str:
+        """Return ``static + overlay + ephemeral(...)`` as one string.
+
+        Equivalent to calling :meth:`joined` and appending the result of
+        :meth:`ephemeral`. When no ephemeral kwargs are provided this is
+        identical to :meth:`joined`.
+        """
+        base = self.joined()
+        ep = self.ephemeral(
+            current_date=current_date,
+            retrieved_snippets=retrieved_snippets,
+            extra=extra,
+        )
+        return base + ep
+
 
 def _is_public(cube: Cube) -> bool:
     """A cube is *publicly visible* when its ``required_roles`` is empty.
@@ -334,6 +393,7 @@ def render_catalog_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
+    cube_prompt_hooks: list[object] | None = None,
 ) -> CatalogPrompt:
     """Split the catalog into a static + per-viewer overlay rendering.
 
@@ -394,6 +454,7 @@ def render_catalog_segments(
         ctx,
         header=header,
         preamble=preamble,
+        cube_prompt_hooks=cube_prompt_hooks,
     )
     # Domain context (glossary + cross-cube relations) is viewer-
     # invariant, so it lives in the static segment above the cubes.
@@ -420,6 +481,7 @@ def render_catalog_segments(
                     f"catalog above: {names}. Reference them the same "
                     "way (`cube.field`)."
                 ),
+                cube_prompt_hooks=cube_prompt_hooks,
             )
 
     return CatalogPrompt(static=static, overlay=overlay)
@@ -445,14 +507,17 @@ class ToolDescriptionProjection:
 
     invariant: dict[str, str]
     viewer_gated: dict[str, str]
+    saved_query_invariant: dict[str, str] = field(default_factory=dict)
+    saved_query_viewer_gated: dict[str, str] = field(default_factory=dict)
 
     def all(self) -> dict[str, str]:
-        """Concatenate both maps. ``invariant`` keys win on collision
-        — which shouldn't happen by construction (a cube is either
-        public or role-gated, not both), but the explicit precedence
-        catches catalog churn."""
+        """Concatenate all four maps into one. Cube invariant and saved-query
+        invariant keys win on collision within their respective categories."""
         out = dict(self.viewer_gated)
         out.update(self.invariant)
+        sq_out = dict(self.saved_query_viewer_gated)
+        sq_out.update(self.saved_query_invariant)
+        out.update(sq_out)
         return out
 
 
@@ -511,12 +576,32 @@ def render_tool_description(cube: Cube) -> str:
     return "\n".join(parts)
 
 
+def render_saved_query_tool_description(sq: SavedQuery) -> str:
+    """Render the MCP tool-description string for one saved query.
+
+    Format mirrors :func:`render_tool_description` but surfaces
+    saved-query–specific fields: ``purpose``, slash-joined ``questions``,
+    and the zero-argument contract footer.
+    """
+    head = sq.description or f"Run the {sq.name} saved query."
+    if sq.stability == "beta":
+        head = f"[BETA] {head}"
+    parts = [head]
+    if sq.purpose:
+        parts.append(f"Purpose: {sq.purpose}.")
+    if sq.questions:
+        parts.append(f"Example questions: {' / '.join(sq.questions)}")
+    parts.append("Zero arguments — the query is pre-baked.")
+    return "\n".join(parts)
+
+
 def project_tool_descriptions(
     catalog: dict[str, Cube],
     *,
     only_exposed: bool = True,
     viewer: AuthContext | None = None,
     policy: PolicyFn | None = None,
+    saved_queries: Sequence[SavedQuery] | None = None,
 ) -> ToolDescriptionProjection:
     """Return tool descriptions projected to the visible cubes (relational projection).
 
@@ -559,7 +644,42 @@ def project_tool_descriptions(
             invariant[cube.name] = rendered
         elif viewer is not None and viewer_sees(cube, viewer, policy):
             viewer_gated[cube.name] = rendered
-    return ToolDescriptionProjection(invariant=invariant, viewer_gated=viewer_gated)
+
+    sq_invariant: dict[str, str] = {}
+    sq_viewer_gated: dict[str, str] = {}
+    for sq in saved_queries or []:
+        rendered_sq = render_saved_query_tool_description(sq)
+        if not sq.required_roles:
+            sq_invariant[sq.name] = rendered_sq
+        elif viewer is not None and any(r in viewer.roles for r in sq.required_roles):
+            sq_viewer_gated[sq.name] = rendered_sq
+
+    return ToolDescriptionProjection(
+        invariant=invariant,
+        viewer_gated=viewer_gated,
+        saved_query_invariant=sq_invariant,
+        saved_query_viewer_gated=sq_viewer_gated,
+    )
+
+
+def to_openai_function(cube: Cube) -> dict[str, Any]:
+    """Return the OpenAI function-calling dict for one cube.
+
+    The returned dict can be passed directly as an element of the
+    ``tools=`` list in ``client.chat.completions.create()``,
+    ``ChatOpenAI`` / ``ChatAnthropic`` tool-calling, and
+    LlamaIndex / pydantic-ai raw function specs.
+    """
+    from semql.spec import SemanticQuery
+
+    return {
+        "type": "function",
+        "function": {
+            "name": f"query_{cube.name}",
+            "description": render_tool_description(cube),
+            "parameters": SemanticQuery.model_json_schema(),
+        },
+    }
 
 
 filter_tool_descriptions = project_tool_descriptions
@@ -823,6 +943,7 @@ def build_planner_prompt_fragment(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
+    cube_prompt_hooks: list[object] | None = None,
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
@@ -854,6 +975,7 @@ def build_planner_prompt_fragment(
             top_k=top_k,
             retrieval_threshold=retrieval_threshold,
             saved_queries=saved_queries,
+            cube_prompt_hooks=cube_prompt_hooks,
         ).rstrip(),
     ]
     if views:
@@ -881,6 +1003,7 @@ def build_planner_prompt_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
+    cube_prompt_hooks: list[object] | None = None,
 ) -> CatalogPrompt:
     """Cacheable variant of :func:`build_planner_prompt_fragment`.
 
@@ -912,6 +1035,7 @@ def build_planner_prompt_segments(
         top_k=top_k,
         retrieval_threshold=retrieval_threshold,
         saved_queries=saved_queries,
+        cube_prompt_hooks=cube_prompt_hooks,
     )
 
     static_parts: list[str] = [_SPEC_CONTRACT, segments.static.rstrip()]

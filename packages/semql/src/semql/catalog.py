@@ -17,7 +17,7 @@ trust the input.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from semql._grounding import validate_relations
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
@@ -61,6 +61,7 @@ class Catalog:
         unit_registry: Registry | None = None,
         glossary: list[GlossaryEntry] | None = None,
         relations: str = "",
+        error_transform: object | None = None,
     ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -345,6 +346,7 @@ class Catalog:
                     f"Pass scope_fns={{'{c.scope}': fn, ...}} to the Catalog "
                     f"constructor. Registered scopes: {sorted(self._scope_fns)}."
                 )
+        self._error_transform: object | None = error_transform
 
     def _check_unit_pair(self, cube: Cube, fld: BaseField) -> None:
         """Validate ``unit`` / ``display_unit`` on a single field.
@@ -401,6 +403,7 @@ class Catalog:
         *,
         context: dict[str, str] | None = None,
         viewer: AuthContext | None = None,
+        query_defaults: object | None = None,
     ) -> CompiledQuery:
         """Compile a ``SemanticQuery`` against this catalog. Thin wrapper
         around ``semql.compile.compile_query``.
@@ -413,16 +416,28 @@ class Catalog:
           (never a SQL literal).
         """
         from semql.compile import compile_query
+        from semql.errors import CompileError
+        from semql.spec import SemanticQueryDefaults, _apply_query_defaults
 
-        return compile_query(
-            query,
-            self._by_name,
-            context=context,
-            views=self.views,
-            viewer=viewer,
-            policy=self._policy,
-            scope_fns=self._scope_fns,
-        )
+        if isinstance(query_defaults, SemanticQueryDefaults):
+            query = _apply_query_defaults(query, query_defaults)
+
+        try:
+            return compile_query(
+                query,
+                self._by_name,
+                context=context,
+                views=self.views,
+                viewer=viewer,
+                policy=self._policy,
+                scope_fns=self._scope_fns,
+            )
+        except CompileError as exc:
+            if self._error_transform is not None:
+                replacement = self._error_transform(exc)  # type: ignore[operator]
+                if replacement is not None:
+                    raise replacement from exc
+            raise
 
     def prompt(
         self,
@@ -435,6 +450,10 @@ class Catalog:
         retriever: Retriever | None = None,
         top_k: int = 10,
         retrieval_threshold: int = 50,
+        current_date: str | None = None,
+        retrieved_snippets: list[str] | None = None,
+        extra: str | None = None,
+        cube_prompt_hooks: list[object] | None = None,
     ) -> str:
         """Render the planner prompt fragment for this catalog. Thin
         wrapper around ``semql.prompt.build_planner_prompt_fragment``.
@@ -455,9 +474,9 @@ class Catalog:
         the threshold the prompt is small enough to splice in full.
         Saved-query question counts are pulled from
         ``self.saved_queries`` automatically."""
-        from semql.prompt import build_planner_prompt_fragment
+        from semql.prompt import build_planner_prompt_segments
 
-        return build_planner_prompt_fragment(
+        segments = build_planner_prompt_segments(
             self._by_name,
             only_exposed=only_exposed,
             include_introspection=include_introspection,
@@ -473,6 +492,12 @@ class Catalog:
             top_k=top_k,
             retrieval_threshold=retrieval_threshold,
             saved_queries=list(self.saved_queries.values()),
+            cube_prompt_hooks=cube_prompt_hooks,
+        )
+        return segments.full(
+            current_date=current_date,
+            retrieved_snippets=retrieved_snippets,
+            extra=extra,
         )
 
     def prompt_segments(
@@ -572,6 +597,119 @@ class Catalog:
             mmr=mmr,
             mmr_lambda=mmr_lambda,
         )
+
+    def to_openai_tools(
+        self,
+        *,
+        viewer: AuthContext | None = None,
+        only_exposed: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return one OpenAI-format tool dict per visible cube + saved query.
+
+        The list is ready for ``tools=`` in ``client.chat.completions.create``
+        or any framework that consumes OpenAI tool dicts (LangChain, pydantic-ai,
+        LlamaIndex). Role-gated cubes and saved queries are excluded unless
+        ``viewer`` holds a matching role.
+        """
+        from semql.prompt import (
+            project_tool_descriptions,
+            render_saved_query_tool_description,
+            to_openai_function,
+        )
+        from semql.spec import SemanticQuery
+
+        proj = project_tool_descriptions(
+            self._by_name,
+            only_exposed=only_exposed,
+            viewer=viewer,
+            policy=self._policy,
+        )
+        visible_cubes = {**proj.invariant, **proj.viewer_gated}
+
+        from semql.introspect import iter_cubes as _iter
+
+        tools: list[dict[str, object]] = [
+            to_openai_function(c)
+            for c in _iter(
+                self._by_name,
+                include_meta=False,
+                only_exposed=only_exposed,
+                viewer=None,  # we use proj to determine visibility
+                policy=None,
+            )
+            if c.name in visible_cubes
+        ]
+
+        for sq in self.saved_queries.values():
+            if sq.required_roles and (
+                viewer is None or not any(r in viewer.roles for r in sq.required_roles)
+            ):
+                continue
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"saved_{sq.name}",
+                        "description": render_saved_query_tool_description(sq),
+                        "parameters": SemanticQuery.model_json_schema(),
+                    },
+                }
+            )
+        return tools
+
+    def to_langchain_tools(
+        self,
+        *,
+        viewer: AuthContext | None = None,
+        only_exposed: bool = True,
+    ) -> list[object]:
+        """Return one LangChain ``StructuredTool`` per visible cube.
+
+        Requires ``langchain-core`` — raises ``ImportError`` with an
+        actionable install hint if it is not installed.
+
+        Each tool's ``func`` compiles and returns a structured result dict
+        ``{"sql": ..., "params": ...}`` so the caller decides how to execute.
+        """
+        try:
+            from langchain_core.tools import StructuredTool  # type: ignore[import-not-found]
+        except ImportError:
+            raise ImportError(
+                "langchain-core is required for to_langchain_tools(). "
+                "Install it with: pip install langchain-core"
+            ) from None
+
+        from semql.introspect import iter_cubes
+
+        cubes = list(
+            iter_cubes(
+                self._by_name,
+                include_meta=False,
+                only_exposed=only_exposed,
+                viewer=viewer,
+                policy=self._policy,
+            )
+        )
+        tools: list[object] = []
+        for cube in cubes:
+            from semql.prompt import render_tool_description
+            from semql.spec import SemanticQuery
+
+            _cube_ref = cube
+
+            def _run(query: SemanticQuery, *, _c: object = _cube_ref) -> dict[str, object]:
+                compiled = self.compile(query, viewer=viewer)
+                return {"sql": compiled.sql, "params": compiled.params}
+
+            tools.append(
+                StructuredTool.from_function(
+                    func=_run,
+                    name=f"query_{cube.name}",
+                    description=render_tool_description(cube),
+                    args_schema=SemanticQuery,
+                )
+            )
+        return tools
 
     def __iter__(self) -> Iterator[Cube]:
         return iter(self._cubes)

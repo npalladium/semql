@@ -436,6 +436,23 @@ def resolve_query(
     )
 
 
+def validate_and_resolve(
+    query: SemanticQuery,
+    catalog: object,
+) -> ResolvedQuery:
+    """Validate and resolve every projection reference in ``query``.
+
+    Convenience wrapper over :func:`resolve_query` with a name that
+    makes the three-stage pipeline explicit::
+
+        SemanticQuery → validate_and_resolve → ResolvedQuery → compile_query → Compiled
+
+    Raises :class:`~semql.errors.ResolveError` (via ``CompileError``) if
+    any measure, dimension, or time-dimension reference is unknown.
+    """
+    return resolve_query(query, catalog)
+
+
 __all__ = [
     "CATALOG_CUBES",
     "CATALOG_DIMENSIONS",
@@ -451,5 +468,6 @@ __all__ = [
     "quote_literal",
     "resolve_field",
     "resolve_query",
+    "validate_and_resolve",
     "viewer_sees",
 ]

@@ -404,6 +404,52 @@ class SavedQuery(BaseModel):
         return self
 
 
+class SemanticQueryDefaults(BaseModel):
+    """Declarative compile defaults applied before H1 hooks.
+
+    Merge priority (highest wins): query's own value > per-call
+    ``query_defaults`` > catalog ``query_defaults`` > ``None`` (no fill).
+
+    A ``None`` field means "don't fill" — it never overrides an explicit
+    ``None`` on the query. Pass ``SemanticQueryDefaults()`` (all-None)
+    to opt in without filling anything; omit to get current behaviour.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    limit: int | None = None
+    time_window: TimeWindow | None = None
+    granularity: Literal["hour", "day", "week", "month"] | None = None
+
+
+def _apply_query_defaults(
+    query: SemanticQuery,
+    defaults: SemanticQueryDefaults | None,
+) -> SemanticQuery:
+    """Return a new SemanticQuery with defaults filled in where the
+    query itself has no value. ``query`` is never mutated."""
+    if defaults is None:
+        return query
+    updates: dict[str, object] = {}
+
+    if defaults.limit is not None and query.limit is None:
+        updates["limit"] = defaults.limit
+
+    if defaults.time_window is not None and query.time_dimension is None:
+        updates["time_dimension"] = defaults.time_window
+
+    if (
+        defaults.granularity is not None
+        and query.time_dimension is not None
+        and query.time_dimension.granularity is None
+    ):
+        new_td = query.time_dimension.model_copy(update={"granularity": defaults.granularity})
+        updates["time_dimension"] = new_td
+
+    if not updates:
+        return query
+    return query.model_copy(update=updates)
+
+
 __all__ = [
     "BoolExpr",
     "CompareWindow",
@@ -413,5 +459,7 @@ __all__ = [
     "InlineDerivedOp",
     "SavedQuery",
     "SemanticQuery",
+    "SemanticQueryDefaults",
     "TimeWindow",
+    "_apply_query_defaults",
 ]

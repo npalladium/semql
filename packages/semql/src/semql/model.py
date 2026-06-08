@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -744,6 +744,11 @@ class AuthContext(BaseModel):
     viewer_id: str
     roles: list[str] = Field(default_factory=list)
     metadata: Metadata = Field(default_factory=dict)
+    # A2 — typed bag for arbitrary JWT claims / auth attributes. Unlike
+    # ``metadata`` (str→str), ``attrs`` preserves the original types
+    # (list, bool, int) so ScopeFns can branch on structured claim values
+    # without decoding them from strings first.
+    attrs: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResolutionContext(BaseModel):
@@ -768,6 +773,30 @@ LookupLoader = Callable[[ResolutionContext], LookupValues]
 """A function from :class:`ResolutionContext` to lookup values. Fires
 when ``Catalog.prompt(...)`` renders a dynamic ``Lookup`` — never from
 the compiler."""
+
+
+from typing import Protocol as _Protocol  # noqa: E402 — after ResolutionContext
+from typing import runtime_checkable  # noqa: E402
+
+
+@runtime_checkable
+class LookupEnricher(_Protocol):
+    """Optional extension for :data:`LookupLoader` callables that support
+    batch ID→label resolution after a query executes.
+
+    Implement this alongside a loader callable when the lookup source is
+    too large to load in full but can efficiently resolve a specific batch
+    of IDs (DB query by PK, cache lookup, REST API batch endpoint).
+
+    ``enrich`` returns a ``{id: label}`` mapping. Missing IDs are filled
+    by the caller with the raw ID value — never raises for unknown IDs.
+    """
+
+    def enrich(
+        self,
+        ids: list[str],
+        ctx: ResolutionContext,
+    ) -> dict[str, str]: ...
 
 
 class Lookup(BaseModel):
@@ -888,6 +917,7 @@ __all__ = [
     "GranularityLiteral",
     "Join",
     "Lookup",
+    "LookupEnricher",
     "LookupLoader",
     "LookupValues",
     "Measure",

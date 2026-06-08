@@ -25,6 +25,7 @@ from semql.errors import (
     UnknownIdentifierError,
 )
 from semql.federate import FederatedPlan, MergePlan, compile_federated_query
+from semql.hooks import CubePromptHook, ErrorTransformHook
 from semql.introspect import (
     CATALOG_CUBES,
     CATALOG_DIMENSIONS,
@@ -36,7 +37,9 @@ from semql.introspect import (
     iter_joins,
     resolve_field,
     resolve_query,
+    validate_and_resolve,
 )
+from semql.lookups import enrich_result
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
 from semql.model import (
@@ -55,6 +58,7 @@ from semql.model import (
     GranularityLiteral,
     Join,
     Lookup,
+    LookupEnricher,
     LookupLoader,
     LookupValues,
     Measure,
@@ -92,6 +96,8 @@ from semql.prompt import (
     project_tool_descriptions,
     render_catalog_block,
     render_catalog_segments,
+    render_saved_query_tool_description,
+    to_openai_function,
 )
 from semql.retrieve import (
     EmbeddingProvider,
@@ -121,6 +127,7 @@ from semql.spec import (
     InlineDerivedOp,
     SavedQuery,
     SemanticQuery,
+    SemanticQueryDefaults,
     TimeWindow,
 )
 from semql.units import (
@@ -130,7 +137,7 @@ from semql.units import (
     UnitError,
     UnknownUnit,
 )
-from semql.validate import ValidationError, validate
+from semql.validate import ValidationError, ValidationWarning, validate
 from semql.visualize import VizColumn, VizDecision, decide_visualization
 
 __all__ = [
@@ -145,6 +152,7 @@ __all__ = [
     "Catalog",
     "CatalogPrompt",
     "ChartTypeLiteral",
+    "CubePromptHook",
     "ColumnMeta",
     "CompareWindow",
     "CompileError",
@@ -159,6 +167,7 @@ __all__ = [
     "DrilldownSuggestion",
     "DrilldownSuggestions",
     "EmbeddingProvider",
+    "ErrorTransformHook",
     "FederatedPlan",
     "FederationError",
     "Filter",
@@ -174,6 +183,7 @@ __all__ = [
     "Join",
     "JoinPathError",
     "Lookup",
+    "LookupEnricher",
     "LookupLoader",
     "LookupValues",
     "MAX_UNGROUPED_ROWS",
@@ -210,6 +220,7 @@ __all__ = [
     "SemQLError",
     "StabilityLiteral",
     "SemanticQuery",
+    "SemanticQueryDefaults",
     "PhysicalTable",
     "TimeDimension",
     "TimeWindow",
@@ -218,6 +229,7 @@ __all__ = [
     "UnknownIdentifierError",
     "UnknownUnit",
     "ValidationError",
+    "ValidationWarning",
     "View",
     "VizColumn",
     "VizDecision",
@@ -237,14 +249,18 @@ __all__ = [
     "iter_fields",
     "iter_joins",
     "filter_tool_descriptions",
+    "enrich_result",
     "materialize_lookup",
     "project_tool_descriptions",
     "render_catalog_markdown",
     "render_catalog_block",
     "render_catalog_segments",
+    "render_saved_query_tool_description",
+    "to_openai_function",
     "resolve_field",
     "resolve_lookup",
     "rewrite",
     "resolve_query",
+    "validate_and_resolve",
     "validate",
 ]

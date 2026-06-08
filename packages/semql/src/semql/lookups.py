@@ -22,7 +22,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
-from semql.model import Lookup, ResolutionContext
+from semql.model import Lookup, LookupEnricher, ResolutionContext
 
 if TYPE_CHECKING:
     from semql.catalog import Catalog
@@ -133,4 +133,31 @@ def resolve(
     return [v for score, v in candidates if score >= 0.5][:max_candidates]
 
 
-__all__ = ["materialize", "resolve"]
+def enrich_result(
+    rows: list[dict[str, object]],
+    dim_name: str,
+    lookup: Lookup,
+    ctx: ResolutionContext,
+) -> list[dict[str, object]]:
+    """Add a ``<dim_name>__label`` column to each row via the lookup's enricher.
+
+    If the lookup loader doesn't implement :class:`~semql.model.LookupEnricher`,
+    rows are returned unchanged. Missing IDs (not in the enricher's mapping)
+    get the raw ID echoed as the label. Rows where the dimension value is
+    ``None`` are skipped (their label key is absent from the result).
+    """
+    if lookup.loader is None or not isinstance(lookup.loader, LookupEnricher):
+        return rows
+    ids = list({str(r[dim_name]) for r in rows if r.get(dim_name) is not None})
+    mapping = lookup.loader.enrich(ids, ctx)
+    label_col = f"{dim_name}__label"
+    for row in rows:
+        raw = row.get(dim_name)
+        if raw is None:
+            continue
+        raw_str = str(raw)
+        row[label_col] = mapping.get(raw_str, raw_str)
+    return rows
+
+
+__all__ = ["enrich_result", "materialize", "resolve"]

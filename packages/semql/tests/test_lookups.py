@@ -393,3 +393,134 @@ def test_materialize_dynamic_lookup_without_ctx_returns_none() -> None:
 
     lk = Lookup(dimension="orders.region", loader=lambda _c: ["x"])
     assert materialize_lookup(lk, None) is None
+
+
+# ---------------------------------------------------------------------------
+# E1: LookupEnricher Protocol + enrich_result helper
+# ---------------------------------------------------------------------------
+
+
+def test_plain_callable_is_not_lookup_enricher() -> None:
+    """A plain LookupLoader callable doesn't satisfy LookupEnricher."""
+    from semql.model import LookupEnricher
+
+    plain = lambda ctx: ["a", "b"]  # noqa: E731
+    assert not isinstance(plain, LookupEnricher)
+
+
+def test_class_implementing_enrich_satisfies_protocol() -> None:
+    """A class with an enrich() method satisfies the runtime-checkable Protocol."""
+    from semql.model import LookupEnricher
+
+    class MyEnricher:
+        def __call__(self, ctx: object) -> list[str]:
+            return ["x"]
+
+        def enrich(self, ids: list[str], ctx: object) -> dict[str, str]:
+            return {i: f"Label:{i}" for i in ids}
+
+    assert isinstance(MyEnricher(), LookupEnricher)
+
+
+def test_enrich_result_adds_label_column_for_known_ids() -> None:
+    """enrich_result adds __label column for known IDs via LookupEnricher."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, LookupEnricher, ResolutionContext
+
+    class EnrichingLoader:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return ["u1", "u2"]
+
+        def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
+            return {i: f"Name:{i}" for i in ids}
+
+    loader = EnrichingLoader()
+    assert isinstance(loader, LookupEnricher)
+    lk = Lookup(dimension="orders.customer_id", loader=loader)
+    rows = [
+        {"customer_id": "u1", "revenue": 100},
+        {"customer_id": "u2", "revenue": 200},
+    ]
+    out = enrich_result(rows, "customer_id", lk, ResolutionContext())
+    assert out[0]["customer_id__label"] == "Name:u1"
+    assert out[1]["customer_id__label"] == "Name:u2"
+
+
+def test_enrich_result_echoes_raw_id_for_unknown_ids() -> None:
+    """Unknown IDs (not in enricher mapping) get the raw ID echoed as the label."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    class EnrichingLoader:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return []
+
+        def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
+            return {}  # nothing known
+
+    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    rows = [{"customer_id": "u99", "revenue": 5}]
+    out = enrich_result(rows, "customer_id", lk, ResolutionContext())
+    assert out[0]["customer_id__label"] == "u99"
+
+
+def test_enrich_result_skips_none_ids() -> None:
+    """Rows with None dimension value are skipped; label is None."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    enriched: list[list[str]] = []
+
+    class EnrichingLoader:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return []
+
+        def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
+            enriched.append(ids)
+            return {}
+
+    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    rows = [{"customer_id": None, "revenue": 5}]
+    out = enrich_result(rows, "customer_id", lk, ResolutionContext())  # type: ignore[arg-type]
+    # None rows should not contribute an id to the enricher call.
+    assert None not in enriched[0] if enriched else True
+    assert out[0].get("customer_id__label") is None
+
+
+def test_enrich_result_plain_callable_returns_rows_unchanged() -> None:
+    """When the loader is not a LookupEnricher, rows pass through unchanged."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    lk = Lookup(dimension="orders.region", values=("EMEA",))
+    rows = [{"region": "EMEA", "cnt": 1}]
+    out = enrich_result(rows, "region", lk, ResolutionContext())
+    assert out == rows
+    assert "region__label" not in out[0]
+
+
+def test_enrich_result_only_calls_enricher_with_unique_non_null_ids() -> None:
+    """enrich is called with deduplicated non-null IDs, not duplicates."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    seen: list[list[str]] = []
+
+    class EnrichingLoader:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return []
+
+        def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
+            seen.append(list(ids))
+            return {i: f"L:{i}" for i in ids}
+
+    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    rows = [
+        {"customer_id": "u1"},
+        {"customer_id": "u1"},  # duplicate
+        {"customer_id": "u2"},
+        {"customer_id": None},
+    ]
+    enrich_result(rows, "customer_id", lk, ResolutionContext())  # type: ignore[arg-type]
+    assert len(seen) == 1
+    assert set(seen[0]) == {"u1", "u2"}  # no duplicates, no None
