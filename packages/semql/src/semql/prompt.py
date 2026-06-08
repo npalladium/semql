@@ -228,6 +228,117 @@ def render_catalogue_segments(
     return CataloguePrompt(static=static, overlay=overlay)
 
 
+@dataclass(frozen=True)
+class ToolDescriptionProjection:
+    """Per-cube MCP tool descriptions, partitioned for prompt caching.
+
+    Mirrors :class:`CataloguePrompt` at the tool-schema layer. ``invariant``
+    holds the static set: cubes with empty ``required_roles``, whose
+    description is the same for every viewer — cache them aggressively
+    on the MCP client side. ``viewer_gated`` holds the per-viewer
+    additions: role-gated cubes the viewer is authorised to see beyond
+    the public set. Each value is the full MCP tool description string
+    (matching what the semql-mcp server uses for ``__doc__`` on the
+    per-cube ``query_<cube>`` tool).
+
+    Both maps are keyed by ``cube.name`` so a consumer can correlate
+    them with the catalogue prompt segments (which list cubes by name)
+    and with the tool registrations on the MCP side.
+    """
+
+    invariant: dict[str, str]
+    viewer_gated: dict[str, str]
+
+    def all(self) -> dict[str, str]:
+        """Concatenate both maps. ``invariant`` keys win on collision
+        — which shouldn't happen by construction (a cube is either
+        public or role-gated, not both), but the explicit precedence
+        catches catalog churn."""
+        out = dict(self.viewer_gated)
+        out.update(self.invariant)
+        return out
+
+
+def render_tool_description(cube: Cube) -> str:
+    """Render the MCP tool-description string for one cube.
+
+    Matches the format ``semql_mcp._make_query_cube_tool`` uses for the
+    tool's ``__doc__``: lead with the cube's own description (or a
+    default), then list measures (with unit annotations), dimensions,
+    and time dimensions. Centralising the format here means the prompt
+    projection and the MCP tool registration can't drift apart — both
+    call this function."""
+
+    def _measure_label(m: object) -> str:
+        unit = getattr(m, "unit", None)
+        display_unit = getattr(m, "display_unit", None)
+        name = getattr(m, "name", "")
+        if unit and display_unit and display_unit != unit:
+            return f"{name} [{unit} → {display_unit}]"
+        if unit:
+            return f"{name} [{unit}]"
+        return name
+
+    head = cube.description or f"Query the {cube.name} cube."
+    measure_labels = [_measure_label(m) for m in cube.measures]
+    dim_names = [d.name for d in cube.dimensions]
+    td_names = [td.name for td in cube.time_dimensions]
+    parts = [
+        head,
+        "",
+        f"Measures: {', '.join(measure_labels) or '(none)'}.",
+        f"Dimensions: {', '.join(dim_names) or '(none)'}.",
+    ]
+    if td_names:
+        parts.append(f"Time dimensions: {', '.join(td_names)}.")
+    parts.append("")
+    parts.append(
+        "Field names are bare (no cube prefix); the tool auto-qualifies "
+        "them as it builds the SemanticQuery."
+    )
+    return "\n".join(parts)
+
+
+def project_tool_descriptions(
+    catalog: dict[str, Cube],
+    *,
+    only_exposed: bool = True,
+    viewer: AuthContext | None = None,
+    policy: PolicyFn | None = None,
+) -> ToolDescriptionProjection:
+    """Split per-cube MCP tool descriptions into invariant + viewer-gated.
+
+    ``invariant`` segment: cubes with empty ``required_roles``, identical
+    for every viewer. MCP clients should cache these schemas aggressively.
+
+    ``viewer_gated`` segment: cubes the viewer holds a role for (passes
+    ``viewer_sees``) that aren't in the invariant set. Without a viewer,
+    this segment is empty.
+
+    Auth invariant — like :func:`render_catalogue_segments`, role-gated
+    cubes only appear when the viewer authorises them, so a viewer never
+    learns names of cubes they can't access via this projection."""
+    all_cubes = list(
+        iter_cubes(
+            catalog,
+            include_meta=False,  # META cubes don't get per-cube MCP tools
+            only_exposed=only_exposed,
+            viewer=None,  # invariant ignores viewer
+            policy=None,
+        )
+    )
+
+    invariant: dict[str, str] = {}
+    viewer_gated: dict[str, str] = {}
+    for cube in all_cubes:
+        rendered = render_tool_description(cube)
+        if _is_public(cube):
+            invariant[cube.name] = rendered
+        elif viewer is not None and viewer_sees(cube, viewer, policy):
+            viewer_gated[cube.name] = rendered
+    return ToolDescriptionProjection(invariant=invariant, viewer_gated=viewer_gated)
+
+
 def catalogue_prompt_hash(
     catalog: dict[str, Cube],
     *,

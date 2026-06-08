@@ -78,6 +78,7 @@ def _orders_cube(backend: Backend = Backend.POSTGRES) -> Cube:
         measures=[
             Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency"),
             Measure(name="order_count", sql="*", agg="count", unit="count"),
+            Measure(name="avg_amount", sql="{o}.amount", agg="avg", unit="currency"),
         ],
         dimensions=[
             Dimension(name="id", sql="{o}.id", type="number"),
@@ -346,3 +347,162 @@ def test_to_async_adapter_bridges_sync_into_async_engine(
     result = _run(engine.run(plan))
     rows = {r[0]: r[1] for r in result.rows}
     assert rows == {"paid": 650.0, "pending": 25.0}
+
+
+# ---------------------------------------------------------------------------
+# iter_run single-fragment fast path
+# ---------------------------------------------------------------------------
+#
+# For one-fragment plans, iter_run skips the DuckDB CREATE TABLE +
+# INSERT roundtrip and runs the merge (column rename + identity-SUM +
+# optional ORDER / LIMIT + AVG decomposition) in Python directly
+# against the adapter rows. The fast path is opt-in by shape: the
+# parser bails on anything it doesn't immediately recognise (HAVING,
+# unusual expressions) and falls through to the DuckDB merge.
+#
+# ``last_iter_run_used_fast_path`` records which path the most recent
+# ``iter_run`` call took — tests assert on it directly.
+
+
+def test_iter_run_single_fragment_takes_fast_path(
+    pg_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """A single-cube SUM aggregation by a dimension is the canonical
+    fast-path shape: 1 fragment, merge SQL has only identity SUMs."""
+    catalog = _catalog(_orders_cube())
+    plan = compile_federated_query(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"]),
+        catalog,
+    )
+    assert len(plan.fragments) == 1
+
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))
+
+    async def collect() -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=100):
+            out.extend(chunk)
+        return out
+
+    rows = _run(collect())
+    assert engine.last_iter_run_used_fast_path
+    assert {r[0]: r[1] for r in rows} == {"paid": 650.0, "pending": 25.0}
+
+
+def test_iter_run_multi_fragment_skips_fast_path(
+    pg_con: duckdb.DuckDBPyConnection,
+    bq_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """Two fragments → the merge needs a JOIN; can only run in DuckDB."""
+    catalog = _catalog(_orders_cube(), _customers_cube())
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            dimensions=["customers.region"],
+        ),
+        catalog,
+    )
+    assert len(plan.fragments) == 2
+
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, _AsyncDialectTranslatingAdapter(pg_con))
+    engine.register(Backend.BIGQUERY, _AsyncDialectTranslatingAdapter(bq_con))
+
+    async def collect() -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=100):
+            out.extend(chunk)
+        return out
+
+    rows = _run(collect())
+    assert not engine.last_iter_run_used_fast_path
+    assert {r[0] for r in rows} == {"EU", "US"}
+
+
+def test_iter_run_fast_path_applies_order_by_and_limit(
+    pg_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """The Python-side merge handles ORDER BY + LIMIT correctly —
+    so a fast-path result is identical to what DuckDB would return."""
+    catalog = _catalog(_orders_cube())
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            dimensions=["orders.status"],
+            order=[("revenue", "desc")],
+            limit=1,
+        ),
+        catalog,
+    )
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))
+
+    async def collect() -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=100):
+            out.extend(chunk)
+        return out
+
+    rows = _run(collect())
+    assert engine.last_iter_run_used_fast_path
+    assert len(rows) == 1
+    # paid (650) outranks pending (25); LIMIT 1 keeps only paid.
+    assert rows[0] == ("paid", 650.0)
+
+
+def test_iter_run_fast_path_handles_avg_decomposition(
+    pg_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """An AVG measure decomposes into stored sum + count columns at
+    the fragment; the merge composes them via SUM(sum)/NULLIF(SUM(count),
+    0). The fast path recognises this shape and computes the division
+    in Python."""
+    catalog = _catalog(_orders_cube())
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.avg_amount"],
+            dimensions=["orders.status"],
+        ),
+        catalog,
+    )
+    assert len(plan.fragments) == 1
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))
+
+    async def collect() -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=100):
+            out.extend(chunk)
+        return out
+
+    rows = _run(collect())
+    assert engine.last_iter_run_used_fast_path
+    by_status = {r[0]: r[1] for r in rows}
+    # paid: (100+200+50+300)/4 = 162.5
+    # pending: 25/1 = 25.0
+    assert abs(by_status["paid"] - 162.5) < 1e-9
+    assert abs(by_status["pending"] - 25.0) < 1e-9
+
+
+def test_iter_run_fast_path_streams_in_requested_chunks(
+    pg_con: duckdb.DuckDBPyConnection,
+) -> None:
+    """``chunk_rows=1`` yields one row per chunk even on the fast path."""
+    catalog = _catalog(_orders_cube())
+    plan = compile_federated_query(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"]),
+        catalog,
+    )
+    engine = AsyncEngine()
+    engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))
+
+    async def collect() -> list[int]:
+        sizes: list[int] = []
+        async for chunk in engine.iter_run(plan, chunk_rows=1):
+            sizes.append(len(chunk))
+        return sizes
+
+    sizes = _run(collect())
+    assert engine.last_iter_run_used_fast_path
+    assert sizes == [1, 1]  # two status groups, one row each

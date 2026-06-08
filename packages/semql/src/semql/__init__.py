@@ -78,6 +78,7 @@ from semql.plan import (
 )
 from semql.prompt import (
     CataloguePrompt,
+    ToolDescriptionProjection,
     build_drilldown_prompt_fragment,
     build_planner_prompt_fragment,
     build_planner_prompt_segments,
@@ -85,6 +86,7 @@ from semql.prompt import (
     build_query_generator_prompt_fragment,
     build_router_prompt_fragment,
     catalogue_prompt_hash,
+    project_tool_descriptions,
     render_catalogue_block,
     render_catalogue_segments,
 )
@@ -191,6 +193,7 @@ __all__ = [
     "TableRef",
     "TimeDimension",
     "TimeWindow",
+    "ToolDescriptionProjection",
     "UnitError",
     "UnknownIdentifierError",
     "UnknownUnit",
@@ -213,6 +216,7 @@ __all__ = [
     "iter_fields",
     "iter_joins",
     "materialize_lookup",
+    "project_tool_descriptions",
     "render_catalog_markdown",
     "render_catalogue_block",
     "render_catalogue_segments",

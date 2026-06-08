@@ -63,7 +63,7 @@ from fastmcp import FastMCP
 from semql import Catalog
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
-from semql.model import AuthContext, Cube, Measure, ResolutionContext
+from semql.model import AuthContext, Cube, ResolutionContext
 from semql.spec import Filter, SemanticQuery, TimeWindow
 from semql.validate import ValidationError
 from semql.validate import validate as validate_query
@@ -403,19 +403,6 @@ def _make_query_cube_tool(
     time_dim_names = tuple(td.name for td in cube.time_dimensions)
     field_names = (*measure_names, *dimension_names, *time_dim_names)
 
-    # Build a unit-annotated measure summary for the docstring so an LLM
-    # client reading the tool catalogue sees "watch_time [seconds →
-    # hours]" instead of just "watch_time" — without this it has no
-    # signal that the value is stored in one unit and shown in another.
-    def _measure_label(m: Measure) -> str:
-        if m.unit and m.display_unit and m.display_unit != m.unit:
-            return f"{m.name} [{m.unit} → {m.display_unit}]"
-        if m.unit:
-            return f"{m.name} [{m.unit}]"
-        return m.name
-
-    measure_labels = tuple(_measure_label(m) for m in cube.measures)
-
     # Build Literal types at runtime. ``Literal[("a", "b")]`` syntax is
     # supported in Python 3.11+ via the subscription protocol. The
     # types are attached to the function's ``__annotations__`` below —
@@ -482,13 +469,12 @@ def _make_query_cube_tool(
         return envelope
 
     query_cube_fn.__name__ = f"query_{cube_name}"
-    query_cube_fn.__doc__ = (cube.description or f"Query the {cube_name} cube.") + (
-        f"\n\nMeasures: {', '.join(measure_labels) or '(none)'}."
-        f"\nDimensions: {', '.join(dimension_names) or '(none)'}."
-        + (f"\nTime dimensions: {', '.join(time_dim_names)}." if time_dim_names else "")
-        + "\n\nField names are bare (no cube prefix); the tool "
-        "auto-qualifies them as it builds the SemanticQuery."
-    )
+    # Render via the shared projection helper so the MCP tool docstring
+    # and ``project_tool_descriptions`` can't drift apart — both go
+    # through ``semql.prompt.render_tool_description``.
+    from semql.prompt import render_tool_description
+
+    query_cube_fn.__doc__ = render_tool_description(cube)
     query_cube_fn.__annotations__ = {
         "measures": measure_t | None,
         "dimensions": dim_t | None,
