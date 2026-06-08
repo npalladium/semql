@@ -70,6 +70,7 @@ AggLiteral = Literal[
     "p95",
 ]
 DimTypeLiteral = Literal["string", "number", "time", "bool", "uuid"]
+DimCategoryLiteral = Literal["identity", "status", "pii", "metadata"]
 # Resolved storage type carried on ``ColumnMeta`` so callers (visualisers,
 # tool-schema renderers, downstream tooling) can reason about output
 # columns without re-resolving against the catalog. Distinct from

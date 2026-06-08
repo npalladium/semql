@@ -68,6 +68,7 @@ from semql.errors import (
     UnknownIdentifierError,
 )
 from semql.introspect import PolicyFn, ScopeFn, viewer_sees
+from semql.logical import to_logical_plan
 from semql.model import (
     AggLiteral,
     AuthContext,
@@ -76,7 +77,6 @@ from semql.model import (
     DerivedTable,
     Dimension,
     FormatLiteral,
-    Join,
     Measure,
     ScopePredicate,
     StorageType,
@@ -335,74 +335,6 @@ def _build_column_meta(
     for c in columns:
         out.append(by_name.get(c) or ColumnMeta(name=c, kind="computed", display_name=_humanize(c)))
     return out
-
-
-# ---------------------------------------------------------------------------
-# Cube graph BFS — find a single join path from a root through `joins` edges.
-# ---------------------------------------------------------------------------
-
-
-def _find_join_path(
-    root: str,
-    target: str,
-    catalog: dict[str, Cube],
-    *,
-    bidirectional: bool = False,
-) -> list[tuple[str, Join]]:
-    """BFS for a join path between two cubes.
-
-    Returns a list of ``(next_cube_name, Join)`` pairs — each pair
-    records the cube we land at and the ``Join`` whose ``on`` clause
-    AND-composes into the LEFT JOIN predicate. ``next_cube_name`` is
-    *not always* ``Join.to``: under bidirectional traversal the same
-    edge can be walked in reverse (the spine→facts pattern), in which
-    case ``next_cube_name`` is the source cube of the declared Join.
-    The ``on`` clause is symmetric in alias placeholders, so the
-    direction matters for FROM-clause emission but not for the SQL
-    predicate itself.
-
-    Default is forward-only: only edges declared on ``cube.joins`` get
-    walked, which matches the auto-inferred FK→PK direction the
-    catalog seeds. ``bidirectional=True`` also walks the reverse of
-    every declared edge — needed for spine→facts patterns (anti-join /
-    absent-row queries) where the FK lives on the fact cube but the
-    spine is the FROM root."""
-    if root == target:
-        return []
-    visited: set[str] = {root}
-    queue: list[tuple[str, list[tuple[str, Join]]]] = [(root, [])]
-    while queue:
-        current, path = queue.pop(0)
-        # Forward edges declared on ``current``.
-        for j in catalog[current].joins:
-            if j.to in visited:
-                continue
-            new_path = path + [(j.to, j)]
-            if j.to == target:
-                return new_path
-            visited.add(j.to)
-            queue.append((j.to, new_path))
-        # Reverse edges: cubes that declare ``Join(to=current, ...)`` —
-        # walked only when bidirectional traversal is explicitly enabled.
-        if bidirectional:
-            for other_name, other_cube in catalog.items():
-                if other_name in visited:
-                    continue
-                for j in other_cube.joins:
-                    if j.to != current:
-                        continue
-                    new_path = path + [(other_name, j)]
-                    if other_name == target:
-                        return new_path
-                    visited.add(other_name)
-                    queue.append((other_name, new_path))
-                    break
-    raise JoinPathError(
-        f"No join path from cube {root!r} to {target!r}. "
-        "Declare a Join in the catalog or restructure the query.",
-        root_cube=root,
-        target_cube=target,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -920,10 +852,10 @@ class _CompileEnv:
                     "left-joined cube's column to express the anti-join."
                 )
 
-        self.cubes_in_from, self.join_edges = _build_join_graph(
-            self.touched, catalog, left_join_cubes=self.left_join_cubes
-        )
-        self.root = self.cubes_in_from[0]
+        self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
+        self.cubes_in_from = [scan.cube for scan in self.plan.scans]
+        self.join_edges = [(j.left, j.right, j.model) for j in self.plan.joins]
+        self.root = self.plan.root
 
         self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
         self.dialect = dialect_for(self.backend, dialects)
@@ -1721,44 +1653,6 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
         derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
         applied_rollup=env.applied_rollup,
     )
-
-
-def _build_join_graph(
-    touched: list[Cube],
-    catalog: dict[str, Cube],
-    *,
-    left_join_cubes: set[str] | None = None,
-) -> tuple[list[Cube], list[tuple[Cube, Cube, Join]]]:
-    """BFS the catalog's Join edges from the first touched cube to
-    every other touched cube. Returns ``(cubes_in_from, join_edges)``
-    in the order the FROM clause + JOINs should be emitted.
-
-    When a target cube is named in ``left_join_cubes``, the BFS walks
-    edges bidirectionally — needed for spine→facts anti-join patterns
-    where the FK lives on the fact cube but the FROM root is the
-    spine. All other targets stay forward-only so normal queries can't
-    accidentally find a surprising reverse path."""
-    left_set: set[str] = left_join_cubes or set()
-    root = touched[0]
-    join_edges: list[tuple[Cube, Cube, Join]] = []
-    cubes_in_from: list[Cube] = [root]
-    for c in touched:
-        if c is root:
-            continue
-        path = _find_join_path(
-            root.name,
-            c.name,
-            catalog,
-            bidirectional=c.name in left_set,
-        )
-        cursor = root
-        for next_name, j in path:
-            tgt = catalog[next_name]
-            if tgt not in cubes_in_from:
-                join_edges.append((cursor, tgt, j))
-                cubes_in_from.append(tgt)
-            cursor = tgt
-    return cubes_in_from, join_edges
 
 
 # ---------------------------------------------------------------------------

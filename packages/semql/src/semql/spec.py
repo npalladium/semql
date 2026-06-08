@@ -66,7 +66,7 @@ class Filter(BaseModel):
         ),
     )
     values: list[str | int | float | bool] = Field(
-        default_factory=list,
+        default_factory=lambda: list[str | int | float | bool](),
         description=(
             "Predicate arguments — one for scalar ops, many for in/not_in, empty for is_null."
         ),
@@ -255,7 +255,7 @@ class SemanticQuery(BaseModel):
         description=("Named pre-defined predicates as 'cube.segment'; AND-composed with filters."),
     )
     filters: list[Filter] = Field(
-        default_factory=list,
+        default_factory=lambda: list[Filter](),
         description="Flat list of predicates; combined with implicit AND.",
     )
     where: BoolExpr | None = Field(
@@ -265,7 +265,7 @@ class SemanticQuery(BaseModel):
         ),
     )
     having: list[Filter] = Field(
-        default_factory=list,
+        default_factory=lambda: list[Filter](),
         description=(
             "Post-aggregation filters on measure values; references a measure also in 'measures'."
         ),
@@ -277,7 +277,7 @@ class SemanticQuery(BaseModel):
         ),
     )
     order: list[tuple[str, Literal["asc", "desc"]]] = Field(
-        default_factory=list,
+        default_factory=lambda: list[tuple[str, Literal["asc", "desc"]]](),
         description="(field, 'asc'|'desc') pairs; field may be a measure or dimension name.",
     )
     limit: int | None = Field(
@@ -297,7 +297,7 @@ class SemanticQuery(BaseModel):
         ),
     )
     derived_measures: list[InlineDerived] = Field(
-        default_factory=list,
+        default_factory=lambda: list[InlineDerived](),
         description=(
             "Ad-hoc derived measures (ratio/sum/diff) composed inline from catalog measures."
         ),

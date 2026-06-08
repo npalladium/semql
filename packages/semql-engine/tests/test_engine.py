@@ -26,9 +26,8 @@ from semql import (
     Measure,
     SemanticQuery,
     compile_federated_query,
-    compile_query,
 )
-from semql.federate import FederatedPlan, MergePlan
+from semql.federate import FederatedPlan
 from semql_engine import AdapterResult, DuckDBAdapter, Engine, EngineError
 
 # ---------------------------------------------------------------------------
@@ -551,14 +550,8 @@ def test_engine_runs_raw_rows_plan_with_having(
 def test_merge_plan_has_required_attributes() -> None:
     catalog = _catalog(_orders_cube())
     q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"])
-    # Single-source path through plain compile_query also feeds the
+    # Single-source path through compile_federated_query also feeds the
     # executor when wrapped manually; not the usual path but verifies
     # the IR shapes are decoupled cleanly.
-    compiled = compile_query(q, catalog)
-    plan = FederatedPlan(
-        fragments=[compiled],
-        merge=MergePlan(sql="SELECT * FROM frag_0"),
-        columns=compiled.columns,
-        column_meta=compiled.column_meta,
-    )
+    plan = compile_federated_query(q, catalog)
     assert plan.merge.sql.startswith("SELECT")

@@ -41,7 +41,9 @@ def _catalog(error_transform: object = None) -> Catalog:
 
 
 def test_error_transform_hook_importable() -> None:
-    from semql.hooks import ErrorTransformHook  # noqa: F401
+    from semql.hooks import ErrorTransformHook
+
+    assert ErrorTransformHook is not None
 
 
 def test_error_transform_hook_is_runtime_checkable() -> None:

@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from semql.hooks import CubePromptHook
 from semql.introspect import PolicyFn, iter_cubes, viewer_sees
 from semql.model import AuthContext, Cube, GlossaryEntry, Lookup, ResolutionContext, View
 
@@ -188,7 +189,7 @@ def _render_cube_block(
     *,
     header: str,
     preamble: str,
-    cube_prompt_hooks: list[object] | None = None,
+    cube_prompt_hooks: list[CubePromptHook] | None = None,
 ) -> str:
     """Render a list of cubes under a header, with optional preamble.
 
@@ -202,7 +203,7 @@ def _render_cube_block(
         lines.extend(_render_cube(cube, lookups_by_dim, ctx))
         if cube_prompt_hooks:
             for hook in cube_prompt_hooks:
-                extra = hook(cube)  # type: ignore[operator]
+                extra = hook(cube)
                 if extra:
                     lines.append(extra)
         lines.append("")
@@ -224,7 +225,7 @@ def render_catalog_block(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-    cube_prompt_hooks: list[object] | None = None,
+    cube_prompt_hooks: list[CubePromptHook] | None = None,
 ) -> str:
     # ``include_meta=True`` here is deliberate: META reflection cubes
     # historically appeared in the planner fragment when callers opted
@@ -393,7 +394,7 @@ def render_catalog_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-    cube_prompt_hooks: list[object] | None = None,
+    cube_prompt_hooks: list[CubePromptHook] | None = None,
 ) -> CatalogPrompt:
     """Split the catalog into a static + per-viewer overlay rendering.
 
@@ -507,8 +508,8 @@ class ToolDescriptionProjection:
 
     invariant: dict[str, str]
     viewer_gated: dict[str, str]
-    saved_query_invariant: dict[str, str] = field(default_factory=dict)
-    saved_query_viewer_gated: dict[str, str] = field(default_factory=dict)
+    saved_query_invariant: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    saved_query_viewer_gated: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
     def all(self) -> dict[str, str]:
         """Concatenate all four maps into one. Cube invariant and saved-query
@@ -943,7 +944,7 @@ def build_planner_prompt_fragment(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-    cube_prompt_hooks: list[object] | None = None,
+    cube_prompt_hooks: list[CubePromptHook] | None = None,
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
@@ -1003,7 +1004,7 @@ def build_planner_prompt_segments(
     top_k: int = 10,
     retrieval_threshold: int = 50,
     saved_queries: Sequence[SavedQuery] | None = None,
-    cube_prompt_hooks: list[object] | None = None,
+    cube_prompt_hooks: list[CubePromptHook] | None = None,
 ) -> CatalogPrompt:
     """Cacheable variant of :func:`build_planner_prompt_fragment`.
 

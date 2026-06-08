@@ -15,37 +15,29 @@ ToolDescriptionProjection gains:
 
 from __future__ import annotations
 
-from semql import (
-    Backend,
-    Catalog,
-    Cube,
-    Dimension,
-    Measure,
-    SemanticQuery,
-    project_tool_descriptions,
-)
+from typing import Literal
+
+from semql import SemanticQuery, project_tool_descriptions
 from semql.spec import SavedQuery
 
 
-def _sq(**kwargs: object) -> SavedQuery:
-    defaults = dict(
+def _sq(
+    *,
+    description: str = "",
+    purpose: str = "",
+    questions: list[str] | None = None,
+    required_roles: list[str] | None = None,
+    stability: Literal["stable", "beta", "deprecated"] = "stable",
+) -> SavedQuery:
+    return SavedQuery(
         name="weekly_revenue",
         query=SemanticQuery(measures=["orders.revenue"]),
+        description=description,
+        purpose=purpose,
+        questions=questions or [],
+        required_roles=required_roles or [],
+        stability=stability,
     )
-    defaults.update(kwargs)
-    return SavedQuery(**defaults)  # type: ignore[arg-type]
-
-
-def _catalog(saved_queries: list[SavedQuery] | None = None) -> Catalog:
-    cube = Cube(
-        name="orders",
-        backend=Backend.POSTGRES,
-        table="public.orders",
-        alias="o",
-        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
-        dimensions=[Dimension(name="status", sql="{o}.status", type="string")],
-    )
-    return Catalog([cube], saved_queries=saved_queries or [])
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +46,9 @@ def _catalog(saved_queries: list[SavedQuery] | None = None) -> Catalog:
 
 
 def test_render_saved_query_tool_description_importable() -> None:
-    from semql.prompt import render_saved_query_tool_description  # noqa: F401
+    from semql.prompt import render_saved_query_tool_description
+
+    assert render_saved_query_tool_description is not None
 
 
 def test_render_saved_query_tool_description_exported_from_semql() -> None:

@@ -46,7 +46,9 @@ def _cube(
 
 
 def test_validation_warning_importable() -> None:
-    from semql.validate import ValidationWarning  # noqa: F401
+    from semql.validate import ValidationWarning
+
+    assert ValidationWarning is not None
 
 
 def test_validation_warning_is_subclass_of_validation_error() -> None:

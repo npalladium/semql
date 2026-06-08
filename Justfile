@@ -107,6 +107,61 @@ stage pkg: clean-dist
     uv build --package {{pkg}}
     uv run twine check dist/*
 
+# Bump all package versions in lockstep and update internal semql
+# dependency ranges.
+#   just bump          # patch
+#   just bump minor
+#   just bump major
+bump part="patch":
+    #!/usr/bin/env -S python3
+    import pathlib
+    import re
+    import sys
+
+    part = sys.argv[1] if len(sys.argv) > 1 else "patch"
+    if part not in {"patch", "minor", "major"}:
+        raise SystemExit("part must be one of: patch, minor, major")
+
+    root = pathlib.Path(".")
+    package_files = sorted(root.glob("packages/*/pyproject.toml"))
+    if not package_files:
+        raise SystemExit("no package pyproject.toml files found under packages/*/")
+
+    version_re = re.compile(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$')
+    semql_dep_re = re.compile(r'semql>=\d+\.\d+\.\d+,<\d+\.\d+')
+
+    first_text = package_files[0].read_text()
+    match = version_re.search(first_text)
+    if not match:
+        raise SystemExit(f"missing [project].version in {package_files[0]}")
+
+    major, minor, patch = (int(x) for x in match.groups())
+    if part == "patch":
+        patch += 1
+    elif part == "minor":
+        minor += 1
+        patch = 0
+    else:
+        major += 1
+        minor = 0
+        patch = 0
+
+    new_version = f"{major}.{minor}.{patch}"
+    upper_bound = f"{major}.{minor + 1}"
+    new_dep = f"semql>={new_version},<{upper_bound}"
+
+    for path in package_files:
+        text = path.read_text()
+        if not version_re.search(text):
+            raise SystemExit(f"missing [project].version in {path}")
+        text, version_count = version_re.subn(f'version = "{new_version}"', text, count=1)
+        text = semql_dep_re.sub(new_dep, text)
+        path.write_text(text)
+        print(f"updated {path} ({version_count} version field)")
+
+    print(f"bumped all packages to {new_version}")
+    print(f"updated semql dependency spec to {new_dep}")
+
 # ---------------------------------------------------------------------------
 # Staged release — semql first, wait for the index, then dependents.
 # ---------------------------------------------------------------------------

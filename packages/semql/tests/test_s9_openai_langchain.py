@@ -51,7 +51,9 @@ def _catalog() -> Catalog:
 
 
 def test_to_openai_function_importable() -> None:
-    from semql.prompt import to_openai_function  # noqa: F401
+    from semql.prompt import to_openai_function
+
+    assert to_openai_function is not None
 
 
 def test_to_openai_function_exported_from_semql() -> None:

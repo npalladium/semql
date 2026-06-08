@@ -17,9 +17,10 @@ trust the input.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from semql._grounding import validate_relations
+from semql.hooks import CubePromptHook
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import (
     AuthContext,
@@ -62,7 +63,11 @@ class Catalog:
         glossary: list[GlossaryEntry] | None = None,
         relations: str = "",
         error_transform: object | None = None,
+        compile_hooks: list[Any] | None = None,
+        sql_rewrite_hooks: list[Any] | None = None,
     ) -> None:
+        self.compile_hooks = compile_hooks or []
+        self.sql_rewrite_hooks = sql_rewrite_hooks or []
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
@@ -423,7 +428,13 @@ class Catalog:
             query = _apply_query_defaults(query, query_defaults)
 
         try:
-            return compile_query(
+            for hook in self.compile_hooks:
+                if hasattr(hook, "pre_compile"):
+                    new_q = hook.pre_compile(query, viewer=viewer, context=context)
+                    if new_q is not None:
+                        query = new_q
+
+            compiled = compile_query(
                 query,
                 self._by_name,
                 context=context,
@@ -432,7 +443,32 @@ class Catalog:
                 policy=self._policy,
                 scope_fns=self._scope_fns,
             )
+
+            for hook in self.compile_hooks:
+                if hasattr(hook, "post_compile"):
+                    try:
+                        hook.post_compile(query, compiled, viewer=viewer, context=context)
+                    except Exception as e:
+                        import warnings
+
+                        warnings.warn(
+                            f"Compile hook {hook} raised exception in post_compile: {e}",
+                            stacklevel=2,
+                        )
+
+            for hook in self.sql_rewrite_hooks:
+                if hasattr(hook, "rewrite"):
+                    compiled = hook.rewrite(compiled, query=query, viewer=viewer, context=context)
+
+            return compiled
         except CompileError as exc:
+            import contextlib
+
+            for hook in self.compile_hooks:
+                if hasattr(hook, "on_compile_error"):
+                    with contextlib.suppress(Exception):
+                        hook.on_compile_error(query, exc, viewer=viewer, context=context)
+
             if self._error_transform is not None:
                 replacement = self._error_transform(exc)  # type: ignore[operator]
                 if replacement is not None:
@@ -453,7 +489,7 @@ class Catalog:
         current_date: str | None = None,
         retrieved_snippets: list[str] | None = None,
         extra: str | None = None,
-        cube_prompt_hooks: list[object] | None = None,
+        cube_prompt_hooks: list[CubePromptHook] | None = None,
     ) -> str:
         """Render the planner prompt fragment for this catalog. Thin
         wrapper around ``semql.prompt.build_planner_prompt_fragment``.
@@ -678,6 +714,7 @@ class Catalog:
                 "langchain-core is required for to_langchain_tools(). "
                 "Install it with: pip install langchain-core"
             ) from None
+        structured_tool_cls = cast(Any, StructuredTool)
 
         from semql.introspect import iter_cubes
 
@@ -702,7 +739,7 @@ class Catalog:
                 return {"sql": compiled.sql, "params": compiled.params}
 
             tools.append(
-                StructuredTool.from_function(
+                structured_tool_cls.from_function(
                     func=_run,
                     name=f"query_{cube.name}",
                     description=render_tool_description(cube),

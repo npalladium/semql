@@ -404,7 +404,9 @@ def test_plain_callable_is_not_lookup_enricher() -> None:
     """A plain LookupLoader callable doesn't satisfy LookupEnricher."""
     from semql.model import LookupEnricher
 
-    plain = lambda ctx: ["a", "b"]  # noqa: E731
+    def plain(ctx: object) -> list[str]:
+        return ["a", "b"]
+
     assert not isinstance(plain, LookupEnricher)
 
 
@@ -437,7 +439,7 @@ def test_enrich_result_adds_label_column_for_known_ids() -> None:
     loader = EnrichingLoader()
     assert isinstance(loader, LookupEnricher)
     lk = Lookup(dimension="orders.customer_id", loader=loader)
-    rows = [
+    rows: list[dict[str, object]] = [
         {"customer_id": "u1", "revenue": 100},
         {"customer_id": "u2", "revenue": 200},
     ]
@@ -459,7 +461,7 @@ def test_enrich_result_echoes_raw_id_for_unknown_ids() -> None:
             return {}  # nothing known
 
     lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
-    rows = [{"customer_id": "u99", "revenue": 5}]
+    rows: list[dict[str, object]] = [{"customer_id": "u99", "revenue": 5}]
     out = enrich_result(rows, "customer_id", lk, ResolutionContext())
     assert out[0]["customer_id__label"] == "u99"
 
@@ -480,8 +482,8 @@ def test_enrich_result_skips_none_ids() -> None:
             return {}
 
     lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
-    rows = [{"customer_id": None, "revenue": 5}]
-    out = enrich_result(rows, "customer_id", lk, ResolutionContext())  # type: ignore[arg-type]
+    rows: list[dict[str, object]] = [{"customer_id": None, "revenue": 5}]
+    out = enrich_result(rows, "customer_id", lk, ResolutionContext())
     # None rows should not contribute an id to the enricher call.
     assert None not in enriched[0] if enriched else True
     assert out[0].get("customer_id__label") is None
@@ -493,7 +495,7 @@ def test_enrich_result_plain_callable_returns_rows_unchanged() -> None:
     from semql.model import Lookup, ResolutionContext
 
     lk = Lookup(dimension="orders.region", values=("EMEA",))
-    rows = [{"region": "EMEA", "cnt": 1}]
+    rows: list[dict[str, object]] = [{"region": "EMEA", "cnt": 1}]
     out = enrich_result(rows, "region", lk, ResolutionContext())
     assert out == rows
     assert "region__label" not in out[0]
@@ -515,12 +517,12 @@ def test_enrich_result_only_calls_enricher_with_unique_non_null_ids() -> None:
             return {i: f"L:{i}" for i in ids}
 
     lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
-    rows = [
+    rows: list[dict[str, object]] = [
         {"customer_id": "u1"},
         {"customer_id": "u1"},  # duplicate
         {"customer_id": "u2"},
         {"customer_id": None},
     ]
-    enrich_result(rows, "customer_id", lk, ResolutionContext())  # type: ignore[arg-type]
+    enrich_result(rows, "customer_id", lk, ResolutionContext())
     assert len(seen) == 1
     assert set(seen[0]) == {"u1", "u2"}  # no duplicates, no None

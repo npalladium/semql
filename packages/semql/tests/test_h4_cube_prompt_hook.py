@@ -39,7 +39,9 @@ def _catalog() -> Catalog:
 
 
 def test_cube_prompt_hook_importable() -> None:
-    from semql.hooks import CubePromptHook  # noqa: F401
+    from semql.hooks import CubePromptHook
+
+    assert CubePromptHook is not None
 
 
 def test_cube_prompt_hook_is_runtime_checkable() -> None:
@@ -69,7 +71,7 @@ def test_build_planner_prompt_fragment_accepts_hooks_kwarg() -> None:
         return "HOOK_TEXT_FRAGMENT"
 
     result = build_planner_prompt_fragment(
-        cat._by_name,
+        cat.as_dict(),
         cube_prompt_hooks=[hook],
     )
     assert "HOOK_TEXT_FRAGMENT" in result
@@ -83,26 +85,29 @@ def test_build_planner_prompt_fragment_hook_receives_cube() -> None:
         seen.append(cube.name)
         return ""
 
-    build_planner_prompt_fragment(cat._by_name, cube_prompt_hooks=[hook])
+    build_planner_prompt_fragment(cat.as_dict(), cube_prompt_hooks=[hook])
     assert "orders" in seen
 
 
 def test_build_planner_prompt_fragment_no_hooks_unchanged() -> None:
     cat = _catalog()
-    without_hooks = build_planner_prompt_fragment(cat._by_name)
-    with_empty_hooks = build_planner_prompt_fragment(cat._by_name, cube_prompt_hooks=[])
+    without_hooks = build_planner_prompt_fragment(cat.as_dict())
+    with_empty_hooks = build_planner_prompt_fragment(cat.as_dict(), cube_prompt_hooks=[])
     assert without_hooks == with_empty_hooks
 
 
 def test_build_planner_prompt_fragment_multiple_hooks() -> None:
     cat = _catalog()
 
+    def hook_a(cube: Cube) -> str:
+        return "HOOK_A"
+
+    def hook_b(cube: Cube) -> str:
+        return "HOOK_B"
+
     results = build_planner_prompt_fragment(
-        cat._by_name,
-        cube_prompt_hooks=[
-            lambda c: "HOOK_A",
-            lambda c: "HOOK_B",
-        ],
+        cat.as_dict(),
+        cube_prompt_hooks=[hook_a, hook_b],
     )
     assert "HOOK_A" in results
     assert "HOOK_B" in results
@@ -119,7 +124,7 @@ def test_build_planner_prompt_segments_accepts_hooks_kwarg() -> None:
     def hook(cube: Cube) -> str:
         return "SEGMENT_HOOK"
 
-    cp = build_planner_prompt_segments(cat._by_name, cube_prompt_hooks=[hook])
+    cp = build_planner_prompt_segments(cat.as_dict(), cube_prompt_hooks=[hook])
     assert "SEGMENT_HOOK" in cp.joined()
 
 
