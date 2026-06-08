@@ -261,6 +261,13 @@ class SavedQuery(BaseModel):
 
     ``description`` is surfaced to MCP clients as the tool docstring;
     a one-sentence "what this answers" is the right shape.
+
+    ``questions`` / ``keywords`` / ``purpose`` are LLM-grounding
+    metadata (see S7). The planner / router indexes saved queries by
+    these surfaces independently from cubes.
+
+    ``stability`` / ``replacement`` mirror :attr:`Cube.stability` —
+    ``deprecated`` causes the compiler to refuse the saved query.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -269,6 +276,41 @@ class SavedQuery(BaseModel):
     description: str = ""
     owner: str | None = None
     required_roles: list[str] = []
+    # Fully-baked NL questions this saved query answers — same shape
+    # rules as ``Cube.questions``. Surface in the MCP tool description
+    # so external agents pick the right saved query by capability.
+    questions: list[str] = []
+    # Free-text search tokens — same acronym-preserving normalisation
+    # as ``Cube.keywords``.
+    keywords: list[str] = []
+    # One-line "why this exists": "operational dashboard", "weekly
+    # ops report", "on-call latency check". Free-form.
+    purpose: str = ""
+    # Lifecycle tier — same semantics as ``Cube.stability``. The
+    # compiler refuses to materialise a saved query that resolves to
+    # a ``deprecated`` cube (downstream of cube lifecycle).
+    stability: Literal["stable", "beta", "deprecated"] = "stable"
+    # Successor pointer surfaced in the deprecation error message.
+    replacement: str | None = None
+
+    @model_validator(mode="after")
+    def _check_grounding(self) -> SavedQuery:
+        from semql._grounding import validate_keywords, validate_questions
+
+        validate_questions("SavedQuery", self.name, self.questions)
+        normalised = validate_keywords("SavedQuery", self.name, self.keywords)
+        # Frozen model — bypass via object.__setattr__ since
+        # model_copy(update=...) inside an after-validator would
+        # re-trigger validation and recurse.
+        if normalised != self.keywords:
+            object.__setattr__(self, "keywords", normalised)
+        if self.stability != "deprecated" and self.replacement is not None:
+            raise ValueError(
+                f"SavedQuery {self.name!r}: ``replacement`` may only "
+                f"be set when ``stability='deprecated'`` (got stability="
+                f"{self.stability!r})."
+            )
+        return self
 
 
 __all__ = [

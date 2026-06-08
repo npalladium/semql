@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
+from semql._grounding import validate_relations
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import (
     AuthContext,
@@ -26,6 +27,7 @@ from semql.model import (
     Cube,
     DerivedTable,
     Dimension,
+    GlossaryEntry,
     Join,
     Lookup,
     ResolutionContext,
@@ -39,6 +41,7 @@ _T = TypeVar("_T", bound=BaseField)
 if TYPE_CHECKING:
     from semql.compile import Compiled
     from semql.prompt import CataloguePrompt
+    from semql.retrieve import EmbeddingProvider, Retriever
     from semql.spec import SemanticQuery
 
 
@@ -56,6 +59,8 @@ class Catalog:
         policy: PolicyFn | None = None,
         scope_fns: dict[str, ScopeFn] | None = None,
         unit_registry: Registry | None = None,
+        glossary: list[GlossaryEntry] | None = None,
+        relations: str = "",
     ) -> None:
         names = [c.name for c in cubes]
         duplicates = sorted({n for n in names if names.count(n) > 1})
@@ -289,6 +294,48 @@ class Catalog:
             seen_saved_names.add(sq.name)
         self.saved_queries: dict[str, SavedQuery] = {sq.name: sq for sq in saved_query_list}
 
+        # S7 — replacement pointers must name a real cube. Cube doesn't
+        # know its siblings at construction time; check here.
+        for c in merged:
+            if c.replacement is not None and c.replacement not in self._by_name:
+                raise ValueError(
+                    f"Cube {c.name!r}: replacement={c.replacement!r} names "
+                    f"a cube not in the catalog. Known cubes: "
+                    f"{sorted(self._by_name)}."
+                )
+        for sq in saved_query_list:
+            if sq.replacement is not None and sq.replacement not in self.saved_queries:
+                raise ValueError(
+                    f"SavedQuery {sq.name!r}: replacement={sq.replacement!r} "
+                    f"names a saved query not in the catalog. Known saved "
+                    f"queries: {sorted(self.saved_queries)}."
+                )
+
+        # S7 — catalog-wide glossary + cross-cube relations narrative.
+        # Terms and aliases share one namespace (the retriever indexes
+        # aliases as separate documents pointing at the same canonical
+        # entry, so a token that's both a term and an alias would be
+        # ambiguous). Collisions are raised case-insensitively.
+        glossary_list: list[GlossaryEntry] = list(glossary or [])
+        seen_glossary: dict[str, str] = {}  # lowercase token → "term:X" / "alias on X"
+
+        def _register(token: str, source: str) -> None:
+            key = token.lower()
+            if key in seen_glossary:
+                raise ValueError(
+                    f"Catalog glossary: token {token!r} ({source}) collides "
+                    f"with {seen_glossary[key]} (case-insensitive). Terms "
+                    "and aliases share one namespace; rename one."
+                )
+            seen_glossary[key] = source
+
+        for g in glossary_list:
+            _register(g.term, f"term {g.term!r}")
+            for a in g.aliases:
+                _register(a, f"alias on term {g.term!r}")
+        self.glossary: list[GlossaryEntry] = glossary_list
+        self.relations: str = validate_relations("Catalog", "<catalog>", relations)
+
         self._scope_fns: dict[str, ScopeFn] = dict(scope_fns or {})
         for c in merged:
             if c.scope is not None and c.scope not in self._scope_fns:
@@ -384,6 +431,10 @@ class Catalog:
         include_introspection: bool = False,
         viewer: AuthContext | None = None,
         ctx: ResolutionContext | None = None,
+        user_query: str | None = None,
+        retriever: Retriever | None = None,
+        top_k: int = 10,
+        retrieval_threshold: int = 50,
     ) -> str:
         """Render the planner prompt fragment for this catalog. Thin
         wrapper around ``semql.prompt.build_planner_prompt_fragment``.
@@ -395,7 +446,15 @@ class Catalog:
         any registered :class:`Lookup` with a loader fires here. Static
         lookups inline regardless of ``ctx``; dynamic lookups skip
         inlining when ``ctx`` is ``None`` and surface a tool hint
-        instead."""
+        instead.
+
+        Retrieval mode (S7): when both ``user_query`` and ``retriever``
+        are set AND the catalog has more than ``retrieval_threshold``
+        questions across cubes + saved queries, the catalogue block is
+        narrowed to the top-``top_k`` cubes the retriever returns. Below
+        the threshold the prompt is small enough to splice in full.
+        Saved-query question counts are pulled from
+        ``self.saved_queries`` automatically."""
         from semql.prompt import build_planner_prompt_fragment
 
         return build_planner_prompt_fragment(
@@ -407,6 +466,13 @@ class Catalog:
             policy=self._policy,
             lookups=self.lookups,
             ctx=ctx,
+            glossary=self.glossary,
+            relations=self.relations,
+            user_query=user_query,
+            retriever=retriever,
+            top_k=top_k,
+            retrieval_threshold=retrieval_threshold,
+            saved_queries=list(self.saved_queries.values()),
         )
 
     def prompt_segments(
@@ -416,13 +482,23 @@ class Catalog:
         include_introspection: bool = False,
         viewer: AuthContext | None = None,
         ctx: ResolutionContext | None = None,
+        user_query: str | None = None,
+        retriever: Retriever | None = None,
+        top_k: int = 10,
+        retrieval_threshold: int = 50,
     ) -> CataloguePrompt:
         """Render the planner prompt as a cacheable two-segment object.
 
         Splits into a viewer-invariant ``static`` segment (publicly
         visible cubes + spec contract + raw-fallback) and a per-viewer
         ``overlay`` (role-gated cubes the viewer can see). Splice the
-        two around your Anthropic / Bedrock prompt-cache breakpoint."""
+        two around your Anthropic / Bedrock prompt-cache breakpoint.
+
+        Retrieval mode shares the same semantics as :meth:`prompt`;
+        when active the static segment lists only the top-k cubes
+        ranked against ``user_query``. Cache behaviour: the cache key
+        should incorporate ``user_query`` since the static segment now
+        varies with it."""
         from semql.prompt import build_planner_prompt_segments
 
         return build_planner_prompt_segments(
@@ -434,6 +510,13 @@ class Catalog:
             policy=self._policy,
             lookups=self.lookups,
             ctx=ctx,
+            glossary=self.glossary,
+            relations=self.relations,
+            user_query=user_query,
+            retriever=retriever,
+            top_k=top_k,
+            retrieval_threshold=retrieval_threshold,
+            saved_queries=list(self.saved_queries.values()),
         )
 
     def prompt_hash(
@@ -456,6 +539,38 @@ class Catalog:
             only_exposed=only_exposed,
             lookups=self.lookups,
             ctx=ctx,
+            glossary=self.glossary,
+            relations=self.relations,
+        )
+
+    def with_retrieval(
+        self,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        mmr: bool = False,
+        mmr_lambda: float = 0.5,
+    ) -> Retriever:
+        """Build a :class:`semql.retrieve.Retriever` indexed over this
+        catalog's cubes + glossary aliases.
+
+        Selection policy mirrors the S7 PRD:
+        - No ``embedder`` → :class:`SQLiteBM25Retriever` (lexical only).
+        - With ``embedder`` → :class:`HybridRetriever` (BM25 + cosine via RRF).
+        - ``mmr=True`` wraps the result in :class:`MMRWrapper` (needs vectors).
+
+        Deprecated cubes are excluded from the index — the compiler
+        refuses to materialise them anyway."""
+        from semql.retrieve import build_default_retriever
+
+        # Filter deprecated up front so the retriever can't recommend
+        # something the compiler will then refuse.
+        live_cubes = [c for c in self._cubes if c.stability != "deprecated"]
+        return build_default_retriever(
+            live_cubes,
+            embedder=embedder,
+            glossary=self.glossary,
+            mmr=mmr,
+            mmr_lambda=mmr_lambda,
         )
 
     def __iter__(self) -> Iterator[Cube]:

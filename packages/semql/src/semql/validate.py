@@ -292,6 +292,37 @@ def validate(
             )
         )
 
+    # S7 lifecycle hints. ``deprecated`` is a hard refusal (the
+    # compiler raises) so ``validate`` surfaces it as an error too —
+    # mirrors ``compile`` for the planner-feedback loop. ``beta`` is a
+    # soft advisory: included in the result so a UI can warn the user
+    # without blocking the query.
+    for c in touched:
+        if c.stability == "deprecated":
+            if c.replacement is not None:
+                msg = f"Cube {c.name!r} is deprecated. Use {c.replacement!r} instead."
+            else:
+                msg = f"Cube {c.name!r} is deprecated with no replacement; remove the reference."
+            errors.append(
+                ValidationError(
+                    code="cube_deprecated",
+                    message=msg,
+                    cube=c.name,
+                    hint=c.replacement,
+                )
+            )
+        elif c.stability == "beta":
+            errors.append(
+                ValidationError(
+                    code="cube_beta",
+                    message=(
+                        f"Cube {c.name!r} is flagged beta — its surface may "
+                        "change. Pin to a stable cube for production workloads."
+                    ),
+                    cube=c.name,
+                )
+            )
+
     backends = {c.backend for c in touched}
     if len(backends) > 1:
         names = sorted(b.value for b in backends)

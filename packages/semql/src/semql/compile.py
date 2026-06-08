@@ -855,6 +855,27 @@ def _check_viewer_authorization(
         )
 
 
+def _check_lifecycle(touched: list[Cube]) -> None:
+    """Refuse queries that touch a ``deprecated`` cube. ``beta`` flows
+    through unchanged — the planner sees a "beta" annotation in the
+    prompt fragment (slice 3) and chooses whether to use it.
+
+    The error names every deprecated cube touched in one shot (instead
+    of stopping at the first), so a query against two deprecated cubes
+    gets one error listing both. The replacement pointer is surfaced
+    per cube — clients can route users to the successor."""
+    offenders = [c for c in touched if c.stability == "deprecated"]
+    if not offenders:
+        return
+    parts: list[str] = []
+    for c in offenders:
+        if c.replacement is not None:
+            parts.append(f"{c.name!r} (use {c.replacement!r} instead)")
+        else:
+            parts.append(f"{c.name!r} (no replacement; remove the reference)")
+    raise CompileError("Query touches deprecated cube(s): " + ", ".join(parts) + ".")
+
+
 def _check_required_filters(touched: list[Cube], q: SemanticQuery) -> None:
     """Every ``Cube.required_filters`` must be referenced by a Filter
     on the query — refuse early so the compiler doesn't have to emit
@@ -952,6 +973,7 @@ class _CompileEnv:
         self.segment_resolutions = resolved.segment_resolutions
         self.touched = resolved.touched
 
+        _check_lifecycle(self.touched)
         _check_viewer_authorization(self.touched, viewer, policy)
         _check_required_filters(self.touched, q)
 

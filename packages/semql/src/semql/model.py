@@ -28,6 +28,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from semql._grounding import (
+    validate_keywords as _grounding_validate_keywords,
+)
+from semql._grounding import (
+    validate_questions as _grounding_validate_questions,
+)
+from semql._grounding import (
+    validate_relations as _grounding_validate_relations,
+)
+
 
 class Backend(StrEnum):
     POSTGRES = "postgres"
@@ -37,6 +47,10 @@ class Backend(StrEnum):
     SNOWFLAKE = "snowflake"
     META = "meta"  # reflection over the catalogue itself; see introspect.py
 
+
+StabilityLiteral = Literal["stable", "beta", "deprecated"]
+"""Lifecycle hint for a Cube / SavedQuery. ``deprecated`` is refused by
+the compiler (see S7 PRD); ``beta`` flows through with an annotation."""
 
 AggLiteral = Literal[
     "sum",
@@ -248,6 +262,38 @@ class Rollup(BaseModel):
         return self
 
 
+class GlossaryEntry(BaseModel):
+    """One catalog-wide vocabulary term + its definition + spelling aliases.
+
+    Entries live on ``Catalog.glossary``. The retrieval index indexes
+    each alias as its own document pointing at the same canonical
+    definition — a misspelled term ("ARR" / "annual recurring revenue"
+    / "yearly subscription revenue") still resolves to the same entry.
+    Aliases get a separate vector / FTS5 row each; ``term`` and
+    ``definition`` are combined into the entry's primary document.
+
+    ``aliases`` may not contain empty strings; ``term`` may not be empty.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    term: str
+    definition: str
+    aliases: list[str] = []
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> GlossaryEntry:
+        if not self.term.strip():
+            raise ValueError("GlossaryEntry.term cannot be empty.")
+        if not self.definition.strip():
+            raise ValueError(f"GlossaryEntry({self.term!r}): definition cannot be empty.")
+        for a in self.aliases:
+            if not a.strip():
+                raise ValueError(
+                    f"GlossaryEntry({self.term!r}): aliases cannot contain empty strings."
+                )
+        return self
+
+
 class Join(BaseModel):
     """A directed edge from one cube to another.
 
@@ -425,6 +471,33 @@ class Cube(BaseModel):
     # magnitude faster on large fact tables. See :class:`Rollup` for
     # the matching rules and naming convention.
     rollups: list[Rollup] = []
+    # LLM-grounding metadata (S7). Concrete NL questions a user might
+    # literally ask of this cube — *not* templates, not noun fragments.
+    # Spliced into the planner prompt (small catalog) or embedded for
+    # top-k retrieval (large catalog). Surface in the MCP per-cube tool
+    # description so external agents picking by capability see the
+    # canonical phrasings.
+    questions: list[str] = []
+    # Free-text search tokens with acronym-preserving normalisation
+    # applied at validation. ``"AOV"`` stays ``"AOV"`` (all-caps tokens
+    # are acronyms); other tokens lowercase. Case-insensitive dedupe;
+    # first form wins. Not validated against any controlled vocab.
+    keywords: list[str] = []
+    # Cube-*internal* narrative: cardinality / FK paths, business rules
+    # / gotchas ("Orders only count once payment_status='paid'"),
+    # anti-patterns, lineage / freshness. Cross-cube relationships go
+    # on ``Catalog.relations`` so they live in one place. Capped at
+    # 2000 chars; the first 120 chars appear in the MCP tool
+    # description.
+    relations: str = ""
+    # Lifecycle tier. ``deprecated`` cubes trigger a ``CompileError``
+    # at query compile time; ``beta`` flows through with a planner-
+    # visible annotation. ``stable`` is the default.
+    stability: StabilityLiteral = "stable"
+    # Optional pointer at the successor cube when ``stability=
+    # "deprecated"``. Surfaces in the CompileError message. Leave
+    # ``None`` when the cube is going away entirely (no replacement).
+    replacement: str | None = None
 
     @model_validator(mode="after")
     def _check_rollups(self) -> Cube:
@@ -486,6 +559,26 @@ class Cube(BaseModel):
                     f"{r.time_dimension!r} (allowed: "
                     f"{td_by_name[r.time_dimension].granularities})."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_grounding(self) -> Cube:
+        """Length caps + dedupe on the S7 grounding fields. Refuses
+        ``deprecated`` without a self-consistent replacement field
+        (validation that the replacement points at a *real* cube
+        happens at Catalog construction — Cube doesn't know its
+        siblings)."""
+        _grounding_validate_questions("Cube", self.name, self.questions)
+        # Normalised + deduped keywords replace the input list. Cube
+        # isn't frozen, so direct assignment is fine.
+        self.keywords = _grounding_validate_keywords("Cube", self.name, self.keywords)
+        _grounding_validate_relations("Cube", self.name, self.relations)
+        if self.stability != "deprecated" and self.replacement is not None:
+            raise ValueError(
+                f"Cube {self.name!r}: ``replacement`` may only be set "
+                f"when ``stability='deprecated'`` (got stability="
+                f"{self.stability!r})."
+            )
         return self
 
     @model_validator(mode="after")
@@ -777,6 +870,7 @@ __all__ = [
     "DimTypeLiteral",
     "Dimension",
     "FormatLiteral",
+    "GlossaryEntry",
     "GranularityLiteral",
     "Join",
     "Lookup",
@@ -788,6 +882,7 @@ __all__ = [
     "ResolutionContext",
     "ScopePredicate",
     "Segment",
+    "StabilityLiteral",
     "TableRef",
     "TenancyMode",
     "TimeDimension",

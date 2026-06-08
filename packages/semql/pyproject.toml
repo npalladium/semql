@@ -25,6 +25,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+# S7 retrieval — vector-side retrievers (cosine, hybrid, MMR) need
+# numpy for the per-cube embedding matrix and pairwise-similarity
+# math. The lexical SQLiteBM25Retriever uses only stdlib sqlite3 +
+# FTS5 and works without this extras group.
+retrieval = ["numpy>=1.26"]
+
 [project.urls]
 Homepage = "https://github.com/npalladium/semql"
 Repository = "https://github.com/npalladium/semql"

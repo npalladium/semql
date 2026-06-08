@@ -116,6 +116,14 @@ def _render_cube(
             lines.append(_render_join(j))
         lines.append("    ],")
 
+    # S7 — emit placeholder grounding fields with TODO comments so the
+    # introspect → review flow is explicit. The user fills these in
+    # (or runs `semql suggest` to draft them via LLM).
+    lines.append("    # TODO: review — questions users might literally ask of this cube.")
+    lines.append("    questions=[],")
+    lines.append("    # TODO: review — keywords for lexical retrieval (acronyms preserved).")
+    lines.append("    keywords=[],")
+
     lines.append(")")
     return "\n".join(lines)
 

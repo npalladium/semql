@@ -13,10 +13,16 @@ system prompt alongside role description, data-source context, etc.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from semql.introspect import PolicyFn, iter_cubes, viewer_sees
-from semql.model import AuthContext, Cube, Lookup, ResolutionContext, View
+from semql.model import AuthContext, Cube, GlossaryEntry, Lookup, ResolutionContext, View
+
+if TYPE_CHECKING:
+    from semql.retrieve import Retriever
+    from semql.spec import SavedQuery
 
 
 def _render_lookup_line(dim_ref: str, lookup: Lookup, ctx: ResolutionContext | None) -> str | None:
@@ -61,6 +67,120 @@ _CATALOGUE_HEADER = (
 )
 
 
+def _drop_deprecated(cubes: list[Cube]) -> list[Cube]:
+    """Filter ``deprecated`` cubes out of a list. The compiler refuses
+    them; surfacing them in the prompt would only tempt the planner."""
+    return [c for c in cubes if c.stability != "deprecated"]
+
+
+def _retrieval_active(
+    cubes: list[Cube],
+    saved_queries: Sequence[SavedQuery] | None,
+    *,
+    user_query: str | None,
+    retriever: Retriever | None,
+    retrieval_threshold: int,
+) -> bool:
+    """Decide whether to splice only the top-k retrieved cubes.
+
+    Both ``user_query`` and ``retriever`` must be set for retrieval to
+    even be considered. Even then, retrieval only activates when the
+    catalog has enough grounding content to justify the cost —
+    measured as total ``questions`` across cubes + saved queries.
+    Below the threshold the full prompt fits comfortably and retrieval
+    would only narrow it artificially."""
+    if user_query is None or retriever is None:
+        return False
+    if retrieval_threshold <= 0:
+        return True  # caller opts in unconditionally
+    total = sum(len(c.questions) for c in cubes)
+    if saved_queries is not None:
+        total += sum(len(sq.questions) for sq in saved_queries)
+    return total > retrieval_threshold
+
+
+def _retrieval_header_preamble(
+    cubes: list[Cube],
+    saved_queries: Sequence[SavedQuery] | None,
+    *,
+    user_query: str | None,
+    retriever: Retriever | None,
+    top_k: int,
+    retrieval_threshold: int,
+) -> tuple[str, str]:
+    """Return the ``(header, preamble)`` pair to feed
+    ``_render_cube_block``. Annotates both so the planner knows when
+    it's looking at a retrieval-filtered subset."""
+    if _retrieval_active(
+        cubes,
+        saved_queries,
+        user_query=user_query,
+        retriever=retriever,
+        retrieval_threshold=retrieval_threshold,
+    ):
+        return (
+            f"## SEMANTIC CATALOGUE (top {top_k} cubes for your question)",
+            (
+                "Retrieval-filtered subset of the catalogue ranked against "
+                "the user's question. Reference fields as `cube.field`. "
+                "If a needed cube is missing, fall back to listing the "
+                "full catalogue."
+            ),
+        )
+    return ("## SEMANTIC CATALOGUE", _CATALOGUE_HEADER)
+
+
+def _filter_by_retrieval(
+    cubes: list[Cube],
+    *,
+    user_query: str,
+    retriever: Retriever,
+    top_k: int,
+) -> list[Cube]:
+    """Run the retriever and return only the cubes whose names landed
+    in the top-k. Order follows the retriever's ranking so the planner
+    reads the most relevant cube first.
+
+    Cubes whose names the retriever doesn't surface are dropped — the
+    whole point of retrieval mode is to *shrink* the prompt."""
+    top = retriever.top_k(user_query, top_k)
+    by_name: dict[str, Cube] = {c.name: c for c in cubes}
+    out: list[Cube] = []
+    for name, _ in top:
+        if name in by_name:
+            out.append(by_name[name])
+    return out
+
+
+def _render_domain_context(
+    glossary: list[GlossaryEntry] | None,
+    relations: str,
+) -> str:
+    """Catalog-level Domain Context block — Glossary + cross-cube
+    Relations narrative. Returns ``""`` when both are empty so callers
+    can splice unconditionally.
+
+    Glossary is rendered as a bulleted list. Each entry shows ``term``
+    and ``definition``, with ``aliases`` in parentheses when non-empty.
+    Relations is verbatim — typically a short paragraph the catalog
+    author wrote describing how cubes connect."""
+    glossary = glossary or []
+    if not glossary and not relations:
+        return ""
+    lines: list[str] = ["## DOMAIN CONTEXT", ""]
+    if glossary:
+        lines.append("**Glossary:**")
+        for g in glossary:
+            alias_suffix = f" (aka {', '.join(g.aliases)})" if g.aliases else ""
+            lines.append(f"  - `{g.term}`{alias_suffix} — {g.definition}")
+        lines.append("")
+    if relations:
+        lines.append("**Relations:**")
+        lines.append(relations)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _render_cube_block(
     cubes: list[Cube],
     lookups_by_dim: dict[str, Lookup],
@@ -91,6 +211,13 @@ def render_catalogue_block(
     policy: PolicyFn | None = None,
     lookups: dict[str, Lookup] | None = None,
     ctx: ResolutionContext | None = None,
+    glossary: list[GlossaryEntry] | None = None,
+    relations: str = "",
+    user_query: str | None = None,
+    retriever: Retriever | None = None,
+    top_k: int = 10,
+    retrieval_threshold: int = 50,
+    saved_queries: Sequence[SavedQuery] | None = None,
 ) -> str:
     # ``include_meta=True`` here is deliberate: META reflection cubes
     # historically appeared in the planner fragment when callers opted
@@ -99,22 +226,55 @@ def render_catalogue_block(
     # catalogue block itself stays inclusive — META cubes carry
     # ``expose_in_prompt=False`` so ``only_exposed=True`` hides them
     # by default anyway).
-    cubes = list(
-        iter_cubes(
-            catalog,
-            include_meta=True,
-            only_exposed=only_exposed,
-            viewer=viewer,
-            policy=policy,
+    cubes = _drop_deprecated(
+        list(
+            iter_cubes(
+                catalog,
+                include_meta=True,
+                only_exposed=only_exposed,
+                viewer=viewer,
+                policy=policy,
+            )
         )
     )
-    return _render_cube_block(
+    header, preamble = _retrieval_header_preamble(
+        cubes,
+        saved_queries,
+        user_query=user_query,
+        retriever=retriever,
+        top_k=top_k,
+        retrieval_threshold=retrieval_threshold,
+    )
+    if _retrieval_active(
+        cubes,
+        saved_queries,
+        user_query=user_query,
+        retriever=retriever,
+        retrieval_threshold=retrieval_threshold,
+    ):
+        # ``user_query`` and ``retriever`` are non-None when active.
+        assert user_query is not None and retriever is not None
+        cubes = _filter_by_retrieval(
+            cubes,
+            user_query=user_query,
+            retriever=retriever,
+            top_k=top_k,
+        )
+    catalogue_body = _render_cube_block(
         cubes,
         dict(lookups or {}),
         ctx,
-        header="## SEMANTIC CATALOGUE",
-        preamble=_CATALOGUE_HEADER,
+        header=header,
+        preamble=preamble,
     )
+    # Domain Context (glossary + cross-cube relations) sits above the
+    # per-cube listings so the planner reads vocabulary before fields.
+    domain = _render_domain_context(glossary, relations)
+    if not domain:
+        return catalogue_body
+    if not catalogue_body:
+        return domain
+    return domain + "\n" + catalogue_body
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +327,13 @@ def render_catalogue_segments(
     policy: PolicyFn | None = None,
     lookups: dict[str, Lookup] | None = None,
     ctx: ResolutionContext | None = None,
+    glossary: list[GlossaryEntry] | None = None,
+    relations: str = "",
+    user_query: str | None = None,
+    retriever: Retriever | None = None,
+    top_k: int = 10,
+    retrieval_threshold: int = 50,
+    saved_queries: Sequence[SavedQuery] | None = None,
 ) -> CataloguePrompt:
     """Split the catalogue into a static + per-viewer overlay rendering.
 
@@ -184,24 +351,57 @@ def render_catalogue_segments(
     overlay segment, never the static one.
     """
     lookups_by_dim = dict(lookups or {})
-    all_cubes = list(
-        iter_cubes(
-            catalog,
-            include_meta=True,
-            only_exposed=only_exposed,
-            viewer=None,  # static segment ignores viewer
-            policy=None,
+    all_cubes = _drop_deprecated(
+        list(
+            iter_cubes(
+                catalog,
+                include_meta=True,
+                only_exposed=only_exposed,
+                viewer=None,  # static segment ignores viewer
+                policy=None,
+            )
         )
     )
 
     public_cubes = [c for c in all_cubes if _is_public(c)]
-    static = _render_cube_block(
+    header, preamble = _retrieval_header_preamble(
+        public_cubes,
+        saved_queries,
+        user_query=user_query,
+        retriever=retriever,
+        top_k=top_k,
+        retrieval_threshold=retrieval_threshold,
+    )
+    if _retrieval_active(
+        public_cubes,
+        saved_queries,
+        user_query=user_query,
+        retriever=retriever,
+        retrieval_threshold=retrieval_threshold,
+    ):
+        # Auth invariant: retrieval can only narrow the public set;
+        # it cannot promote a role-gated cube into the static segment.
+        assert user_query is not None and retriever is not None
+        public_cubes = _filter_by_retrieval(
+            public_cubes,
+            user_query=user_query,
+            retriever=retriever,
+            top_k=top_k,
+        )
+    catalogue_body = _render_cube_block(
         public_cubes,
         lookups_by_dim,
         ctx,
-        header="## SEMANTIC CATALOGUE",
-        preamble=_CATALOGUE_HEADER,
+        header=header,
+        preamble=preamble,
     )
+    # Domain context (glossary + cross-cube relations) is viewer-
+    # invariant, so it lives in the static segment above the cubes.
+    domain = _render_domain_context(glossary, relations)
+    if domain and catalogue_body:
+        static = domain + "\n" + catalogue_body
+    else:
+        static = domain or catalogue_body
 
     # Overlay holds the additional cubes this viewer has been authorised
     # to see beyond the public set. With viewer=None we treat the overlay
@@ -280,6 +480,8 @@ def render_tool_description(cube: Cube) -> str:
         return name
 
     head = cube.description or f"Query the {cube.name} cube."
+    if cube.stability == "beta":
+        head = f"[BETA] {head}"
     measure_labels = [_measure_label(m) for m in cube.measures]
     dim_names = [d.name for d in cube.dimensions]
     td_names = [td.name for td in cube.time_dimensions]
@@ -291,6 +493,19 @@ def render_tool_description(cube: Cube) -> str:
     ]
     if td_names:
         parts.append(f"Time dimensions: {', '.join(td_names)}.")
+    # S7 — surface up to ~6 canonical phrasings + a short relations
+    # excerpt so external agents picking by tool description see what
+    # this cube actually answers. Truncating relations keeps the tool
+    # description compact (some MCP clients have schema-size limits).
+    if cube.questions:
+        parts.append("")
+        parts.append("Example questions:")
+        for q in cube.questions[:6]:
+            parts.append(f"  - {q}")
+    if cube.relations:
+        excerpt = cube.relations if len(cube.relations) <= 120 else cube.relations[:117] + "…"
+        parts.append("")
+        parts.append(f"Notes: {excerpt}")
     parts.append("")
     parts.append(
         "Field names are bare (no cube prefix); the tool auto-qualifies "
@@ -318,13 +533,15 @@ def project_tool_descriptions(
     Auth invariant — like :func:`render_catalogue_segments`, role-gated
     cubes only appear when the viewer authorises them, so a viewer never
     learns names of cubes they can't access via this projection."""
-    all_cubes = list(
-        iter_cubes(
-            catalog,
-            include_meta=False,  # META cubes don't get per-cube MCP tools
-            only_exposed=only_exposed,
-            viewer=None,  # invariant ignores viewer
-            policy=None,
+    all_cubes = _drop_deprecated(
+        list(
+            iter_cubes(
+                catalog,
+                include_meta=False,  # META cubes don't get per-cube MCP tools
+                only_exposed=only_exposed,
+                viewer=None,  # invariant ignores viewer
+                policy=None,
+            )
         )
     )
 
@@ -345,6 +562,8 @@ def catalogue_prompt_hash(
     only_exposed: bool = True,
     lookups: dict[str, Lookup] | None = None,
     ctx: ResolutionContext | None = None,
+    glossary: list[GlossaryEntry] | None = None,
+    relations: str = "",
 ) -> str:
     """SHA256 hex digest of the static catalogue segment.
 
@@ -352,7 +571,9 @@ def catalogue_prompt_hash(
     prompt-fragment cache so a measure rename or new public cube
     invalidates entries even when the viewer (and overlay) doesn't
     change. Loader-backed dynamic lookups change the hash when their
-    resolved values change for the given ``ctx``."""
+    resolved values change for the given ``ctx``. Glossary edits
+    and the cross-cube ``relations`` narrative also flow into the
+    hash so editing them busts the cache."""
     segments = render_catalogue_segments(
         catalog,
         only_exposed=only_exposed,
@@ -360,6 +581,8 @@ def catalogue_prompt_hash(
         policy=None,
         lookups=lookups,
         ctx=ctx,
+        glossary=glossary,
+        relations=relations,
     )
     return hashlib.sha256(segments.static.encode("utf-8")).hexdigest()
 
@@ -378,13 +601,24 @@ def _render_cube(
     lookups: dict[str, Lookup],
     ctx: ResolutionContext | None,
 ) -> list[str]:
-    header = f"### {cube.name} ({cube.backend.value}){_human(cube.display_name)}"
+    # Beta cubes carry an annotation so the planner can deprioritise.
+    # Deprecated cubes are filtered out of the prompt entirely by the
+    # caller (``render_catalogue_block``); they don't appear here.
+    stability_tag = " `[beta]`" if cube.stability == "beta" else ""
+    header = f"### {cube.name} ({cube.backend.value}){_human(cube.display_name)}{stability_tag}"
     out: list[str] = [header]
     if cube.description:
         out.append(cube.description)
     if cube.required_filters:
         reqs = ", ".join(f"`{cube.name}.{r}`" for r in cube.required_filters)
         out.append(f"**Required filters:** {reqs} — compile fails without them.")
+    # S7 — cube-internal relations narrative sits between the header
+    # area and the field tables. Cross-cube narrative lives in the
+    # catalog-level Domain Context block.
+    if cube.relations:
+        out.append("")
+        out.append("**Relations:**")
+        out.append(cube.relations)
 
     if cube.measures:
         out.append("")
@@ -443,6 +677,18 @@ def _render_cube(
         out.append("**Joins:**")
         for j in cube.joins:
             out.append(f"  - → `{j.to}` ({j.relationship})")
+
+    # S7 grounding surfaces. Questions go in their own subsection so
+    # the planner sees canonical phrasings without parsing prose.
+    # Keywords are a single comma-separated line — tokens, not bullets.
+    if cube.questions:
+        out.append("")
+        out.append("**Questions this cube answers:**")
+        for q in cube.questions:
+            out.append(f"  - {q}")
+    if cube.keywords:
+        out.append("")
+        out.append(f"**Keywords:** {', '.join(cube.keywords)}")
 
     return out
 
@@ -557,6 +803,13 @@ def build_planner_prompt_fragment(
     policy: PolicyFn | None = None,
     lookups: dict[str, Lookup] | None = None,
     ctx: ResolutionContext | None = None,
+    glossary: list[GlossaryEntry] | None = None,
+    relations: str = "",
+    user_query: str | None = None,
+    retriever: Retriever | None = None,
+    top_k: int = 10,
+    retrieval_threshold: int = 50,
+    saved_queries: Sequence[SavedQuery] | None = None,
 ) -> str:
     """Compose the semantic-layer fragment of a planner's system prompt.
 
@@ -581,6 +834,13 @@ def build_planner_prompt_fragment(
             policy=policy,
             lookups=lookups,
             ctx=ctx,
+            glossary=glossary,
+            relations=relations,
+            user_query=user_query,
+            retriever=retriever,
+            top_k=top_k,
+            retrieval_threshold=retrieval_threshold,
+            saved_queries=saved_queries,
         ).rstrip(),
     ]
     if views:
@@ -601,6 +861,13 @@ def build_planner_prompt_segments(
     policy: PolicyFn | None = None,
     lookups: dict[str, Lookup] | None = None,
     ctx: ResolutionContext | None = None,
+    glossary: list[GlossaryEntry] | None = None,
+    relations: str = "",
+    user_query: str | None = None,
+    retriever: Retriever | None = None,
+    top_k: int = 10,
+    retrieval_threshold: int = 50,
+    saved_queries: Sequence[SavedQuery] | None = None,
 ) -> CataloguePrompt:
     """Cacheable variant of :func:`build_planner_prompt_fragment`.
 
@@ -625,6 +892,13 @@ def build_planner_prompt_segments(
         policy=policy,
         lookups=lookups,
         ctx=ctx,
+        glossary=glossary,
+        relations=relations,
+        user_query=user_query,
+        retriever=retriever,
+        top_k=top_k,
+        retrieval_threshold=retrieval_threshold,
+        saved_queries=saved_queries,
     )
 
     static_parts: list[str] = [_SPEC_CONTRACT, segments.static.rstrip()]
