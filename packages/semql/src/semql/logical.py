@@ -33,7 +33,16 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from semql.errors import CompileError, JoinPathError
-from semql.model import Cube, Dimension, GranularityLiteral, Measure, Rollup, TimeDimension, View
+from semql.model import (
+    Backend,
+    Cube,
+    Dimension,
+    GranularityLiteral,
+    Measure,
+    Rollup,
+    TimeDimension,
+    View,
+)
 from semql.model import Join as ModelJoin
 from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
 
@@ -562,6 +571,51 @@ def apply_rollup_to_plan(
     return replace(plan, scans=new_scans, joins=new_joins)
 
 
+def partition_scans(plan: LogicalPlan) -> dict[Backend, LogicalPlan]:
+    """Partition a ``LogicalPlan`` by the backend of each ``Scan``'s cube.
+
+    Returns a dict keyed by ``Backend`` whose values are fresh
+    ``LogicalPlan`` instances, each containing only the scans /
+    joins that touch cubes on that backend.  Cross-backend joins in
+    the original plan are dropped from the per-partition output
+    (the federation merge step stitches the per-partition fragments
+    together via ``MergePlan`` and ``BridgeJoin``).
+
+    A single-backend plan returns a one-entry dict whose value is
+    the input plan (no rewrap needed for the common case).
+
+    This is the federation split-point helper.  ``compile_federated_query``
+    can use it to derive the per-partition fragments that each
+    backend's ``compile_query(sub_query, scoped_catalog)`` compiles
+    independently, replacing the ad-hoc ``_build_partition_sub_query``
+    path that duplicates join-graph + filter logic today.
+    """
+    by_backend: dict[Backend, list[Scan]] = {}
+    for scan in plan.scans:
+        by_backend.setdefault(scan.cube.backend, []).append(scan)
+
+    if len(by_backend) == 1:
+        (single,) = by_backend.values()
+        # Single-backend: no partitioning needed.
+        return {single[0].cube.backend: plan}
+
+    out: dict[Backend, LogicalPlan] = {}
+    for backend, scans in by_backend.items():
+        scanned_names = {s.cube.name for s in scans}
+        # Joins touching this partition: only ones whose BOTH sides
+        # are on this backend are kept.  Cross-backend joins are
+        # bridges handled by the merge step.
+        kept_joins = [
+            j for j in plan.joins if j.left.name in scanned_names and j.right.name in scanned_names
+        ]
+        # Filters stay with the partition whose scans own the
+        # touched cube.  A full predicate-router is a future pass;
+        # for now the helper's job is to give each backend the
+        # minimum surface to compile against.
+        out[backend] = replace(plan, scans=scans, joins=kept_joins)
+    return out
+
+
 __all__ = [
     "Aggregate",
     "ColumnRef",
@@ -576,5 +630,6 @@ __all__ = [
     "Scan",
     "TimeBreakdown",
     "apply_rollup_to_plan",
+    "partition_scans",
     "to_logical_plan",
 ]
