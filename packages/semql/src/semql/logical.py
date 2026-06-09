@@ -1,19 +1,74 @@
+"""LogicalPlan IR — the middle representation between a
+``SemanticQuery`` and the sqlglot ``exp.Select`` AST the compiler
+emits.
+
+The node vocabulary is small on purpose.  Each node is a frozen
+dataclass so plan→plan transforms are pure functions and the plan
+is hashable for memoisation in tests.
+
+Two layers of dataclass:
+
+- *Pure data nodes* (``Scan``, ``Join``, ``Filter``, ``TimeBreakdown``,
+  ``OrderBy``, ``Limit``, ``ColumnRef``, ``Aggregate``, ``Project``,
+  ``CompareSplit``) describe the query shape.
+- *Aggregator nodes* (``LogicalPlan``) bundle a query into a unit the
+  emitter reads.
+
+``Filter.expr`` carries the spec's ``BoolExpr | Filter`` tree, NOT a
+resolved SQL string.  This is the meaningful change from the
+intermediate scaffolding: plan-level transforms (CNF normalization,
+predicate pushdown) operate on the tree without round-tripping
+through sqlglot.  The existing ``_compile_where_tree`` helper in
+``compile.py`` keeps its emission logic; the wire-up (Stage 2) just
+passes the plan-stored tree to it.
+
+Stage 4 introduces ``apply_rollup_to_plan`` — a plan→plan transform
+that replaces one ``Scan`` with a synthetic one pointing at the
+rollup's physical table, leaving the original catalog untouched.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from semql._resolve import _ResolvedFields, walk_query_fields
 from semql.errors import CompileError, JoinPathError
-from semql.model import Cube, View
+from semql.model import Cube, GranularityLiteral, View
 from semql.model import Join as ModelJoin
-from semql.spec import SemanticQuery
+from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
+
+if TYPE_CHECKING:
+    from semql._resolve import _ResolvedFields
+
+
+# ---------------------------------------------------------------------------
+# Pure data nodes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ColumnRef:
+    """A projected output column — the (cube, field, alias) triple.
+
+    ``kind`` is the role the column plays in the output: ``dimension``,
+    ``time``, ``measure``, or ``computed`` (a derived or inline
+    measure).  Carrying it on the plan lets the emitter skip the
+    re-derivation it otherwise has to do per column.
+    """
+
+    cube: Cube
+    field_name: str
+    alias: str
+    kind: Literal["dimension", "time", "measure", "computed"]
 
 
 @dataclass(frozen=True)
 class Scan:
     cube: Cube
     alias: str
+
+    def __repr__(self) -> str:
+        return f"Scan({self.cube.name} as {self.alias})"
 
 
 @dataclass(frozen=True)
@@ -24,32 +79,139 @@ class Join:
     kind: Literal["inner", "left"]
     model: ModelJoin
 
+    def __repr__(self) -> str:
+        return f"Join({self.left.name} -> {self.right.name}, kind={self.kind})"
+
 
 @dataclass(frozen=True)
-class Filter:
-    expr: str
+class Predicate:
+    """A predicate that ANDs into the WHERE clause at emission time.
+
+    ``expr`` is the spec tree, not a SQL string.  Holding the tree
+    lets plan-level transforms (CNF, pushdown) operate on the
+    logical form; the emitter resolves field types and binds values
+    when it walks the tree.
+
+    Named ``Predicate`` (not ``Filter``) to avoid colliding with
+    :class:`semql.spec.Filter` in the public surface — that name is
+    reserved for the spec's predicate value type.
+    """
+
+    expr: BoolExpr | Filter
+
+    def __repr__(self) -> str:
+        return f"Predicate({self.expr!r})"
+
+
+@dataclass(frozen=True)
+class TimeBreakdown:
+    cube: Cube
+    field_name: str
+    granularity: GranularityLiteral
+
+    def __repr__(self) -> str:
+        return f"TimeBreakdown({self.cube.name}.{self.field_name} @ {self.granularity})"
 
 
 @dataclass(frozen=True)
 class Aggregate:
-    group_by: list[str]
-    measures: list[str]
+    group_by: list[str]  # cube-qualified refs
+    measures: list[str]  # cube-qualified refs
+    time: TimeBreakdown | None
+    derived: tuple[object, ...]  # InlineDerived list; tuple for hashability
+
+    def __repr__(self) -> str:
+        return (
+            f"Aggregate(group_by={self.group_by}, measures={self.measures}, "
+            f"time={self.time}, derived={list(self.derived)})"
+        )
 
 
 @dataclass(frozen=True)
 class Project:
-    columns: list[tuple[str, str]]  # (sql, alias)
+    columns: list[ColumnRef]
+
+    def __repr__(self) -> str:
+        cols = ", ".join(f"{c.kind}:{c.alias}" for c in self.columns)
+        return f"Project([{cols}])"
+
+
+@dataclass(frozen=True)
+class OrderBy:
+    keys: list[tuple[str, Literal["asc", "desc"]]]
+
+    def __repr__(self) -> str:
+        return f"OrderBy({self.keys})"
+
+
+@dataclass(frozen=True)
+class Limit:
+    limit: int | None
+    offset: int | None
+
+    def __repr__(self) -> str:
+        return f"Limit(limit={self.limit}, offset={self.offset})"
+
+
+@dataclass(frozen=True)
+class CompareSplit:
+    """Compare-mode wrapper.  The plan is a *template* — the emitter
+    instantiates it twice with different time-window ranges.
+
+    ``current_range`` is the range from ``plan.time_window``; ``prior_range``
+    is either the explicit ``range`` on ``CompareWindow`` (mode='explicit')
+    or ``previous_period`` (current_range duration, shifted back).
+
+    The inner ``plan`` is stored once and shared; it's frozen and
+    immutable, so a shared reference is safe.
+    """
+
+    plan: LogicalPlan
+    current_range: tuple[str, str]
+    prior_range: tuple[str, str]
+
+    def __repr__(self) -> str:
+        return f"CompareSplit(current_range={self.current_range}, prior_range={self.prior_range})"
+
+
+# ---------------------------------------------------------------------------
+# Top-level plan
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class LogicalPlan:
     scans: list[Scan]
     joins: list[Join]
-    filters: list[Filter]
+    filters: list[Predicate]
     aggregate: Aggregate | None
     project: Project
+    order: OrderBy
+    limit: Limit
     touched: list[Cube]
     root: Cube
+    time_window: TimeWindow | None
+    compare: CompareSplit | None = None
+
+    def __repr__(self) -> str:
+        lines = [
+            f"LogicalPlan(root={self.root.name})",
+            f"  scans=[{', '.join(repr(s) for s in self.scans)}]",
+            f"  joins=[{', '.join(repr(j) for j in self.joins)}]",
+            f"  filters=[{', '.join(repr(f) for f in self.filters)}]",
+            f"  aggregate={self.aggregate!r}",
+            f"  project={self.project!r}",
+            f"  order={self.order!r}",
+            f"  limit={self.limit!r}",
+            f"  time_window={self.time_window!r}",
+            f"  compare={self.compare!r}",
+        ]
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
 
 
 def to_logical_plan(
@@ -59,18 +221,23 @@ def to_logical_plan(
     views: dict[str, View] | None = None,
     resolved: _ResolvedFields | None = None,
 ) -> LogicalPlan:
-    """Lower a SemanticQuery to a LogicalPlan IR.
+    """Lower a ``SemanticQuery`` to a ``LogicalPlan`` IR.
 
     This stage handles field resolution, join path discovery, and
     logical structure (aggregation vs ungrouped), but does NOT emit
     backend-specific SQL.
+
+    Pass a pre-computed ``resolved`` (``_ResolvedFields``) to skip
+    resolution — used by ``_CompileEnv`` so it can run this
+    builder *after* its own resolution pass without redoing the
+    work.
     """
     if resolved is None:
+        from semql._resolve import walk_query_fields
+
         views_map = views or {}
         resolved, diagnostics = walk_query_fields(query, catalog, views_map=views_map)
         if diagnostics:
-            # For simplicity in this architectural refactor, we re-use the
-            # diagnostic reporting style from compile.py.
             lines = [f"  - {d.message}" for d in diagnostics]
             raise CompileError(
                 f"SemanticQuery has {len(diagnostics)} resolution errors:\n" + "\n".join(lines)
@@ -79,13 +246,13 @@ def to_logical_plan(
     if not resolved.touched:
         raise CompileError("Could not determine any cubes from the query.")
 
-    # 1. Join graph
+    # 1. Join graph (delegates to the existing BFS helper).
     left_join_cubes = set(query.left_joins)
     cubes_in_from, join_edges = build_join_graph(
         resolved.touched, catalog, left_join_cubes=left_join_cubes
     )
 
-    # 2. Scans & Joins
+    # 2. Scans & Joins.
     scans = [Scan(cube=c, alias=c.alias) for c in cubes_in_from]
     joins: list[Join] = []
     for left, right, j in join_edges:
@@ -99,29 +266,101 @@ def to_logical_plan(
             )
         )
 
-    # 3. Filters
-    # (In a real implementation, we'd lower SpecFilter to a logical Filter expr.
-    # For now, we'll keep it simple and just record that we have filters.)
-    # TODO: Proper filter lowering
-    filters = [Filter(expr=str(f)) for f in query.filters]
+    # 3. Filters — carry the spec tree, not a SQL string.
+    filters: list[Predicate] = [Predicate(expr=f) for f in query.filters]
+    if query.where is not None:
+        filters.append(Predicate(expr=query.where))
 
-    # 4. Aggregate
-    aggregate = None
+    # 4. Aggregate. ``ungrouped=True`` is row-listing mode — no
+    # GROUP BY, no measure aggregation; the emitter still needs the
+    # Project to render correctly.  In that case ``aggregate`` is
+    # None and the emitter skips the GROUP BY stage.
+    aggregate: Aggregate | None = None
     if not query.ungrouped:
+        time_breakdown: TimeBreakdown | None = None
+        if (
+            query.time_dimension is not None
+            and query.time_dimension.granularity is not None
+            and resolved.time_cube is not None
+            and resolved.time_dim is not None
+        ):
+            time_breakdown = TimeBreakdown(
+                cube=resolved.time_cube,
+                field_name=resolved.time_dim.name,
+                granularity=query.time_dimension.granularity,
+            )
         aggregate = Aggregate(
-            group_by=[d for d in query.dimensions],
-            measures=[m for m in query.measures],
+            group_by=list(query.dimensions),
+            measures=list(query.measures),
+            time=time_breakdown,
+            derived=tuple(query.derived_measures),
         )
 
-    # 5. Project
-    # (Simplified: just project requested fields)
-    project_cols: list[tuple[str, str]] = []
-    for d in query.dimensions:
-        project_cols.append((d, d.split(".")[-1]))
-    for m in query.measures:
-        project_cols.append((m, m.split(".")[-1]))
-
+    # 5. Project — ColumnRef per output column.  Carrying kind lets
+    # the emitter skip per-column re-derivation.
+    project_cols: list[ColumnRef] = []
+    for cube, dim in resolved.dim_fields:
+        alias = _col_alias(cube, dim.name, query)
+        project_cols.append(
+            ColumnRef(cube=cube, field_name=dim.name, alias=alias, kind="dimension")
+        )
+    if aggregate is not None and aggregate.time is not None and resolved.time_cube is not None:
+        project_cols.append(
+            ColumnRef(
+                cube=resolved.time_cube,
+                field_name=aggregate.time.field_name,
+                alias=f"{aggregate.time.field_name}_{aggregate.time.granularity}",
+                kind="time",
+            )
+        )
+    for cube, m in resolved.measure_fields:
+        alias = _col_alias(cube, m.name, query)
+        project_cols.append(ColumnRef(cube=cube, field_name=m.name, alias=alias, kind="measure"))
     project = Project(columns=project_cols)
+
+    # 6. Order / Limit.
+    order = OrderBy(keys=list(query.order))
+    limit = Limit(limit=query.limit, offset=query.offset)
+
+    # 7. Build the inner LogicalPlan (the template).  When
+    # compare-mode wraps it, the outer plan carries the
+    # ``CompareSplit`` and a reference to this inner plan.
+    inner = LogicalPlan(
+        scans=scans,
+        joins=joins,
+        filters=filters,
+        aggregate=aggregate,
+        project=project,
+        order=order,
+        limit=limit,
+        touched=resolved.touched,
+        root=cubes_in_from[0],
+        time_window=query.time_dimension,
+    )
+
+    # 8. Compare-mode wrapper.  The emitter reads the inner plan
+    # twice, binding each range to the inner select it builds.
+    compare: CompareSplit | None = None
+    if query.compare is not None and query.time_dimension is not None:
+        from datetime import datetime
+
+        current_range = query.time_dimension.range
+        if query.compare.mode == "previous_period":
+            cs = datetime.fromisoformat(current_range[0])
+            ce = datetime.fromisoformat(current_range[1])
+            duration = ce - cs
+            prior_range: tuple[str, str] = (
+                (cs - duration).isoformat(),
+                cs.isoformat(),
+            )
+        else:
+            assert query.compare.range is not None
+            prior_range = query.compare.range
+        compare = CompareSplit(
+            plan=inner,
+            current_range=current_range,
+            prior_range=prior_range,
+        )
 
     return LogicalPlan(
         scans=scans,
@@ -129,9 +368,37 @@ def to_logical_plan(
         filters=filters,
         aggregate=aggregate,
         project=project,
+        order=order,
+        limit=limit,
         touched=resolved.touched,
         root=cubes_in_from[0],
+        time_window=query.time_dimension,
+        compare=compare,
     )
+
+
+def _col_alias(cube: Cube, field_name: str, query: SemanticQuery) -> str:
+    """Mirror the existing collision-prefix convention on the compiler.
+
+    When the same field name appears on multiple touched cubes, prefix
+    the alias with the cube name.  Otherwise the field local name is
+    the output alias.
+    """
+    counts: dict[str, int] = {}
+    for m in query.measures:
+        local = m.split(".", 1)[1] if "." in m else m
+        counts[local] = counts.get(local, 0) + 1
+    for d in query.dimensions:
+        local = d.split(".", 1)[1] if "." in d else d
+        counts[local] = counts.get(local, 0) + 1
+    if counts.get(field_name, 0) > 1:
+        return f"{cube.name}_{field_name}"
+    return field_name
+
+
+# ---------------------------------------------------------------------------
+# Graph helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def build_join_graph(
@@ -202,3 +469,19 @@ def find_join_path(
         root_cube=root,
         target_cube=target,
     )
+
+
+__all__ = [
+    "Aggregate",
+    "ColumnRef",
+    "CompareSplit",
+    "Join",
+    "Limit",
+    "LogicalPlan",
+    "OrderBy",
+    "Predicate",
+    "Project",
+    "Scan",
+    "TimeBreakdown",
+    "to_logical_plan",
+]
