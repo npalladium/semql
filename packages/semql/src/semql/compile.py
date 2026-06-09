@@ -68,7 +68,7 @@ from semql.errors import (
     UnknownIdentifierError,
 )
 from semql.introspect import PolicyFn, ScopeFn, viewer_sees
-from semql.logical import build_join_graph
+from semql.logical import LogicalPlan, build_join_graph
 from semql.model import (
     AggLiteral,
     AuthContext,
@@ -1721,6 +1721,41 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
 # ---------------------------------------------------------------------------
 
 
+def explain_plan(
+    q: SemanticQuery,
+    catalog: dict[str, Cube],
+    *,
+    context: dict[str, str] | None = None,
+    viewer: AuthContext | None = None,
+) -> LogicalPlan:
+    """Return the :class:`LogicalPlan` the compiler will emit for ``q``.
+
+    Public companion to :func:`compile_query` for callers that want
+    the plan-shape surface (debugging, MCP ``explain`` tool, plan
+    visualisation) without the cost of building the sqlglot AST.
+
+    Same diagnostic surface as ``compile_query``: lifecycle checks,
+    authorisation, required-filters, cross-backend validation all
+    run; the same resolution + join-graph + rollup routing happens.
+    The plan is the IR a future emission-from-plan refactor will
+    consume directly; today it's a printable inspection surface.
+    """
+    env = _CompileEnv(
+        q,
+        catalog,
+        context=context,
+        group_by_alias=True,
+        having_alias=False,
+        dialects=None,
+        views=None,
+        viewer=viewer,
+        policy=None,
+        scope_fns=None,
+        allow_unbounded_ungrouped=False,
+    )
+    return env.plan
+
+
 def compile_query(
     q: SemanticQuery,
     catalog: dict[str, Cube],
@@ -1787,4 +1822,5 @@ __all__ = [
     "PlaceholderError",
     "UnknownIdentifierError",
     "compile_query",
+    "explain_plan",
 ]

@@ -48,6 +48,20 @@ from semql.introspect import (
     resolve_query,
     validate_and_resolve,
 )
+from semql.logical import (
+    Aggregate,
+    ColumnRef,
+    CompareSplit,
+    LogicalPlan,
+    OrderBy,
+    Predicate,
+    Project,
+    Scan,
+    TimeBreakdown,
+    apply_rollup_to_plan,
+    partition_scans,
+    to_logical_plan,
+)
 from semql.lookups import enrich_result
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
@@ -156,6 +170,15 @@ __all__ = [
     "BaseField",
     "BoolExpr",
     "BridgeJoin",
+    "Aggregate",
+    "ColumnRef",
+    "CompareSplit",
+    "LogicalPlan",
+    "OrderBy",
+    "Predicate",
+    "Project",
+    "Scan",
+    "TimeBreakdown",
     "CATALOG_CUBES",
     "CATALOG_DIMENSIONS",
     "CATALOG_MEASURES",
@@ -277,4 +300,7 @@ __all__ = [
     "resolve_query",
     "validate_and_resolve",
     "validate",
+    "apply_rollup_to_plan",
+    "partition_scans",
+    "to_logical_plan",
 ]

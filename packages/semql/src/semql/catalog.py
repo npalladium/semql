@@ -402,6 +402,31 @@ class Catalog:
         """Return ``{cube.name: Cube}`` — the shape ``compile_query`` consumes."""
         return dict(self._by_name)
 
+    def explain(
+        self,
+        query: SemanticQuery,
+        *,
+        context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
+    ) -> str:
+        """Return a human-readable repr of the LogicalPlan the compiler
+        will emit for ``query``.
+
+        Useful for debugging ("what will this turn into?") and for the
+        MCP ``explain`` tool.  Output is the ``repr()`` of the
+        :class:`semql.logical.LogicalPlan` IR — see the plan-snapshot
+        tests for the canonical shapes.
+
+        Same diagnostic surface as :meth:`compile`: resolution errors
+        and unauthorised-cube errors raise before any SQL is built.
+        Rollup routing is applied so the explained plan matches what
+        would actually be executed.
+        """
+        from semql.compile import explain_plan
+
+        plan = explain_plan(query, self.as_dict(), context=context, viewer=viewer)
+        return repr(plan)
+
     def compile(
         self,
         query: SemanticQuery,
