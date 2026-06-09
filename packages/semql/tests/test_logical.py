@@ -239,14 +239,30 @@ def test_to_logical_plan_simple() -> None:
     assert plan.scans[0].cube.name == "orders"
 
 
+@pytest.mark.xfail(
+    reason=(
+        "Pre-wire-up regression guard.  Before Stage 2 of the LogicalPlan "
+        "IR refactor landed, compile_query did NOT call to_logical_plan. "
+        "After Stage 2 the IR is wired in (see "
+        "test_compile_query_lowers_via_logical_plan for the positive "
+        "assertion).  This xfail preserves the breadcrumb."
+    ),
+    strict=True,
+)
 def test_compile_query_does_not_depend_on_partial_logical_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard: the wire-up of LogicalPlan into compile_query is
-    a *separate* stage.  Until it lands, compile_query must not call
-    ``to_logical_plan``.  Marked xfail to preserve the breadcrumb — see
-    the positive ``test_compile_query_lowers_via_logical_plan`` for the
-    post-wire-up assertion."""
+    """Pre-wire-up regression guard.  Marked xfail to keep the breadcrumb.
+
+    Before the LogicalPlan wire-up (Stage 2), compile_query did NOT
+    call to_logical_plan — the IR was an inert intermediate scaffolding
+    that lived in semql.logical without driving the compiler.  This
+    test pinned that "no dependency" state.
+
+    After Stage 2 the IR is wired in.  See
+    ``test_compile_query_lowers_via_logical_plan`` for the positive
+    assertion that replaces this guard.
+    """
     orders = Cube(
         name="orders",
         alias="orders",
@@ -265,6 +281,40 @@ def test_compile_query_does_not_depend_on_partial_logical_plan(
     monkeypatch.setattr("semql.logical.to_logical_plan", fail_if_called)
     compiled = compile_query(SemanticQuery(measures=["orders.revenue"]), {"orders": orders})
     assert "SUM" in compiled.sql
+
+
+def test_compile_query_lowers_via_logical_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive post-wire-up assertion.  compile_query must lower the
+    SemanticQuery through to_logical_plan and reach the emitter; the
+    output SQL is unchanged from the pre-wire-up path."""
+    orders = Cube(
+        name="orders",
+        alias="orders",
+        table="raw_orders",
+        backend=Backend.POSTGRES,
+        dimensions=[Dimension(name="id", sql="id", type="string")],
+        measures=[Measure(name="revenue", sql="amount", agg="sum")],
+    )
+    catalog = {"orders": orders}
+    query = SemanticQuery(measures=["orders.revenue"])
+
+    call_count = {"n": 0}
+
+    real_to_logical_plan = to_logical_plan
+
+    def counting(*args: object, **kwargs: object) -> object:
+        call_count["n"] += 1
+        return real_to_logical_plan(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("semql.logical.to_logical_plan", counting)
+    compiled = compile_query(query, catalog)
+
+    assert call_count["n"] >= 1, "compile_query must call to_logical_plan"
+    assert "SUM" in compiled.sql
+    # The plan is also exposed on the env (introspection surface).
+    assert compiled  # smoke: build succeeded
 
 
 def test_join_node_unchanged_shape() -> None:

@@ -1206,9 +1206,7 @@ class _CompileEnv:
 
         return _compile_where_tree(expr, _leaf_to_node)
 
-    def _lookup_filter_field(
-        self, leaf: Filter
-    ) -> Dimension | Measure | TimeDimension:
+    def _lookup_filter_field(self, leaf: Filter) -> Dimension | Measure | TimeDimension:
         """Find the field for a filter leaf, considering both the
         flat ``filters`` list and the where-tree leaves."""
         for f, _cube, fld in self.filter_resolutions:
