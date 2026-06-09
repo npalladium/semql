@@ -893,6 +893,18 @@ class _CompileEnv:
             assert granularity is not None
             self.time_col_name = f"{self.time_dim.name}_{granularity}"
 
+        # LogicalPlan — lower the SemanticQuery to the IR.  Emission
+        # is unchanged in this stage; a follow-up wires the plan into
+        # build_inner / _emit_*_query.  The plan is stored so callers
+        # (and tests) can introspect what the compiler will emit.
+        # Built *last* so all the existing checks above fire first —
+        # their diagnostics are the load-bearing ones (e.g.
+        # ``CrossBackendError`` precedes ``JoinPathError`` for queries
+        # that span backends with no join).
+        from semql.logical import to_logical_plan
+
+        self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
+
     # ------------------------------------------------------------------
     # Helpers — were inline closures inside ``compile_query`` before.
     # ------------------------------------------------------------------
@@ -1132,29 +1144,27 @@ class _CompileEnv:
 
     def _predicate_stage(self, sel: exp.Select, time_range: tuple[str, str]) -> exp.Select:
         """AND-compose every WHERE-clause source: per-cube
-        ``base_predicate`` (excluding META cubes), flat ``filters``,
-        named segments, the boolean ``where`` tree, and the
-        time-window range bounds."""
-        q = self.q
+        ``base_predicate`` (excluding META cubes), the plan's
+        ``Predicate`` nodes (carrying the spec tree from ``q.filters``
+        and ``q.where``), named segments, and the time-window range
+        bounds.
+
+        The plan's ``Predicate`` nodes are the single source of truth
+        for the user-supplied predicates — read from there so any
+        plan-level transform (CNF, pushdown) is reflected in
+        emission without a separate code path.
+        """
         where_terms: list[exp.Expression] = []
 
         for cube_w in self.cubes_in_from:
             if cube_w.base_predicate and cube_w.backend is not Backend.META:
                 where_terms.append(self.parse(cube_w.base_predicate))
 
-        for f, _cube, fld in self.filter_resolutions:
-            where_terms.append(self._filter_term(f, fld))
+        for pred in self.plan.filters:
+            where_terms.append(self._predicate_term(pred.expr))
 
         for _seg_cube, segment in self.segment_resolutions:
             where_terms.append(self.parse(segment.sql))
-
-        if q.where is not None:
-
-            def _leaf_to_node(leaf: Filter) -> exp.Expression:
-                _cube, fld = self.where_leaf_resolutions[id(leaf)]
-                return self._filter_term(leaf, fld)
-
-            where_terms.append(_compile_where_tree(q.where, _leaf_to_node))
 
         if self.time_dim is not None:
             where_terms.append(
@@ -1173,6 +1183,45 @@ class _CompileEnv:
         if where_terms:
             sel = sel.where(*where_terms)
         return sel
+
+    def _predicate_term(self, expr: BoolExpr | Filter) -> exp.Expression:
+        """Render one plan Predicate into a SQL predicate.
+
+        Flat ``Filter`` leaves reuse ``_filter_term`` (which knows how
+        to bind values).  ``BoolExpr`` trees reuse ``_compile_where_tree``
+        so the AND/OR/NOT combinators emit identically to the
+        pre-plan path.
+        """
+
+        if isinstance(expr, Filter):
+            # Look up the field for the leaf.  ``filter_resolutions``
+            # keys by Filter object identity; fall back to
+            # ``where_leaf_resolutions`` for leaves in the where tree.
+            fld = self._lookup_filter_field(expr)
+            return self._filter_term(expr, fld)
+
+        def _leaf_to_node(leaf: Filter) -> exp.Expression:
+            fld = self._lookup_filter_field(leaf)
+            return self._filter_term(leaf, fld)
+
+        return _compile_where_tree(expr, _leaf_to_node)
+
+    def _lookup_filter_field(
+        self, leaf: Filter
+    ) -> Dimension | Measure | TimeDimension:
+        """Find the field for a filter leaf, considering both the
+        flat ``filters`` list and the where-tree leaves."""
+        for f, _cube, fld in self.filter_resolutions:
+            if f is leaf:
+                return fld
+        pair = self.where_leaf_resolutions.get(id(leaf))
+        if pair is not None:
+            return pair[1]
+        raise CompileError(
+            f"Filter leaf {leaf.dimension!r} could not be resolved to a "
+            "catalog field.  The plan recorded a Predicate node whose "
+            "field is not in the resolution results."
+        )
 
     def _filter_term(
         self,
