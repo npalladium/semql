@@ -779,10 +779,14 @@ class _CompileEnv:
         _validate_query_invariants(q, allow_unbounded_ungrouped=allow_unbounded_ungrouped)
 
         # Rollup routing — check before resolution. When a rollup
-        # covers the query, we rewrite the catalog dict to point the
-        # touched cube at the rollup's physical_table; every downstream
-        # stage then compiles against the rollup transparently. The
-        # picked name is surfaced on ``CompiledQuery.applied_rollup``.
+        # covers the query, the plan→plan transform rewrites the
+        # matched Scan to point at the rollup's physical_table.  For
+        # now the catalog is also rewritten to the synthetic Cube so
+        # the existing emission path (which reads from ``self.catalog``)
+        # continues to work transparently.  A future refactor can drop
+        # the catalog rewrite once emission reads scans from
+        # ``self.plan.scans``.  The picked name is surfaced on
+        # ``CompiledQuery.applied_rollup``.
         self.applied_rollup: str | None = None
         picked = pick_rollup(q, catalog)
         if picked is not None:
@@ -901,9 +905,19 @@ class _CompileEnv:
         # their diagnostics are the load-bearing ones (e.g.
         # ``CrossBackendError`` precedes ``JoinPathError`` for queries
         # that span backends with no join).
-        from semql.logical import to_logical_plan
+        from semql.logical import apply_rollup_to_plan, to_logical_plan
 
         self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
+
+        # Apply the plan→plan rollup transform if a rollup was
+        # picked.  Currently the catalog is also rewritten (see the
+        # comment on the rollup-routing block above) so the existing
+        # emission path keeps working; once emission reads from
+        # ``self.plan`` directly, the catalog rewrite becomes
+        # redundant.
+        if picked is not None:
+            rollup_cube, rollup = picked
+            self.plan = apply_rollup_to_plan(self.plan, rollup_cube, rollup)
 
     # ------------------------------------------------------------------
     # Helpers — were inline closures inside ``compile_query`` before.

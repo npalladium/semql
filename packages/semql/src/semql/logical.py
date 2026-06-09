@@ -29,11 +29,11 @@ rollup's physical table, leaving the original catalog untouched.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from semql.errors import CompileError, JoinPathError
-from semql.model import Cube, GranularityLiteral, View
+from semql.model import Cube, Dimension, GranularityLiteral, Measure, Rollup, TimeDimension, View
 from semql.model import Join as ModelJoin
 from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
 
@@ -471,6 +471,97 @@ def find_join_path(
     )
 
 
+# ---------------------------------------------------------------------------
+# Plan→plan transforms
+# ---------------------------------------------------------------------------
+
+
+def apply_rollup_to_plan(
+    plan: LogicalPlan,
+    cube: Cube,
+    rollup: Rollup,
+) -> LogicalPlan:
+    """Return a new ``LogicalPlan`` with the matched ``Scan`` rewritten
+    to read the rollup's physical table.
+
+    The original plan and the original catalog are untouched.  The
+    transformed plan carries a synthetic Cube — a model_copy of the
+    original with ``table`` pointing at the rollup and field SQLs
+    rewritten to the rollup's bucketed columns.
+
+    The transform is paired with the existing ``pick_rollup`` selector
+    (in ``semql.rollup``) — the caller is expected to have already
+    verified the rollup covers the query.  The transform itself does
+    not re-verify; it just performs the structural rewrite.
+
+    The synthetic Cube uses the same name and alias as the original
+    so downstream emission sees an unchanged view of "this is the
+    orders cube" — the only difference is where the FROM points and
+    which columns the field SQLs reference.
+    """
+    # Build the synthetic cube (the rewrite of `cube` reading the
+    # rollup table).  Mirrors ``apply_rollup`` in semql.rollup but
+    # the result is a *single cube value* — we don't touch a
+    # catalog dict.
+    alias = cube.alias
+    new_measures: list[Measure] = []
+    for m in cube.measures:
+        if m.name in rollup.measures:
+            new_measures.append(m.model_copy(update={"sql": f"{{{alias}}}.{m.name}"}))
+
+    new_dims: list[Dimension] = []
+    for d in cube.dimensions:
+        if d.name in rollup.dimensions:
+            new_dims.append(d.model_copy(update={"sql": f"{{{alias}}}.{d.name}"}))
+
+    new_time_dims: list[TimeDimension] = []
+    if rollup.time_dimension is not None and rollup.granularity is not None:
+        bucket_col = f"{rollup.time_dimension}_{rollup.granularity}"
+        for td in cube.time_dimensions:
+            if td.name == rollup.time_dimension:
+                new_time_dims.append(
+                    td.model_copy(
+                        update={
+                            "sql": f"{{{alias}}}.{bucket_col}",
+                            "granularities": (rollup.granularity,),
+                        }
+                    )
+                )
+
+    new_cube = cube.model_copy(
+        update={
+            "table": rollup.physical_table,
+            "source": None,
+            "measures": new_measures,
+            "dimensions": new_dims,
+            "time_dimensions": new_time_dims,
+            "joins": [],
+            "segments": [],
+            "rollups": [],
+        }
+    )
+
+    # Replace the matched Scan with a Scan reading the synthetic
+    # cube.  Scans are matched by cube name — the caller's
+    # pick_rollup already verified the query references this cube.
+    new_scans: list[Scan] = []
+    for scan in plan.scans:
+        if scan.cube.name == cube.name:
+            new_scans.append(Scan(cube=new_cube, alias=scan.alias))
+        else:
+            new_scans.append(scan)
+
+    # Joins in the plan reference the original cube by name in their
+    # ``left`` / ``right`` slots.  A rollup routing applies only when
+    # the cube is single (Phase 1 — ``pick_rollup`` refuses
+    # multi-cube queries), so the joins list is empty in practice.
+    # We still rebuild it defensively to keep the dataclass
+    # invariants intact.
+    new_joins: list[Join] = list(plan.joins)
+
+    return replace(plan, scans=new_scans, joins=new_joins)
+
+
 __all__ = [
     "Aggregate",
     "ColumnRef",
@@ -481,7 +572,9 @@ __all__ = [
     "OrderBy",
     "Predicate",
     "Project",
+    "Rollup",  # re-export for callers of apply_rollup_to_plan
     "Scan",
     "TimeBreakdown",
+    "apply_rollup_to_plan",
     "to_logical_plan",
 ]
