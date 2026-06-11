@@ -27,6 +27,11 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+"packages/*/tests/*" = [
+    "ANN401",  # duck-typed fakes stand in for real driver objects
+]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"
