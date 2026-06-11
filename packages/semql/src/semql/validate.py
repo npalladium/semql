@@ -259,6 +259,16 @@ def validate(
         for td in cube.time_dimensions:
             known_tokens.add(td.name)
 
+    # Build a quick map: token -> replacement (or True if deprecated
+    # with no successor). Used by the deprecated-sibling-ref warning
+    # below; only cube-level deprecation is tracked today (Cube is
+    # the only model with stability/replacement fields).
+    deprecated_replacements: dict[str, str | None] = {
+        c.name: c.replacement
+        for c in cat.values()
+        if c.stability == "deprecated" and c.name in known_tokens
+    }
+
     def _check_relations_text(text: str, source_cube: str | None) -> None:
         for match in _BACKTICK_RE.finditer(text):
             token = match.group(1)
@@ -272,6 +282,29 @@ def validate(
                             + "relations does not resolve to any known cube, "
                             "measure, or dimension."
                         ),
+                        cube=source_cube,
+                    )
+                )
+            elif token in deprecated_replacements:
+                replacement = deprecated_replacements[token]
+                if replacement is not None:
+                    msg = (
+                        f"Backtick name `{token}` in "
+                        + (f"cube {source_cube!r} " if source_cube else "catalog ")
+                        + f"relations points at a deprecated cube. Use "
+                        f"`{replacement}` instead."
+                    )
+                else:
+                    msg = (
+                        f"Backtick name `{token}` in "
+                        + (f"cube {source_cube!r} " if source_cube else "catalog ")
+                        + "relations points at a deprecated cube with no replacement; "
+                        "remove the reference."
+                    )
+                errors.append(
+                    ValidationWarning(
+                        code="deprecated_sibling_ref",
+                        message=msg,
                         cube=source_cube,
                     )
                 )
