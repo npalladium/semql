@@ -12,6 +12,7 @@ from __future__ import annotations
 from semql.auth import HMACVerifier, JWKSVerifier, TokenVerifier
 from semql.catalog import Catalog
 from semql.compile import MAX_UNGROUPED_ROWS, ColumnMeta, CompiledQuery, compile_query
+from semql.diff import CatalogDiff, Change, ChangeKind, diff_catalogs
 from semql.docs import render_catalog_markdown
 from semql.errors import (
     AuthError,
@@ -175,6 +176,9 @@ __all__ = [
     "BaseField",
     "BoolExpr",
     "BridgeJoin",
+    "CatalogDiff",
+    "Change",
+    "ChangeKind",
     "Aggregate",
     "ColumnRef",
     "CompareSplit",
@@ -292,6 +296,7 @@ __all__ = [
     "compile_federated_query",
     "compile_query",
     "decide_visualization",
+    "diff_catalogs",
     "is_safe_select",
     "iter_cubes",
     "iter_fields",
