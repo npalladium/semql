@@ -24,8 +24,11 @@ INSERT roundtrip plus the full second pass over materialised rows.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
-from collections.abc import AsyncIterator, Iterator
+import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -44,6 +47,21 @@ class EngineError(RuntimeError):
     surfaces runtime issues such as a missing adapter for a backend the
     plan references, or an adapter returning rows whose columns don't
     match the fragment's declared output."""
+
+
+OnExecuteHook = Callable[..., Any]
+"""P7 observability hook fired after every ``Engine.run``.
+
+Signature: ``(plan, elapsed_ms, *, cache_hit) -> Any``. The hook
+is best-effort: if it raises, the engine still returns the result.
+The return value is ignored.
+
+A common use is to ship timing + hit/miss info to a metrics
+backend (Prometheus, OpenTelemetry) without coupling the engine
+to any one of them. Implemented as ``Callable[..., Any]`` rather
+than a strict signature because the keyword-only ``cache_hit``
+arg doesn't compose well with the ``Callable[...]`` syntax in
+older Pythons; the engine's call site enforces the contract."""
 
 
 @dataclass
@@ -100,6 +118,20 @@ class Engine:
     Register one adapter per backend you intend to query against, then
     call :meth:`run`. The engine isn't tied to a specific catalog;
     register adapters once and execute many plans.
+
+    Optional P7 features:
+
+    - ``cache_size``: a positive int enables an LRU result cache. The
+      cache key is the plan's emitted shape (merge SQL + params + per-
+      fragment SQL + per-fragment params + column list). A cache hit
+      skips the per-fragment adapter calls and the DuckDB
+      materialise-and-merge. The cache is *in-process*; the engine
+      does not invalidate it on catalog mutation. Callers that
+      mutate the catalog must call :meth:`clear_cache` themselves.
+
+    - ``on_execute``: a callback fired after every run with timing
+      and hit/miss info. The hook is best-effort: if it raises, the
+      engine still returns the result.
     """
 
     def __init__(
@@ -108,16 +140,55 @@ class Engine:
         *,
         adapters: dict[Backend, Adapter] | None = None,
         merge_engine: MergeEngine | None = None,
+        cache_size: int = 0,
+        on_execute: OnExecuteHook | None = None,
     ) -> None:
+        if cache_size < 0:
+            raise ValueError(f"cache_size must be non-negative, got {cache_size}")
         self._con: Any = duckdb_connection or duckdb.connect(":memory:")
         self._adapters: dict[Backend, Adapter] = dict(adapters or {})
         self._merge_engine = merge_engine
+        self._cache_size = cache_size
+        # OrderedDict gives us insertion-order iteration; popitem(last=False)
+        # evicts the oldest entry on overflow (LRU semantics).
+        self._cache: OrderedDict[tuple[Any, ...], ExecutionResult] = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._on_execute = on_execute
 
     def register(self, backend: Backend, adapter: Adapter) -> None:
         """Bind an adapter to a backend. Replacing an existing
         registration is allowed (so callers can swap adapters mid-flight
         in tests)."""
         self._adapters[backend] = adapter
+
+    @property
+    def cache_hits(self) -> int:
+        return self._cache_hits
+
+    @property
+    def cache_misses(self) -> int:
+        return self._cache_misses
+
+    def clear_cache(self) -> None:
+        """Drop all cached results. The hit/miss counters are *not*
+        reset — they're a cumulative view, useful for /metrics."""
+        self._cache.clear()
+
+    def _cache_key(self, plan: FederatedPlan) -> tuple[Any, ...]:
+        """Build a hashable key from the plan's emitted shape.
+
+        Includes merge SQL + params, per-fragment SQL + params, and the
+        output column list. Excludes column metadata (which is
+        presentation-layer) and any rendering-only fields."""
+        return (
+            plan.merge.sql,
+            tuple(sorted(plan.merge.params.items())),
+            tuple(
+                (f.backend.value, f.sql, tuple(sorted(f.params.items()))) for f in plan.fragments
+            ),
+            tuple(plan.columns),
+        )
 
     def run(self, plan: FederatedPlan) -> ExecutionResult:
         """Execute a :class:`FederatedPlan` end-to-end.
@@ -129,7 +200,50 @@ class Engine:
         Raises :class:`EngineError` for missing adapters or column
         mismatches between adapter output and the fragment's declared
         columns.
-        """
+
+        If the engine has a cache (P7) and the plan's emitted shape
+        matches a prior run, the cached result is returned without
+        touching the adapter or DuckDB. The on_execute hook fires
+        either way.
+
+        ``cache_misses`` increments on every plan execution, even when
+        caching is disabled (``cache_size=0``): a miss is "the engine
+        actually ran the plan" — a hit is "the engine returned from
+        cache". The two counters are independent and useful for
+        /metrics emission."""
+        cache_enabled = self._cache_size > 0
+        cache_key: tuple[Any, ...] | None = self._cache_key(plan) if cache_enabled else None
+        if cache_enabled and cache_key is not None and cache_key in self._cache:
+            cached = self._cache[cache_key]
+            # Mark as recently used: pop + reinsert moves to the end.
+            self._cache.move_to_end(cache_key)
+            self._cache_hits += 1
+            self._fire_hook(plan, 0.0, cache_hit=True)
+            return cached
+
+        start = time.perf_counter()
+        result = self._execute_uncached(plan)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if cache_enabled and cache_key is not None:
+            self._cache[cache_key] = result
+            self._cache.move_to_end(cache_key)
+            # Evict oldest entry if over capacity.
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        self._cache_misses += 1
+        self._fire_hook(plan, elapsed_ms, cache_hit=False)
+        return result
+
+    def _fire_hook(self, plan: FederatedPlan, elapsed_ms: float, *, cache_hit: bool) -> None:
+        if self._on_execute is None:
+            return
+        with contextlib.suppress(Exception):
+            # The hook's exception must not break the engine. We
+            # intentionally swallow; callers who want a louder
+            # failure mode can wrap their own hook to log + re-raise.
+            self._on_execute(plan, elapsed_ms, cache_hit=cache_hit)
+
+    def _execute_uncached(self, plan: FederatedPlan) -> ExecutionResult:
         fragment_results: list[AdapterResult] = []
         for i, fragment in enumerate(plan.fragments):
             adapter = self._adapters.get(fragment.backend)
