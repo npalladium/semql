@@ -128,6 +128,7 @@ from semql.prompt import (
     render_saved_query_tool_description,
     to_openai_function,
 )
+from semql.prompt_budget import BudgetResult, PromptBudget, apply_budget, estimate_tokens
 from semql.retrieve import (
     EmbeddingProvider,
     HybridRetriever,
@@ -182,6 +183,7 @@ __all__ = [
     "CatalogDiff",
     "Change",
     "ChangeKind",
+    "BudgetResult",
     "Aggregate",
     "ColumnRef",
     "CompareSplit",
@@ -301,7 +303,10 @@ __all__ = [
     "decide_visualization",
     "diff_catalogs",
     "estimate_cost",
+    "estimate_tokens",
+    "apply_budget",
     "is_safe_select",
+    "PromptBudget",
     "QueryBudget",
     "iter_cubes",
     "iter_fields",
