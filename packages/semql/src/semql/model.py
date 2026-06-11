@@ -587,6 +587,21 @@ class Cube(BaseModel):
     # "deprecated"``. Surfaces in the CompileError message. Leave
     # ``None`` when the cube is going away entirely (no replacement).
     replacement: str | None = None
+    # Optional declared row count. I1 cost estimation: when set,
+    # ``estimate_cost`` uses this as the rows-scanned baseline for
+    # queries that touch the cube. ``None`` means "unknown" — the
+    # estimate is honest about the gap rather than lying with a
+    # default. The value is a *declared* count, not a live
+    # measurement; callers update it on a schedule.
+    size_hint: int | None = None
+
+    @model_validator(mode="after")
+    def _check_size_hint(self) -> Cube:
+        if self.size_hint is not None and self.size_hint < 0:
+            raise ValueError(
+                f"Cube {self.name!r}: size_hint must be non-negative, got {self.size_hint}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_rollups(self) -> Cube:

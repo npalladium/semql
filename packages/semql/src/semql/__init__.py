@@ -12,6 +12,7 @@ from __future__ import annotations
 from semql.auth import HMACVerifier, JWKSVerifier, TokenVerifier
 from semql.catalog import Catalog
 from semql.compile import MAX_UNGROUPED_ROWS, ColumnMeta, CompiledQuery, compile_query
+from semql.cost import BudgetExceededError, CostEstimate, QueryBudget, estimate_cost
 from semql.diff import CatalogDiff, Change, ChangeKind, diff_catalogs
 from semql.docs import render_catalog_markdown
 from semql.errors import (
@@ -173,6 +174,8 @@ __all__ = [
     "AuthContext",
     "AuthError",
     "Backend",
+    "BudgetExceededError",
+    "CostEstimate",
     "BaseField",
     "BoolExpr",
     "BridgeJoin",
@@ -297,7 +300,9 @@ __all__ = [
     "compile_query",
     "decide_visualization",
     "diff_catalogs",
+    "estimate_cost",
     "is_safe_select",
+    "QueryBudget",
     "iter_cubes",
     "iter_fields",
     "iter_joins",
