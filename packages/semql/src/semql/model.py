@@ -23,6 +23,7 @@ anything the platform shouldn't know about. Round-trips through
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -1202,6 +1203,308 @@ class View(BaseModel):
         return self
 
 
+class Entity(BaseModel):
+    """A first-class business-object declaration — the prompt / product
+    counterpart to a :class:`Cube`.
+
+    An entity names the *thing* a user is asking about ("User",
+    "Order", "LeaveInstance") and the physical cubes that materialise
+    it. The split is intentional: a :class:`Cube` answers "what's the
+    SQL surface?" (backend, table, joins, measures); an ``Entity``
+    answers "what's the business object?" and is the right unit for
+    prompt fragments, entity-resolution glue, and product-level
+    vocabulary. ``cubes`` is a list because a single business object
+    can be composite — ``User = UserInfo + Identity`` is two
+    physical cubes under one entity, joined by a shared key.
+
+    The compiler ignores ``Entity`` entirely. ``Cube`` is the unit
+    of compilation; ``Entity`` is descriptive metadata that
+    downstream tools (MCP, prompt renderers, ER diagrams) can
+    iterate to attach the right business vocabulary. The Catalog
+    validates the entity's references at construction time so
+    callers can trust the surface.
+
+    Fields
+    ------
+    ``cubes``
+        One or more cube names the entity spans. Names are checked
+        against the catalog at construction time; listing a
+        non-existent cube is a configuration error, not a runtime
+        surprise.
+    ``key``
+        Optional ``"cube.dim"`` reference naming the primary key
+        for entity-typed fetches ("show me user 42"). The
+        referenced dimension must exist on one of ``cubes``;
+        otherwise construction refuses. ``None`` for entities that
+        are exploratory ("Show me a sample of users") and don't
+        yet have a stable key.
+    ``fields``
+        Optional local→qualified (``"cube.field"``) rename map.
+        Mirrors :class:`View` semantics but on the entity scope —
+        a caller can address ``checkout_user.email`` instead of
+        ``users.email`` to disambiguate when the same dim name
+        appears on multiple cubes the entity spans. Empty by
+        default.
+    ``questions``, ``keywords``, ``description``, ``display_name``,
+    ``metadata``
+        Prompt and product metadata. Same shape as the same-named
+        fields on :class:`Cube`; ``Entity`` is the unit a planner
+        prompt fragment will iterate, so it carries the same
+        vocabulary.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    name: str
+    cubes: list[str]
+    key: str | None = None
+    description: str = ""
+    display_name: str | None = None
+    questions: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    metadata: Metadata = Field(default_factory=dict)
+    fields: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def kind(self) -> str:
+        """Structural type tag — ``"entity"``. Lets consumers branch on
+        type without importing the class. Mirrors :attr:`BaseField.kind`."""
+        return "entity"
+
+    @model_validator(mode="after")
+    def _check_name(self) -> Entity:
+        if not self.name.strip():
+            raise ValueError("Entity.name cannot be empty.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_cubes(self) -> Entity:
+        if not self.cubes:
+            raise ValueError(
+                f"Entity {self.name!r}: ``cubes`` cannot be empty. "
+                "An entity must name at least one cube it spans."
+            )
+        seen: set[str] = set()
+        for c in self.cubes:
+            if c in seen:
+                raise ValueError(
+                    f"Entity {self.name!r}: cube {c!r} is listed twice. "
+                    "Each cube may appear at most once."
+                )
+            seen.add(c)
+            if not c.strip():
+                raise ValueError(f"Entity {self.name!r}: ``cubes`` cannot contain empty strings.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_key_qualified(self) -> Entity:
+        if self.key is None:
+            return self
+        if "." not in self.key or self.key.count(".") != 1:
+            raise ValueError(
+                f"Entity {self.name!r}: key={self.key!r} must be qualified as 'cube.dim'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_fields_qualified(self) -> Entity:
+        for local, target in self.fields.items():
+            if "." not in target or target.count(".") != 1:
+                raise ValueError(
+                    f"Entity {self.name!r}, field {local!r}: target "
+                    f"{target!r} must be qualified as 'cube.field'."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_grounding(self) -> Entity:
+        # Reuse the catalog-wide grounding validators so an Entity
+        # carries the same vocabulary shape as a Cube — a downstream
+        # prompt renderer can iterate entities with the same
+        # normalisation it applies to cubes. The keyword dedupe
+        # normally rewrites the input list (``Cube`` does that),
+        # but ``Entity`` is frozen and Pydantic refuses assignment
+        # to a frozen model. We call the validator for its
+        # validation side-effects (empty-entry check, length cap)
+        # and let the user pass a pre-deduped list. The Catalog
+        # wraps the entity in a copy-and-replace path when dedupe
+        # matters for prompt hashing.
+        _grounding_validate_questions("Entity", self.name, self.questions)
+        _grounding_validate_keywords("Entity", self.name, self.keywords)
+        return self
+
+
+class MutableEntity:
+    """The working / builder form of :class:`Entity`.
+
+    ``Entity`` is a frozen value type — the only way to "change" it is
+    ``model_copy(update=...)``, which forces every tweak through a
+    new object. That's correct for the catalog (immutable, hashable,
+    shares-nothing across requests) but inconvenient for *building*:
+    a templated loader, an LLM config generator, or a migration
+    script wants to accumulate edits in a single object and freeze
+    at the end.
+
+    ``MutableEntity`` is that accumulator. Build it with
+    :meth:`empty` (no cubes) or :meth:`from_entity` (clone an
+    existing), mutate it via the ``add_*`` / ``set_*`` / ``unset_*``
+    methods (each returns ``self`` for chaining), then call
+    :meth:`freeze` to materialise a validated :class:`Entity` for
+    the catalog. Validation runs at the ``freeze`` boundary, not
+    at every step — a builder may add cubes in any order.
+
+    ``MutableEntity`` is a plain Python class (not a Pydantic
+    model) because Pydantic's frozen-config pattern fights in-place
+    mutation. The shape mirrors :class:`Entity` exactly so a
+    ``freeze()`` call is a 1:1 translation with no surprises.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        cubes: list[str] | None = None,
+        key: str | None = None,
+        description: str = "",
+        display_name: str | None = None,
+        questions: list[str] | None = None,
+        keywords: list[str] | None = None,
+        fields: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        self.name = name
+        self.cubes: list[str] = list(cubes or [])
+        self.key = key
+        self.description = description
+        self.display_name = display_name
+        self.questions: list[str] = list(questions or [])
+        self.keywords: list[str] = list(keywords or [])
+        self.fields: dict[str, str] = dict(fields or {})
+        self.metadata: dict[str, str] = dict(metadata or {})
+
+    @classmethod
+    def empty(cls, *, name: str) -> MutableEntity:
+        """Start a fresh working form with only ``name`` set."""
+        return cls(name=name)
+
+    @classmethod
+    def from_entity(cls, entity: Entity) -> MutableEntity:
+        """Clone an existing :class:`Entity` into a mutable working
+        form. The lists / dicts are deep-copied so subsequent
+        mutations on the working form don't leak into the source."""
+        return cls(
+            name=entity.name,
+            cubes=list(entity.cubes),
+            key=entity.key,
+            description=entity.description,
+            display_name=entity.display_name,
+            questions=list(entity.questions),
+            keywords=list(entity.keywords),
+            fields=dict(entity.fields),
+            metadata=dict(entity.metadata),
+        )
+
+    # -- cube management --------------------------------------------------
+
+    def add_cube(self, cube: str) -> MutableEntity:
+        if not cube or not cube.strip():
+            raise ValueError(f"MutableEntity({self.name!r}): cannot add empty cube name.")
+        if cube not in self.cubes:
+            self.cubes.append(cube)
+        return self
+
+    def remove_cube(self, cube: str) -> MutableEntity:
+        if cube in self.cubes:
+            self.cubes.remove(cube)
+        return self
+
+    # -- key --------------------------------------------------------------
+
+    def set_key(self, key: str) -> MutableEntity:
+        self.key = key
+        return self
+
+    def unset_key(self) -> MutableEntity:
+        self.key = None
+        return self
+
+    # -- fields ------------------------------------------------------------
+
+    def set_field(self, local: str, target: str) -> MutableEntity:
+        self.fields[local] = target
+        return self
+
+    def unset_field(self, local: str) -> MutableEntity:
+        self.fields.pop(local, None)
+        return self
+
+    # -- description / display_name ---------------------------------------
+
+    def set_description(self, description: str) -> MutableEntity:
+        self.description = description
+        return self
+
+    def set_display_name(self, display_name: str | None) -> MutableEntity:
+        self.display_name = display_name
+        return self
+
+    # -- metadata ----------------------------------------------------------
+
+    def set_metadata(self, key: str, value: str) -> MutableEntity:
+        self.metadata[key] = value
+        return self
+
+    def unset_metadata(self, key: str) -> MutableEntity:
+        self.metadata.pop(key, None)
+        return self
+
+    # -- questions / keywords --------------------------------------------
+
+    def set_question(self, question: str) -> MutableEntity:
+        if question not in self.questions:
+            self.questions.append(question)
+        return self
+
+    def unset_question(self, question: str) -> MutableEntity:
+        with suppress(ValueError):
+            self.questions.remove(question)
+        return self
+
+    def set_keyword(self, keyword: str) -> MutableEntity:
+        if keyword not in self.keywords:
+            self.keywords.append(keyword)
+        return self
+
+    def unset_keyword(self, keyword: str) -> MutableEntity:
+        with suppress(ValueError):
+            self.keywords.remove(keyword)
+        return self
+
+    # -- freeze ------------------------------------------------------------
+
+    def freeze(self) -> Entity:
+        """Materialise a frozen :class:`Entity` from the working form.
+
+        All of :class:`Entity`'s construction-time validators run
+        here (cubes non-empty, key qualified, fields qualified,
+        grounding checks). The returned value is independent of
+        this working form — subsequent mutations do not affect
+        it."""
+        return Entity(
+            name=self.name,
+            cubes=list(self.cubes),
+            key=self.key,
+            description=self.description,
+            display_name=self.display_name,
+            questions=list(self.questions),
+            keywords=list(self.keywords),
+            fields=dict(self.fields),
+            metadata=dict(self.metadata),
+        )
+
+    def __repr__(self) -> str:
+        return f"MutableEntity(name={self.name!r}, cubes={self.cubes!r}, key={self.key!r})"
+
+
 __all__ = [
     "AggLiteral",
     "AuthContext",
@@ -1213,6 +1516,7 @@ __all__ = [
     "DerivedTable",
     "DimTypeLiteral",
     "Dimension",
+    "Entity",
     "FormatLiteral",
     "GlossaryEntry",
     "GranularityLiteral",
@@ -1223,6 +1527,7 @@ __all__ = [
     "LookupValues",
     "Measure",
     "Metadata",
+    "MutableEntity",
     "NamedCTE",
     "ResolutionContext",
     "ScopePredicate",
