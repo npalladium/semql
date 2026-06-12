@@ -100,3 +100,33 @@ Frozen is the default for value objects.
 copy-on-modify dominates. The Pydantic v2 `model_copy(update=...)`
 shape covers the common "tweak one field" need without re-opening
 mutation.
+
+---
+
+## D5. `having` stays; `Measure.filter` is a different feature
+
+**Context.** The ktx port plan locked "No HAVING — aggregates only
+via `Measure.filter`", but `SemanticQuery.having` already exists on
+main: exported, federated (`MergeSpec.having`), mapped by the SQL
+parser, property-tested. The two looked like substitutes.
+
+**Decision.** Keep both, with distinct jobs. `having` is the
+*query-time* post-aggregate predicate — the LLM invents the
+threshold per question ("groups where `sum(revenue) > 1000`").
+`Measure.filter` (lands with the chasm-trap milestone) is
+*catalog-time* conditional aggregation (`SUM(CASE WHEN approved …)`),
+authored once by the catalog owner. The locality emission path is
+scoped accordingly: no WHERE/HAVING auto-classifier; `Measure.filter`
+applies inside per-group CTEs, `having` at the outer SELECT.
+
+**Why.** An LLM cannot express an ad-hoc threshold through a catalog
+field — removing `having` would delete real query-time
+expressiveness, not consolidate it. The original "No HAVING" decision
+is read as a constraint on the locality path's internal
+classification, not as a directive to remove the public field.
+(Maintainer-confirmed 2026-06-12; see
+`docs/specs/roadmap-reconciliation-2026-06.md` §R1.)
+
+**Revisit.** If `Measure.filter` plus `InlineDerived` turn out to
+cover every observed `having` use in practice, re-open the
+consolidation question before the v1 freeze — not after.
