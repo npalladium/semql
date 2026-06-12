@@ -1045,7 +1045,21 @@ class _CompileEnv:
         policy: PolicyFn | None,
         scope_fns: dict[str, ScopeFn] | None,
         allow_unbounded_ungrouped: bool,
+        plan: LogicalPlan | None = None,
     ) -> None:
+        # ``plan`` — a prebuilt :class:`LogicalPlan` the env must *trust*
+        # verbatim instead of re-lowering ``q`` itself.  ``compile_plan``
+        # passes the caller's (possibly transformed) plan here: a scan
+        # rewritten to another physical table, a join dropped by the
+        # federation split-point, a predicate pushed down.  When given,
+        # the rollup / partition *plan* transforms are the caller's job
+        # — the env does not re-run ``to_logical_plan`` and does not
+        # re-pick a rollup (which would re-derive a fresh, untransformed
+        # plan and discard the caller's work — the original A1 bug).
+        # ``q`` must still be a faithful description of the plan (the
+        # resolution caches + pre-flight checks read it); ``compile_plan``
+        # reconstructs it from the plan to guarantee that.
+        self._prebuilt_plan = plan
         _validate_query_invariants(q, allow_unbounded_ungrouped=allow_unbounded_ungrouped)
 
         # Rollup routing — check before resolution. When a rollup
@@ -1058,7 +1072,7 @@ class _CompileEnv:
         # ``self.plan.scans``.  The picked name is surfaced on
         # ``CompiledQuery.applied_rollup``.
         self.applied_rollup: str | None = None
-        picked = pick_rollup(q, catalog)
+        picked = None if plan is not None else pick_rollup(q, catalog)
         if picked is not None:
             rollup_cube, rollup = picked
             catalog = apply_rollup(catalog, rollup_cube, rollup)
@@ -1148,25 +1162,33 @@ class _CompileEnv:
         # repeatedly.
         from semql.logical import apply_rollup_to_plan, to_logical_plan
 
-        self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
+        if plan is not None:
+            # Trust the caller's plan verbatim.  No re-lowering, no
+            # rollup transform — any plan→plan rewrite (rollup /
+            # partition routing, split-point join drops, predicate
+            # pushdown) the caller applied is load-bearing and must
+            # survive to emission.
+            self.plan = plan
+        else:
+            self.plan = to_logical_plan(q, catalog, views=self.views_map, resolved=resolved)
 
-        # Apply the plan→plan rollup transform if a rollup was
-        # picked.  The catalog is also rewritten (legacy path) so
-        # backends that read field SQLs from the catalog still see
-        # the rolled-up version; emission reads field SQLs from
-        # ``self.plan`` (via ``ColumnRef.field.sql``) so the rewrite
-        # is no longer load-bearing — it stays for now so the rest
-        # of the pipeline (auth wrappers, ``_collect_derived_sources``)
-        # keeps working transparently.
-        if picked is not None:
-            rollup_cube, rollup = picked
-            rollup_plan = apply_rollup_to_plan(self.plan, rollup_cube, rollup)
-            # The plan→plan transform produces a fresh logical cube;
-            # we still rewrite the catalog so the auth / tenancy
-            # code paths see the rolled-up shape.
-            catalog = apply_rollup(catalog, rollup_cube, rollup)
-            self.applied_rollup = rollup.name
-            self.plan = rollup_plan
+            # Apply the plan→plan rollup transform if a rollup was
+            # picked.  The catalog is also rewritten (legacy path) so
+            # backends that read field SQLs from the catalog still see
+            # the rolled-up version; emission reads field SQLs from
+            # ``self.plan`` (via ``ColumnRef.field.sql``) so the rewrite
+            # is no longer load-bearing — it stays for now so the rest
+            # of the pipeline (auth wrappers, ``_collect_derived_sources``)
+            # keeps working transparently.
+            if picked is not None:
+                rollup_cube, rollup = picked
+                rollup_plan = apply_rollup_to_plan(self.plan, rollup_cube, rollup)
+                # The plan→plan transform produces a fresh logical cube;
+                # we still rewrite the catalog so the auth / tenancy
+                # code paths see the rolled-up shape.
+                catalog = apply_rollup(catalog, rollup_cube, rollup)
+                self.applied_rollup = rollup.name
+                self.plan = rollup_plan
 
         # Time-partitioned source routing (#48). For each cube in the
         # join graph that declares ``physical_sources``, intersect
@@ -2345,13 +2367,18 @@ def compile_plan(
       emitted SQL matches the spec-tree path
       (see ``test_logb_ii_plan_driven_compile``).
 
-    The plan is augmented internally with the matching
-    ``SemanticQuery`` (re-derived from the plan's fields) so the
-    pre-flight checks (``_validate_query_invariants``,
-    ``_check_lifecycle``, etc.) can run.  The end-to-end SQL is
-    byte-identical to :func:`compile_query` on the equivalent
-    query — the plan is a strict intermediate representation; the
-    spec-tree path and the plan path agree exactly.
+    The plan is *trusted verbatim*: ``_CompileEnv`` emits from this
+    plan and does not re-lower it.  A matching ``SemanticQuery`` is
+    re-derived from the plan's fields only to run the pre-flight
+    checks (``_validate_query_invariants``, ``_check_lifecycle``,
+    auth / visibility) and to populate the resolution caches — it is
+    *not* re-planned, so any plan→plan transform the caller applied
+    (a scan rewritten to another physical table, a join dropped by
+    the federation split-point, a predicate pushed down) survives to
+    emission.  For an untransformed plan the end-to-end SQL is
+    byte-identical to :func:`compile_query` on the equivalent query —
+    the plan is a strict intermediate representation; the spec-tree
+    path and the plan path agree exactly.
     """
     from semql.spec import SemanticQuery
 
@@ -2449,6 +2476,7 @@ def compile_plan(
         policy=policy,
         scope_fns=scope_fns,
         allow_unbounded_ungrouped=_allow_unbounded_ungrouped,
+        plan=plan,
     )
     return env.emit()
 
