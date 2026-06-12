@@ -2360,14 +2360,53 @@ def compile_plan(
     # frozen and the schema is small; a structural rebuild keeps
     # the round-trip lossless and avoids a side channel for
     # "the spec was X but the plan lowered to Y" mismatches.
-    dim_refs: list[str] = []
-    measure_refs: list[str] = []
-    for col in plan.project.columns:
-        if col.kind == "dimension" and col.field is not None:
-            dim_refs.append(f"{col.cube.name}.{col.field.name}")
-        elif col.kind == "measure" and col.field is not None:
-            measure_refs.append(f"{col.cube.name}.{col.field.name}")
-        # kind="time" maps to plan.time_window — handled below.
+    #
+    # Every field that flows query -> plan must be reconstructed here,
+    # because ``_CompileEnv`` re-plans this query: anything not copied
+    # back is silently dropped from the emitted SQL (architecture
+    # review A1).  Measures / dimensions come from the ``Aggregate``
+    # node verbatim (``group_by`` / ``measures`` are ``list(q.*)``);
+    # an ungrouped row-listing has no aggregate, so its dimensions are
+    # read off the projection instead.
+    ungrouped = plan.aggregate is None
+    if plan.aggregate is not None:
+        dim_refs: list[str] = list(plan.aggregate.group_by)
+        measure_refs: list[str] = list(plan.aggregate.measures)
+        derived_measures: list[InlineDerived] = [
+            d for d in plan.aggregate.derived if isinstance(d, InlineDerived)
+        ]
+    else:
+        dim_refs = [
+            f"{col.cube.name}.{col.field.name}"
+            for col in plan.project.columns
+            if col.kind == "dimension" and col.field is not None
+        ]
+        measure_refs = []
+        derived_measures = []
+
+    # Predicates: ``plan.filters`` merged ``q.filters`` (flat ``Filter``
+    # leaves) and ``q.where`` (a ``BoolExpr`` tree, always last) through
+    # the CNF pre-pass.  Split them back by type — ``to_cnf`` is
+    # idempotent on CNF input, so re-planning rebuilds an identical
+    # ``plan.filters`` list and the WHERE clause is byte-identical.
+    flat_filters: list[Filter] = []
+    where_terms: list[BoolExpr | Filter] = []
+    for pred in plan.filters:
+        if isinstance(pred.expr, Filter):
+            flat_filters.append(pred.expr)
+        else:
+            where_terms.append(pred.expr)
+    if not where_terms:
+        where_expr: BoolExpr | None = None
+    elif len(where_terms) == 1 and isinstance(where_terms[0], BoolExpr):
+        where_expr = where_terms[0]
+    else:
+        where_expr = BoolExpr(op="and", children=list(where_terms))
+
+    # LEFT-joined cubes are the right-hand side of any join the plan
+    # marked ``kind="left"`` (the spec field is consumed as a set, so
+    # order is irrelevant).
+    left_joins = [j.right.name for j in plan.joins if j.kind == "left"]
 
     # Rebuild the compare-mode CompareWindow from the plan. The
     # plan stores the pre-computed current / prior ranges;
@@ -2385,6 +2424,14 @@ def compile_plan(
     q = SemanticQuery(
         measures=measure_refs,
         dimensions=dim_refs,
+        filters=flat_filters,
+        where=where_expr,
+        having=list(plan.having),
+        segments=list(plan.segments),
+        derived_measures=derived_measures,
+        left_joins=left_joins,
+        aliases=dict(plan.aliases),
+        ungrouped=ungrouped,
         time_dimension=plan.time_window,
         compare=compare_window,
         order=list(plan.order.keys),

@@ -211,6 +211,17 @@ class LogicalPlan:
     root: Cube
     time_window: TimeWindow | None
     compare: CompareSplit | None = None
+    # Carry-through query state that the emitter still reads from the
+    # source ``SemanticQuery`` rather than walking the plan: post-agg
+    # ``having`` predicates, named ``segments``, and I14 output
+    # ``aliases``.  Held here (tuples for immutability) so the plan is
+    # a *lossless* representation of the query — ``compile_plan`` can
+    # reconstruct the query faithfully instead of silently dropping
+    # them (architecture review A1).  Not rendered in ``__repr__`` to
+    # keep the plan-snapshot contract stable.
+    having: tuple[Filter, ...] = ()
+    segments: tuple[str, ...] = ()
+    aliases: tuple[tuple[str, str], ...] = ()
 
     def __repr__(self) -> str:
         lines = [
@@ -376,6 +387,9 @@ def to_logical_plan(
         touched=resolved.touched,
         root=cubes_in_from[0],
         time_window=query.time_dimension,
+        having=tuple(query.having),
+        segments=tuple(query.segments),
+        aliases=tuple(query.aliases.items()),
     )
 
     # 8. Compare-mode wrapper.  The emitter reads the inner plan
@@ -414,6 +428,9 @@ def to_logical_plan(
         root=cubes_in_from[0],
         time_window=query.time_dimension,
         compare=compare,
+        having=tuple(query.having),
+        segments=tuple(query.segments),
+        aliases=tuple(query.aliases.items()),
     )
 
 
