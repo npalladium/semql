@@ -55,6 +55,16 @@ review, the rest should be confirmed with a failing test before fixing
    ExecutionResult returned by reference (caller mutation poisons the
    cache); list-valued params (BQ ArrayQueryParameter) are unhashable →
    TypeError at lookup; no TTL.
+   **Resolved 2026-06-12:** all three fixed. (a) `run` now hands out an
+   isolated copy on every read *and* store (`_isolate`); the underlying
+   `_execute_uncached` also stopped aliasing `plan.columns` /
+   `plan.column_meta`, so a returned result no longer shares state with
+   the plan or the cache. (b) `_cache_key` runs param values through
+   `_freeze_param` (lists/tuples → tuples, dicts → key-sorted tuples,
+   sets → frozensets), so container-valued params hash. (c) optional
+   `cache_ttl` expires entries against an injectable monotonic clock.
+   Covered by `test_a5_cache_hazards.py`. AsyncEngine still lacks the
+   cache entirely (B7) — unchanged here.
 6. **MCP auth is per-server, not per-request** (`server.py:122,199`):
    `compile()` is never passed `viewer=`; lookup tools accept
    client-asserted `viewer_id`/`roles`. Tolerable on stdio; a

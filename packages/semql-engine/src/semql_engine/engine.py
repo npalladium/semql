@@ -29,8 +29,8 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterator
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, cast, runtime_checkable
 
 import duckdb
 from semql.compile import ColumnMeta
@@ -76,6 +76,56 @@ class ExecutionResult:
     columns: list[str]
     column_meta: list[ColumnMeta]
     rows: list[tuple[Any, ...]]
+
+
+@dataclass
+class _CacheEntry:
+    """One result-cache slot: the stored result plus an optional
+    monotonic expiry deadline (``None`` = never expires)."""
+
+    result: ExecutionResult
+    expires_at: float | None
+
+
+def _isolate(result: ExecutionResult) -> ExecutionResult:
+    """Return a copy that shares no mutable container (or mutable
+    element) with ``result``.
+
+    The cache hands a fresh ``ExecutionResult`` to every caller so that
+    ``result.rows.sort()`` / ``.append(...)`` / ``columns.pop()`` on one
+    consumer can't corrupt the stored entry or any other consumer.
+    ``rows`` elements are tuples and ``columns`` elements are strings —
+    both immutable, so new lists suffice — but ``column_meta`` holds
+    mutable :class:`ColumnMeta` dataclasses, so each is duplicated."""
+    return ExecutionResult(
+        columns=list(result.columns),
+        column_meta=[replace(m) for m in result.column_meta],
+        rows=list(result.rows),
+    )
+
+
+def _freeze_param(value: object) -> object:
+    """Turn a param value into a hashable, order-preserving key part.
+
+    Adapters may bind container-valued params — a BigQuery
+    ``ArrayQueryParameter`` arrives as a Python ``list`` for an
+    ``IN (...)`` filter — which makes the raw value unhashable and broke
+    the ``key in cache`` lookup. Lists/tuples become tuples (order
+    significant: ``[1,2]`` ≠ ``[2,1]`` as SQL params), dicts become
+    key-sorted tuples, sets become frozensets; scalars pass through
+    unchanged."""
+    if isinstance(value, (list, tuple)):
+        seq = cast("list[object] | tuple[object, ...]", value)
+        return tuple(_freeze_param(v) for v in seq)
+    if isinstance(value, dict):
+        mapping = cast("dict[object, object]", value)
+        items = [(k, _freeze_param(v)) for k, v in mapping.items()]
+        items.sort(key=lambda kv: repr(kv[0]))
+        return tuple(items)
+    if isinstance(value, (set, frozenset)):
+        members = cast("set[object] | frozenset[object]", value)
+        return frozenset(_freeze_param(v) for v in members)
+    return value
 
 
 @runtime_checkable
@@ -128,6 +178,14 @@ class Engine:
       materialise-and-merge. The cache is *in-process*; the engine
       does not invalidate it on catalog mutation. Callers that
       mutate the catalog must call :meth:`clear_cache` themselves.
+      Each read and write hands out an isolated copy, so a caller that
+      mutates a returned result can't corrupt later hits.
+
+    - ``cache_ttl``: optional time-to-live in seconds (must be > 0). An
+      entry older than its TTL is treated as a miss and re-executed —
+      useful for "cache for N seconds, then re-check the source". With
+      no TTL (the default) entries live until LRU eviction or
+      :meth:`clear_cache`.
 
     - ``on_execute``: a callback fired after every run with timing
       and hit/miss info. The hook is best-effort: if it raises, the
@@ -141,20 +199,27 @@ class Engine:
         adapters: dict[Backend, Adapter] | None = None,
         merge_engine: MergeEngine | None = None,
         cache_size: int = 0,
+        cache_ttl: float | None = None,
         on_execute: OnExecuteHook | None = None,
     ) -> None:
         if cache_size < 0:
             raise ValueError(f"cache_size must be non-negative, got {cache_size}")
+        if cache_ttl is not None and cache_ttl <= 0:
+            raise ValueError(f"cache_ttl must be positive when set, got {cache_ttl}")
         self._con: Any = duckdb_connection or duckdb.connect(":memory:")
         self._adapters: dict[Backend, Adapter] = dict(adapters or {})
         self._merge_engine = merge_engine
         self._cache_size = cache_size
+        self._cache_ttl = cache_ttl
         # OrderedDict gives us insertion-order iteration; popitem(last=False)
         # evicts the oldest entry on overflow (LRU semantics).
-        self._cache: OrderedDict[tuple[Any, ...], ExecutionResult] = OrderedDict()
+        self._cache: OrderedDict[tuple[Any, ...], _CacheEntry] = OrderedDict()
         self._cache_hits = 0
         self._cache_misses = 0
         self._on_execute = on_execute
+        # Monotonic clock used for TTL deadlines. An attribute (not a
+        # hard-coded call) so tests can drive expiry deterministically.
+        self._clock: Callable[[], float] = time.monotonic
 
     def register(self, backend: Backend, adapter: Adapter) -> None:
         """Bind an adapter to a backend. Replacing an existing
@@ -183,10 +248,8 @@ class Engine:
         presentation-layer) and any rendering-only fields."""
         return (
             plan.merge.sql,
-            tuple(sorted(plan.merge.params.items())),
-            tuple(
-                (f.backend.value, f.sql, tuple(sorted(f.params.items()))) for f in plan.fragments
-            ),
+            _freeze_param(plan.merge.params),
+            tuple((f.backend.value, f.sql, _freeze_param(f.params)) for f in plan.fragments),
             tuple(plan.columns),
         )
 
@@ -213,19 +276,29 @@ class Engine:
         /metrics emission."""
         cache_enabled = self._cache_size > 0
         cache_key: tuple[Any, ...] | None = self._cache_key(plan) if cache_enabled else None
-        if cache_enabled and cache_key is not None and cache_key in self._cache:
-            cached = self._cache[cache_key]
-            # Mark as recently used: pop + reinsert moves to the end.
-            self._cache.move_to_end(cache_key)
-            self._cache_hits += 1
-            self._fire_hook(plan, 0.0, cache_hit=True)
-            return cached
+        if cache_enabled and cache_key is not None:
+            entry = self._cache.get(cache_key)
+            if entry is not None:
+                if entry.expires_at is not None and self._clock() >= entry.expires_at:
+                    # Past its TTL: drop it and fall through to re-execute.
+                    del self._cache[cache_key]
+                else:
+                    # Mark as recently used: pop + reinsert moves to the end.
+                    self._cache.move_to_end(cache_key)
+                    self._cache_hits += 1
+                    self._fire_hook(plan, 0.0, cache_hit=True)
+                    # Hand back a private copy so caller mutation can't
+                    # poison the stored entry or other consumers.
+                    return _isolate(entry.result)
 
         start = time.perf_counter()
         result = self._execute_uncached(plan)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if cache_enabled and cache_key is not None:
-            self._cache[cache_key] = result
+            expires_at = self._clock() + self._cache_ttl if self._cache_ttl is not None else None
+            # Store an isolated copy so the result we return to the
+            # caller stays independent of the cached one.
+            self._cache[cache_key] = _CacheEntry(_isolate(result), expires_at)
             self._cache.move_to_end(cache_key)
             # Evict oldest entry if over capacity.
             while len(self._cache) > self._cache_size:
@@ -272,8 +345,8 @@ class Engine:
                     f"{plan.columns!r}."
                 )
             return ExecutionResult(
-                columns=plan.columns,
-                column_meta=plan.column_meta,
+                columns=list(plan.columns),
+                column_meta=[replace(m) for m in plan.column_meta],
                 rows=[tuple(r) for r in merged.rows],
             )
 
@@ -285,8 +358,8 @@ class Engine:
         merge_cursor = self._con.execute(plan.merge.sql, dict(plan.merge.params))
         rows = merge_cursor.fetchall()
         return ExecutionResult(
-            columns=plan.columns,
-            column_meta=plan.column_meta,
+            columns=list(plan.columns),
+            column_meta=[replace(m) for m in plan.column_meta],
             rows=rows,
         )
 
