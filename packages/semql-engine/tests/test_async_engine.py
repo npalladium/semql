@@ -412,7 +412,7 @@ def test_iter_run_single_fragment_fast_path_uses_merge_spec(
         SemanticQuery(measures=["orders.revenue"], order=[("revenue", "desc")], limit=1),
         catalog,
     )
-    plan.merge = replace(plan.merge, sql="not valid sql")
+    plan = replace(plan, merge=replace(plan.merge, sql="not valid sql"))
 
     engine = AsyncEngine()
     engine.register(Backend.POSTGRES, AsyncDuckDBAdapter(pg_con))

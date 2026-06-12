@@ -142,7 +142,16 @@ class MergeSpec:
     cross_partition_clauses: tuple[tuple[tuple[bool, str, str, tuple[object, ...]], ...], ...] = ()
 
 
-@dataclass
+# Format version of the federation plan IR.  Bumped when the
+# fragment / merge / merge_spec shape changes in a way an out-of-tree
+# executor would need to know about (``MergeSpec`` travels across
+# package versions — see the executor's ``ANN401`` note).  Stamped on
+# every :class:`FederatedPlan` so a consumer can detect a compiler /
+# executor skew instead of mis-reading a changed shape.
+FEDERATED_PLAN_VERSION = 1
+
+
+@dataclass(frozen=True)
 class FederatedPlan:
     """A query that touches cubes on multiple backends.
 
@@ -152,6 +161,11 @@ class FederatedPlan:
 
     ``columns`` and ``column_meta`` describe the final output shape
     after the merge — same role they play on :class:`CompiledQuery`.
+
+    Frozen — like every other node in the federation IR.  Derive a
+    tweaked plan with :func:`dataclasses.replace`, never by attribute
+    assignment, so the fragments can't silently desync from the merge.
+    ``version`` carries :data:`FEDERATED_PLAN_VERSION`.
     """
 
     fragments: list[CompiledQuery]
@@ -159,6 +173,7 @@ class FederatedPlan:
     merge_spec: MergeSpec
     columns: list[str]
     column_meta: list[ColumnMeta]
+    version: int = FEDERATED_PLAN_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -1803,6 +1818,7 @@ def compile_federated_query(
 
 
 __all__ = [
+    "FEDERATED_PLAN_VERSION",
     "FederatedPlan",
     "FederationError",
     "FederationMode",
