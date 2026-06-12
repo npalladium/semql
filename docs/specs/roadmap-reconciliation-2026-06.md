@@ -140,6 +140,16 @@ explicit `CompileError` on type mismatch, with `Dimension.coerce_to`
 as the opt-in escape hatch, and the resolution surfaced in the
 planner prompt.
 
+**Done 2026-06-12 (decisions.md D8).** Implemented as
+`FederationError(reason="cross_cube_type_coercion")` raised in
+`federate._parse_bridge` — the single funnel both merge paths route
+through — when a cross-backend bridge join's two keys have disjoint
+acceptable-type sets (`{type} ∪ {coerce_to}`). `Dimension.coerce_to`
+added (rejects `coerce_to == type`); the opt-in renders next to the
+dimension `type` in the catalog prompt. Scoped to the federated bridge
+path; same-backend raw-SQL `on` joins remain the B2 escape hatch.
+Covered by `test_i10_cross_cube_coercion.py`. This closes W1.
+
 ## 2. Workstreams with user stories
 
 ### W1 — Correctness on main (A1, A3, A2, A4, A5, I10)

@@ -208,3 +208,47 @@ timezone model. When per-cube/per-dimension timezone semantics land
 endpoints should be parsed at construction (so a malformed or
 ambiguous timestamp is refused when the cube/query is built, not at
 route time). (Maintainer-confirmed 2026-06-12.)
+
+---
+
+## D8. Cross-cube type coercion is refused, with `Dimension.coerce_to` opt-in
+
+**Context.** Review item I10 (promoted to the W1 correctness tier by R6).
+A federated bridge join equates two cubes' keys with a bare `a.k = b.k`;
+when the keys' declared `Dimension.type` differed (a `uuid` order key vs
+a `string` customer id), the merge engine coerced one side silently,
+which can drop or invent matches. That's a refusal-over-omission
+violation. The question: refuse, coerce, or warn — and where.
+
+**Decision.** Refuse at compile time with `FederationError(reason=
+"cross_cube_type_coercion")`. The escape hatch is `Dimension.coerce_to:
+DimTypeLiteral | None` — a dimension declares the *additional* type it
+is willing to be compared as. A join is allowed when the two keys share
+at least one acceptable type, where a key's acceptable set is
+`{type} ∪ {coerce_to}`. `coerce_to == type` is itself a construction
+error (it coerces nothing). The opt-in is rendered in the planner
+prompt next to the dimension's `type`.
+
+**Scope.** The refusal covers the **federated bridge path only**
+(`federate._parse_bridge`), where SemQL holds the join keys as
+structured, typed dimensions. Same-backend joins specify their key in a
+raw-SQL `on` clause whose column types SemQL cannot see — that's the
+raw-SQL escape hatch (B2), and it stays uncovered until an expression
+IR exists. The check sits in `_parse_bridge`, the single funnel both the
+distributive and raw_rows merge paths route through, so neither can
+emit a coercing join.
+
+**Why.** "Wrong results are the only unacceptable outcome." A silent
+type coercion in a join key is precisely a wrong-rows generator, and
+unlike a missing label it's invisible in the output. Making the catalog
+author write `coerce_to` turns an accident into a decision. Type
+mismatch isn't representable for every case yet — there's no date-vs-
+timestamp distinction in `DimTypeLiteral` (B9) — so I10 catches the
+mismatches the type system can currently express (uuid/string,
+number/string, …) and grows as the type vocabulary does.
+
+**Revisit.** When same-backend joins gain a structured key
+representation (B2/B3 — QualifiedRef + expression IR), extend the same
+check to them. When the temporal model splits date from timestamp (B9),
+those become catchable mismatches too. (Maintainer-confirmed
+2026-06-12.)

@@ -244,6 +244,7 @@ def _parse_bridge(left_cube: Cube, right_cube: Cube, join: Join) -> _Bridge:
 
     left_dim = _find_dim_for_column(left_cube, left_cube.alias, lc)
     right_dim = _find_dim_for_column(right_cube, right_cube.alias, rc)
+    _check_bridge_key_types(left_cube, left_dim, right_cube, right_dim)
     return _Bridge(
         left_cube=left_cube,
         right_cube=right_cube,
@@ -251,6 +252,56 @@ def _parse_bridge(left_cube: Cube, right_cube: Cube, join: Join) -> _Bridge:
         right_col=rc,
         left_dim=left_dim,
         right_dim=right_dim,
+    )
+
+
+def _accepted_types(dim: Dimension) -> set[str]:
+    """The set of types a dimension is willing to be compared as: its own
+    declared ``type`` plus any ``coerce_to`` opt-in (I10)."""
+    types: set[str] = {dim.type}
+    if dim.coerce_to is not None:
+        types.add(dim.coerce_to)
+    return types
+
+
+def _check_bridge_key_types(
+    left_cube: Cube,
+    left_dim: str,
+    right_cube: Cube,
+    right_dim: str,
+) -> None:
+    """Refuse a cross-backend bridge join whose two keys have
+    incompatible declared types (I10).
+
+    The merge equates the keys with a bare ``a.k = b.k``; if the types
+    differ the underlying engine coerces one side silently, which can
+    drop or invent matches (a ``uuid`` compared as text, a number read
+    from a string). We refuse unless the catalog author opts in via
+    ``Dimension.coerce_to`` on one side — see :func:`_accepted_types`."""
+    left = _dim_by_name(left_cube, left_dim)
+    right = _dim_by_name(right_cube, right_dim)
+    if _accepted_types(left) & _accepted_types(right):
+        return
+    raise FederationError(
+        f"Cross-backend join from {left_cube.name!r} to {right_cube.name!r}: join key "
+        f"{left_cube.name}.{left_dim} (type={left.type!r}) would be silently coerced to "
+        f"compare with {right_cube.name}.{right_dim} (type={right.type!r}). Make the types "
+        f"match, or opt in by setting coerce_to={right.type!r} on {left_cube.name}.{left_dim} "
+        f"(or coerce_to={left.type!r} on {right_cube.name}.{right_dim}).",
+        reason="cross_cube_type_coercion",
+    )
+
+
+def _dim_by_name(cube: Cube, name: str) -> Dimension:
+    """Look up a declared dimension by name. The caller has already
+    resolved ``name`` via :func:`_find_dim_for_column`, so it always
+    exists; the guard is defensive."""
+    for d in cube.dimensions:
+        if d.name == name:
+            return d
+    raise FederationError(  # pragma: no cover — name came from this cube's dimensions
+        f"Cube {cube.name!r}: bridge key dimension {name!r} not found.",
+        reason="join_key_not_a_dimension",
     )
 
 

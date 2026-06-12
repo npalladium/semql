@@ -781,7 +781,10 @@ def _render_cube(
         for d in cube.dimensions:
             desc = f" — {d.description}" if d.description else ""
             human = _human(d.display_name)
-            out.append(f"  - `{cube.name}.{d.name}` `type={d.type}`{human}{desc}")
+            # I10 — surface the cross-cube coercion opt-in so the planner
+            # knows this key may join a differently-typed key.
+            coerce = f" `coerce_to={d.coerce_to}`" if d.coerce_to is not None else ""
+            out.append(f"  - `{cube.name}.{d.name}` `type={d.type}`{coerce}{human}{desc}")
             dim_ref = f"{cube.name}.{d.name}"
             lk = lookups.get(dim_ref)
             if lk is not None:

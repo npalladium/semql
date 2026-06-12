@@ -264,6 +264,24 @@ class Dimension(BaseField):
     # The field-hide / mask gates (A1) apply on the canonical
     # field; an alias is a synonym, not a separate auth surface.
     aliases: list[str] = Field(default_factory=list)
+    # I10 — Cross-cube coercion opt-in. A federated bridge join whose two
+    # keys have different ``type`` is refused (FederationError) rather
+    # than silently coerced. ``coerce_to`` declares an *additional* type
+    # this dimension is willing to be compared as, so a key of one type
+    # can deliberately join a key of another. The comparison is allowed
+    # when the two keys share at least one acceptable type
+    # (own ``type`` ∪ ``coerce_to``). ``None`` = no coercion.
+    coerce_to: DimTypeLiteral | None = None
+
+    @model_validator(mode="after")
+    def _check_coerce_to(self) -> Dimension:
+        if self.coerce_to is not None and self.coerce_to == self.type:
+            raise ValueError(
+                f"Dimension {self.name!r}: coerce_to={self.coerce_to!r} equals the "
+                f"dimension's own type, so it coerces nothing. Drop it, or set it to "
+                f"the other type this key must compare against."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_mask_subset(self) -> Dimension:
