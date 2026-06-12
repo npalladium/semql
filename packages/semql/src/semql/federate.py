@@ -434,9 +434,12 @@ def _build_partition_sub_query(
     - Extra "bridge" dimensions for every join key on a bridge that
       touches a cube in this partition — so the merge step can join
       fragments on those columns.
+    - Segments whose cube lives in this partition.
 
-    Refuses cross-partition where-trees, segments, and queries with
-    measures on non-primary partitions.
+    The where-tree is routed separately, after all partitions are
+    built (``_route_where_distributive``), because a cross-partition
+    clause has to force-project columns across several fragments at
+    once.  Refuses queries with measures on non-primary partitions.
     """
     partition_names = {c.name for c in partition_cubes}
     backend = partition_cubes[0].backend
@@ -517,6 +520,12 @@ def _build_partition_sub_query(
         if owner.name in partition_names:
             sub_filters.append(f)
 
+    # Segments route to the partition owning the segment's cube. A
+    # segment's SQL references a single cube's alias, so it always
+    # belongs to exactly one partition — the compiler applies it
+    # inside that fragment; the merge step never re-applies it.
+    sub_segments = [s for s in q.segments if s.split(".", 1)[0] in partition_names]
+
     # Bridge keys. For every bridge that touches a cube in this
     # partition, expose the appropriate side as a dimension.
     bridge_columns: dict[str, str] = {}
@@ -549,7 +558,10 @@ def _build_partition_sub_query(
         dimensions=sub_dimensions,
         time_dimension=sub_time_dim,
         filters=sub_filters,
-        # No segments / where / having in v1 federated subqueries.
+        segments=sub_segments,
+        # ``where`` is routed after partition construction
+        # (``_route_where_distributive``); HAVING stays a merge-only
+        # concern and is refused in distributive mode upstream.
         order=[],
         # Ordering & limits happen at merge.
     )
@@ -901,11 +913,25 @@ def _clauses_to_boolexpr(clauses: _Cnf) -> BoolExpr | Filter:
     return BoolExpr(op="and", children=branches)
 
 
-def _route_where_tree(
+def _route_where_clauses(
     where: BoolExpr | Filter,
-    partitions: list[_RawRowPartitionPlan],
-) -> tuple[list[_RawRowPartitionPlan], _Cnf]:
-    cube_to_idx: dict[str, int] = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
+    cube_to_idx: dict[str, int],
+    dim_columns_per_partition: list[dict[str, str]],
+) -> tuple[dict[int, _Cnf], _Cnf, dict[int, list[str]]]:
+    """Split a where-tree into per-partition CNF clauses + a cross-
+    partition residual.
+
+    A clause whose literals all resolve to one partition is applied
+    inside that fragment (``per_partition``); a clause spanning
+    partitions becomes a residual the merge step applies post-join
+    (``cross``), and every dimension such a clause references that the
+    fragment doesn't already project is force-projected
+    (``extra_dims``) so the merge SELECT can see it.
+
+    Pure computation shared by the distributive and raw_rows routing —
+    neither plan dataclass leaks in, only the per-partition
+    ``dim_columns`` maps and the cube→partition index.
+    """
     cnf = _to_cnf(where)
     per_partition: dict[int, _Cnf] = {}
     cross: _Cnf = []
@@ -928,8 +954,21 @@ def _route_where_tree(
             cross.append(clause)
             for _negated, lit in clause:
                 idx = cube_to_idx[lit.dimension.split(".", 1)[0]]
-                if lit.dimension not in partitions[idx].dim_columns:
-                    extra_dims.setdefault(idx, []).append(lit.dimension)
+                already = dim_columns_per_partition[idx]
+                pending = extra_dims.setdefault(idx, [])
+                if lit.dimension not in already and lit.dimension not in pending:
+                    pending.append(lit.dimension)
+    return per_partition, cross, extra_dims
+
+
+def _route_where_tree(
+    where: BoolExpr | Filter,
+    partitions: list[_RawRowPartitionPlan],
+) -> tuple[list[_RawRowPartitionPlan], _Cnf]:
+    cube_to_idx: dict[str, int] = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
+    per_partition, cross, extra_dims = _route_where_clauses(
+        where, cube_to_idx, [p.dim_columns for p in partitions]
+    )
 
     out: list[_RawRowPartitionPlan] = []
     for idx, p in enumerate(partitions):
@@ -965,6 +1004,61 @@ def _route_where_tree(
                 time_col=p.time_col,
                 time_grain=p.time_grain,
                 time_dim_ref=p.time_dim_ref,
+            )
+        )
+    return out, cross
+
+
+def _route_where_distributive(
+    where: BoolExpr | Filter,
+    partitions: list[_PartitionPlan],
+) -> tuple[list[_PartitionPlan], _Cnf]:
+    """Distributive analogue of :func:`_route_where_tree`.
+
+    Single-partition clauses AND into the owning fragment's ``where``;
+    a cross-partition clause stays as a residual the merge applies
+    post-join.  Dimensions a cross clause references but the fragment
+    doesn't already project are added to the fragment's GROUP BY (and
+    its ``dim_columns`` map) so the merge SELECT can reference them —
+    correct for the distributive sum/count aggs, since grouping by an
+    extra key and re-summing at merge is exact.
+    """
+    cube_to_idx: dict[str, int] = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
+    per_partition, cross, extra_dims = _route_where_clauses(
+        where, cube_to_idx, [p.dim_columns for p in partitions]
+    )
+
+    out: list[_PartitionPlan] = []
+    for idx, p in enumerate(partitions):
+        clauses_for_p = per_partition.get(idx)
+        dims_for_p = extra_dims.get(idx, [])
+        if not clauses_for_p and not dims_for_p:
+            out.append(p)
+            continue
+        sub_q = p.sub_query
+        sub_q_updates: dict[str, object] = {}
+        if clauses_for_p:
+            new_where: BoolExpr | Filter = _clauses_to_boolexpr(clauses_for_p)
+            if sub_q.where is not None:
+                new_where = BoolExpr(op="and", children=[sub_q.where, new_where])
+            sub_q_updates["where"] = new_where
+        new_dim_columns = dict(p.dim_columns)
+        if dims_for_p:
+            existing_dims = list(sub_q.dimensions)
+            to_add = [d for d in dims_for_p if d not in existing_dims]
+            sub_q_updates["dimensions"] = existing_dims + to_add
+            for d in to_add:
+                new_dim_columns[d] = d.rsplit(".", 1)[1]
+        new_sub_q = sub_q.model_copy(update=sub_q_updates)
+        out.append(
+            _PartitionPlan(
+                backend=p.backend,
+                cubes=p.cubes,
+                sub_query=new_sub_q,
+                measure_columns=p.measure_columns,
+                avg_columns=p.avg_columns,
+                dim_columns=new_dim_columns,
+                bridge_columns=p.bridge_columns,
             )
         )
     return out, cross
@@ -1628,6 +1722,11 @@ def compile_federated_query(
         _build_partition_sub_query(q, catalog, list(grouped[b]), primary_partition, bridges)
         for b in backend_order
     ]
+    # Route the where-tree: per-partition clauses fold into each
+    # fragment, the cross-partition residual rides into the merge SQL.
+    cross_partition_clauses: _Cnf = []
+    if q.where is not None:
+        partitions, cross_partition_clauses = _route_where_distributive(q.where, partitions)
     fragments = [
         compile_query(
             p.sub_query,
@@ -1685,7 +1784,14 @@ def compile_federated_query(
         output_column_meta.append(_meta_for_measure(r))
 
     merge_sql, merge_spec = _emit_merge_sql(
-        q, catalog, primary_partition, partitions, bridges, output_columns, output_column_meta
+        q,
+        catalog,
+        primary_partition,
+        partitions,
+        bridges,
+        output_columns,
+        output_column_meta,
+        cross_partition_clauses=cross_partition_clauses,
     )
     return FederatedPlan(
         fragments=fragments,
