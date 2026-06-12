@@ -1733,11 +1733,16 @@ class _CompileEnv:
 
     def _lookup_filter_field(self, leaf: Filter) -> Dimension | Measure | TimeDimension | Segment:
         """Find the field for a filter leaf, considering both the
-        flat ``filters`` list and the where-tree leaves."""
+        flat ``filters`` list and the where-tree leaves.
+
+        Keyed by the leaf's qualified ``dimension``, not object identity:
+        the resolved field depends only on which ``cube.field`` the leaf
+        names, so a leaf an IR transform *copied* (federation split-point,
+        CNF routing) resolves the same as the original (review B6)."""
         for f, _cube, fld in self.filter_resolutions:
-            if f is leaf:
+            if f.dimension == leaf.dimension:
                 return fld
-        pair = self.where_leaf_resolutions.get(id(leaf))
+        pair = self.where_leaf_resolutions.get(leaf.dimension)
         if pair is not None:
             return pair[1]
         raise CompileError(

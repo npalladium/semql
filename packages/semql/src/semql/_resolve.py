@@ -114,17 +114,22 @@ class _ResolvedFields:
     query mapped to a concrete `(Cube, Field)` pair, plus the ordered
     list of cubes the query touches.
 
-    `where_leaf_resolutions` is keyed by `id(leaf)` so the compiler can
-    look each leaf up during AST emission. The filter list mirrors
-    `q.filters` order; the where-leaf dict mirrors a depth-first walk
-    of `q.where`."""
+    `where_leaf_resolutions` is keyed by the leaf's qualified `dimension`
+    (the `cube.field` string) so the compiler can look each leaf up during
+    AST emission. A leaf's resolved field depends only on `dimension`
+    (the resolver calls `resolve_with_views(leaf.dimension)`), so a *copied*
+    leaf — which IR transforms such as the federation split-point produce —
+    resolves identically to the original. (Keying by `id(leaf)` instead, as
+    an earlier version did, broke the moment a transform rebuilt a leaf;
+    see review B6.) The filter list mirrors `q.filters` order; the
+    where-leaf dict mirrors a depth-first walk of `q.where`."""
 
     measure_fields: list[tuple[Cube, Measure]]
     dim_fields: list[tuple[Cube, Dimension]]
     time_cube: Cube | None
     time_dim: TimeDimension | None
     filter_resolutions: list[tuple[Filter, Cube, Dimension | Measure | TimeDimension | Segment]]
-    where_leaf_resolutions: dict[int, tuple[Cube, Dimension | Measure | TimeDimension | Segment]]
+    where_leaf_resolutions: dict[str, tuple[Cube, Dimension | Measure | TimeDimension | Segment]]
     segment_resolutions: list[tuple[Cube, Segment]]
     touched: list[Cube]
 
@@ -350,7 +355,7 @@ def walk_query_fields(
 
     where_leaves: list[Filter] = walk_where_leaves(q.where) if q.where is not None else []
     where_leaf_resolutions: dict[
-        int, tuple[Cube, Dimension | Measure | TimeDimension | Segment]
+        str, tuple[Cube, Dimension | Measure | TimeDimension | Segment]
     ] = {}
     for leaf in where_leaves:
         try:
@@ -380,7 +385,7 @@ def walk_query_fields(
                     )
                 )
                 continue
-        where_leaf_resolutions[id(leaf)] = (c, fld)
+        where_leaf_resolutions[leaf.dimension] = (c, fld)
         if c not in touched:
             touched.append(c)
 

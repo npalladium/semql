@@ -111,6 +111,13 @@ review, the rest should be confirmed with a failing test before fixing
    `id(leaf)` side tables). Works only because CNF reuses leaf objects.
    Any transform that copies a Filter (pushdown, pruning, federation
    routing — everything logical.py promises) breaks at emission.
+   **Resolved 2026-06-12 (W2 stage 1):** resolution is now keyed by the
+   leaf's qualified `dimension` (the field a leaf resolves to depends
+   only on which `cube.field` it names), in both `where_leaf_resolutions`
+   (`_resolve.py`) and `_CompileEnv._lookup_filter_field`. A copied leaf
+   resolves identically to its original — the prerequisite for the
+   federation split-point. Pinned by `test_b6_structural_predicate_keys.py`;
+   no SQL change (snapshots byte-identical).
 7. **Sync/async engine duplication with divergence.** AsyncEngine lacks
    the P7 cache and on_execute hook; shares code by calling unbound
    `Engine` methods with `# type: ignore`. Adapter protocol has no
