@@ -37,7 +37,7 @@ import sqlglot.expressions as exp
 
 from semql.backend import _ident
 from semql.model import Cube, TimePartitionedSource
-from semql.spec import TimeWindow
+from semql.spec import TimeWindow, parse_instant
 
 
 def select_physical_sources(
@@ -75,14 +75,21 @@ def _ranges_intersect(
 ) -> bool:
     """Half-open interval intersection. ``None`` is open-ended.
 
+    Endpoints are compared by *instant* (:func:`parse_instant`), not as
+    lexical strings: ``"2024-01-01"`` and ``"2024-01-01T00:00:00+00:00"``
+    are the same boundary, and an offset-bearing endpoint sorts by the
+    moment it denotes, not its leading digits (the A2 routing bug).
+
     Touching ranges (``a_end == b_start``) do NOT intersect — the
     boundary belongs to the source with the matching inclusive
     lower bound, not both."""
     q_lo, q_hi = query
     s_lo, s_hi = src
-    if q_lo is not None and s_hi is not None and not q_lo < s_hi:
+    if q_lo is not None and s_hi is not None and not parse_instant(q_lo) < parse_instant(s_hi):
         return False
-    return not (q_hi is not None and s_lo is not None and not s_lo < q_hi)
+    return not (
+        q_hi is not None and s_lo is not None and not parse_instant(s_lo) < parse_instant(q_hi)
+    )
 
 
 def _projected_field_list(

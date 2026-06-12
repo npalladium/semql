@@ -38,6 +38,7 @@ from semql._grounding import (
 from semql._grounding import (
     validate_relations as _grounding_validate_relations,
 )
+from semql.spec import parse_instant as _parse_instant
 
 
 class Backend(StrEnum):
@@ -533,13 +534,13 @@ class TimePartitionedSource(BaseModel):
         if (
             self.range_start is not None
             and self.range_end is not None
-            and not self.range_start < self.range_end
+            and not _parse_instant(self.range_start) < _parse_instant(self.range_end)
         ):
             raise ValueError(
                 f"TimePartitionedSource {self.name!r}: range_start "
                 f"{self.range_start!r} must be strictly less than "
-                f"range_end {self.range_end!r}. Half-open intervals "
-                "with start == end are empty."
+                f"range_end {self.range_end!r} (compared by instant, not "
+                "text). Half-open intervals with start == end are empty."
             )
         return self
 

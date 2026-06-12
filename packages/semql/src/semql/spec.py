@@ -8,10 +8,30 @@ naming the offending field.
 from __future__ import annotations
 
 import uuid as _uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def parse_instant(value: str) -> datetime:
+    """Parse an ISO-8601 time-range endpoint to an aware UTC ``datetime``.
+
+    Range routing is about *instants*, not bytes. ``"2024-01-01"``,
+    ``"2024-01-01T00:00:00"`` and ``"2024-01-01T05:00:00+05:00"`` all
+    denote the same moment and must compare equal — lexical string
+    comparison gets this wrong the instant two endpoints carry different
+    UTC offsets or differing precision (the A2 routing bug). Naive
+    timestamps are read as UTC so a naive endpoint stays comparable with
+    an offset-bearing one; per-cube timezone semantics are tracked
+    separately (architecture review B9). Raises ``ValueError`` naming the
+    offending value if it is not valid ISO-8601."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"not a valid ISO-8601 datetime: {value!r}") from exc
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
 
 FilterOp = Literal[
     "eq",
@@ -40,7 +60,10 @@ class TimeWindow(BaseModel):
         description="Bucket size for time GROUP BY; required when fill_nulls_with is set.",
     )
     range: tuple[str, str] = Field(
-        description="Inclusive (start, end) ISO-8601 datetime pair bounding the window.",
+        description=(
+            "Half-open [start, end) ISO-8601 pair; emits `dim >= start AND dim < end`, "
+            "compared by instant not text."
+        ),
     )
     # When set, every measure in the query gets ``COALESCE(measure,
     # fill_nulls_with)`` and the result has one row per truncated time

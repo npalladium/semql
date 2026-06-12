@@ -23,6 +23,18 @@ review, the rest should be confirmed with a failing test before fixing
    string* comparison of unvalidated, unnormalised timestamps
    (`"2024-01-01"` vs `"2024-01-01T00:00:00"`). A query ending exactly
    at a source boundary skips that source's table.
+   **Resolved 2026-06-12 (decisions.md D7):** the emitted WHERE is in
+   fact half-open (`dim >= start AND dim < end`, `compile.py:1694-1706`)
+   and the routing already matched it — so the boundary-skip framing was
+   off; the real defect was the *lexical* comparison, which inverts the
+   instant order the moment two endpoints carry different UTC offsets
+   (a window in `-05:00` whose rows all live in the post-boundary source
+   was routed to the *wrong* table and returned empty). Fixed by
+   comparing parsed instants (`spec.parse_instant`, naive read as UTC)
+   in both `_ranges_intersect` and the `TimePartitionedSource`
+   range-ordering validator, and by correcting the `TimeWindow.range`
+   docstring to half-open. Full parse-at-construction + per-cube
+   timezone semantics remain B9.
 3. **PolarsMergeEngine drops filter literals it doesn't understand**
    (`polars_engine.py:260-261`): ops outside eq/neq/gt/gte/lt/lte hit
    `else: continue` inside an OR-disjunction → narrower disjunction →

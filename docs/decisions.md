@@ -170,3 +170,41 @@ protocol — but gate it on a differential harness that runs every
 `FederatedPlan` through both engines and asserts identical rows, so
 it can never silently diverge again. (Maintainer-confirmed
 2026-06-12.)
+
+---
+
+## D7. Time-window ranges are half-open and compared by instant
+
+**Context.** Review defect A2. `TimeWindow.range`'s docstring said
+"Inclusive (start, end)", but the compiler emits `dim >= start AND
+dim < end` — a half-open `[start, end)` window — and the
+time-partition router (`_ranges_intersect`) compared endpoint
+*strings* lexically. The two questions A2 forces: is the window
+inclusive or half-open, and how are endpoints ordered?
+
+**Decision.** Half-open `[start, end)` is canonical — the emitted SQL
+is the source of truth and already half-open; the docstring was the
+bug and was corrected. Range endpoints are compared by *instant*, not
+text: a shared `spec.parse_instant` parses each ISO-8601 endpoint to
+an aware `datetime`, and the router and the `TimePartitionedSource`
+range-ordering validator both compare the parsed values. Naive
+(offset-less) timestamps are read as **UTC** so a naive endpoint stays
+comparable with an offset-bearing one.
+
+**Why.** Lexical comparison only *coincidentally* matches chronological
+order — for zero-padded, same-offset ISO-8601. The instant two
+endpoints differ in UTC offset (or precision), byte order diverges
+from instant order: a query window in `-05:00` whose rows all fall in
+the post-boundary physical source was routed to the *pre*-boundary
+table and silently returned empty. Comparing instants is the only
+comparison that matches what the `>= / <` filter actually selects.
+Half-open is also what the rest of the model already assumes
+(`TimePartitionedSource` docstring) and what review item B9 recommends
+standardising on everywhere.
+
+**Revisit.** The naive-is-UTC reading is a pragmatic default, not a
+timezone model. When per-cube/per-dimension timezone semantics land
+(B9), `parse_instant`'s default should defer to the declared zone, and
+endpoints should be parsed at construction (so a malformed or
+ambiguous timestamp is refused when the cube/query is built, not at
+route time). (Maintainer-confirmed 2026-06-12.)
