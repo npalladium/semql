@@ -252,3 +252,36 @@ representation (B2/B3 — QualifiedRef + expression IR), extend the same
 check to them. When the temporal model splits date from timestamp (B9),
 those become catchable mismatches too. (Maintainer-confirmed
 2026-06-12.)
+
+---
+
+## D9. Honouring `Join.kind` at emission waits for the join-graph rebuild (W3)
+
+**Context.** W2 (review B1) listed "`Join.kind` honoured" — the emitter
+hardcodes `join_type="left"` (`compile.py`) while the plan carries a
+`kind` (`logical.py` sets `left` for cubes in `query.left_joins`, else
+`inner`, matching the spec doc "Cubes to LEFT JOIN instead of INNER").
+The naive fix is to pass `plan_join.kind` to the emitter.
+
+**Decision.** Defer it to W3 (the ktx M2 join-graph rebuild).
+`build_join_graph` does not yet compute the correct FROM root /
+direction for the `left_joins` *spine* case: a query with
+`left_joins=["facts"]` and a dimension from the spine cube roots at
+`facts` and emits `facts → spine`, so the spine cube lands on the
+`right` with `kind="inner"`. Honouring that `kind` produces a
+wrong-rooted INNER join that drops the very rows the spine feature
+exists to keep (e.g. employees with zero punches). The plan's `kind` is
+only as correct as the graph that assigns it, and root/direction
+selection is exactly what W3 rebuilds (Dijkstra + `JoinPath`).
+
+**Why.** Honouring a provably-incorrect `kind` is not an improvement
+over the (also-wrong-but-stable) always-LEFT status quo — it trades one
+wrong result for another and ships a regression for spine queries.
+Fixing it properly means correcting root/direction in the join graph,
+which would mean building on `build_join_graph` right before W3 replaces
+it (the anti-pattern R3 warns against). The emitter is left at
+always-LEFT until the graph produces a trustworthy `kind`.
+
+**Revisit.** With W3's join-graph rebuild — at which point the emitter
+reads `plan_join.kind` and a spine query roots at the spine cube with
+the fact cube LEFT-joined. (Maintainer-confirmed 2026-06-12.)

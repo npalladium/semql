@@ -37,7 +37,6 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
-from datetime import datetime
 from typing import Any, Literal
 
 import sqlglot
@@ -1898,19 +1897,13 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
     measure_col_names = env.measure_col_names
     time_col_name = env.time_col_name
 
-    assert q.compare is not None and env.plan.time_window is not None
-    current_range = env.plan.time_window.range
-    if q.compare.mode == "previous_period":
-        cs = datetime.fromisoformat(current_range[0])
-        ce = datetime.fromisoformat(current_range[1])
-        duration = ce - cs
-        prior_range: tuple[str, str] = (
-            (cs - duration).isoformat(),
-            cs.isoformat(),
-        )
-    else:
-        assert q.compare.range is not None
-        prior_range = q.compare.range
+    # Ranges come from the plan's CompareSplit — the single place the
+    # prior-range math runs (``to_logical_plan``). The emitter trusts the
+    # plan rather than recomputing from ``q.compare`` (review B1: the math
+    # used to be computed twice and the plan node was write-only).
+    assert env.plan.compare is not None
+    current_range = env.plan.compare.current_range
+    prior_range = env.plan.compare.prior_range
 
     current_inner = env.build_inner(current_range)
     prior_inner = env.build_inner(prior_range)
