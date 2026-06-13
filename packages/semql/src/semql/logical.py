@@ -41,6 +41,7 @@ from semql.model import (
     Dimension,
     GranularityLiteral,
     Measure,
+    Provenance,
     Rollup,
     TimeDimension,
     View,
@@ -81,6 +82,18 @@ class ColumnRef:
     alias: str
     kind: Literal["dimension", "time", "measure", "computed"]
     field: Measure | Dimension | TimeDimension | None = None
+
+    @property
+    def provenance(self) -> Provenance:
+        """How much this output column can be trusted (C3), derived from
+        :attr:`kind`: a catalog measure is ``VERIFIED``, a derived/inline
+        measure is ``COMPOSED``, a raw dimension or time bucket is
+        ``DIMENSION``."""
+        if self.kind == "measure":
+            return Provenance.VERIFIED
+        if self.kind == "computed":
+            return Provenance.COMPOSED
+        return Provenance.DIMENSION
 
 
 @dataclass(frozen=True)

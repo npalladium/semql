@@ -49,6 +49,18 @@ class Backend(StrEnum):
     META = "meta"  # reflection over the catalog itself; see introspect.py
 
 
+class Provenance(StrEnum):
+    """How much a projected output column can be trusted (C3).
+
+    Lets downstream consumers (MCP tools, the presenter / drilldown prompt
+    roles) distinguish a value that came from an approved measure
+    definition from one the planner composed ad hoc."""
+
+    VERIFIED = "verified"  # a catalog-defined measure
+    COMPOSED = "composed"  # a derived / inline (ad-hoc) measure expression
+    DIMENSION = "dimension"  # a raw dimension / time-bucket column
+
+
 StabilityLiteral = Literal["stable", "beta", "deprecated"]
 """Lifecycle hint for a Cube / SavedQuery. ``deprecated`` is refused by
 the compiler (see S7 PRD); ``beta`` flows through with an annotation."""
@@ -1374,6 +1386,7 @@ __all__ = [
     "Measure",
     "Metadata",
     "NamedCTE",
+    "Provenance",
     "ResolutionContext",
     "ScopePredicate",
     "Segment",
