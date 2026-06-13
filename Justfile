@@ -101,6 +101,15 @@ release-test: (build) check-dist publish-test
 # End-to-end: build everything, validate, publish to PyPI.
 release: (build) check-dist publish
 
+# Create a GitHub Release for `tag` and upload the built dist/ artifacts
+# as release assets. Build + push the tag first (`just build`, then
+# `git push --tags`). Release notes are auto-generated from the commit /
+# PR history since the previous release. `--verify-tag` refuses to
+# create the release if the tag doesn't exist.
+#   just release-github v0.3.0
+release-github tag: check-dist
+    gh release create {{tag}} dist/* --title {{tag}} --generate-notes --verify-tag
+
 # Build + check a single package and stage it for a focused publish.
 #   just stage semql        # leaves only semql artifacts in dist/
 stage pkg: clean-dist
