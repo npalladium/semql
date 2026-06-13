@@ -25,11 +25,21 @@ follow-up commit, not a runtime extension point):
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, ConfigDict
 
 from semql.errors import CompileError
 from semql.model import GranularityLiteral
-from semql.spec import Filter, SemanticQuery, TimeWindow
+from semql.spec import Filter, TimeWindow
+
+if TYPE_CHECKING:
+    # ``SemanticQuery`` is a type-annotation-only reference here; the
+    # runtime function body just calls ``q.model_copy(update=...)``
+    # and reads/writes ``q``'s public fields. Importing it at runtime
+    # would create a spec ↔ rewrite cycle (spec.SemanticQuery.rewrite
+    # calls us, and we'd import spec back).
+    from semql.spec import SemanticQuery
 
 
 class AddFilter(BaseModel):

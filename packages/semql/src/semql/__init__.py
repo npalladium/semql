@@ -75,6 +75,7 @@ from semql.logical import (
 # 2026-06 calls for removing it from ``__all__`` until the wire
 # format is stable; this is the corresponding narrowing of the
 # top-level surface.
+from semql.instant import parse_instant
 from semql.lookups import enrich_result
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
@@ -297,6 +298,7 @@ __all__ = [
     "enrich_result",
     "materialize_lookup",
     "lint_catalog",
+    "parse_instant",
     "LintFinding",
     "LintReport",
     "render_catalog_markdown",

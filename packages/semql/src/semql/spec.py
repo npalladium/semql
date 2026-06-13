@@ -8,33 +8,28 @@ naming the offending field.
 from __future__ import annotations
 
 import uuid as _uuid
-from datetime import UTC, datetime
-from typing import Annotated, Literal
+from datetime import datetime
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# ``parse_instant`` is a pure leaf utility — it lives in
+# :mod:`semql.instant` so the catalog model (which needs it for
+# time-partitioned source range checks) doesn't have to import
+# the whole spec tree. Re-exported here for callers that imported
+# it from ``semql.spec`` historically.
+from semql.instant import parse_instant
 
-def parse_instant(value: str) -> datetime:
-    """Parse an ISO-8601 time-range endpoint to an aware UTC ``datetime``.
-
-    Range routing is about *instants*, not bytes. ``"2024-01-01"``,
-    ``"2024-01-01T00:00:00"`` and ``"2024-01-01T05:00:00+05:00"`` all
-    denote the same moment and must compare equal — lexical string
-    comparison gets this wrong the instant two endpoints carry different
-    UTC offsets or differing precision (the A2 routing bug). Naive
-    timestamps are read as UTC so a naive endpoint stays comparable with
-    an offset-bearing one; per-cube timezone semantics are tracked
-    separately (architecture review B9). Raises ``ValueError`` naming the
-    offending value if it is not valid ISO-8601.
-
-    >>> parse_instant("2024-01-01")
-    datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)
-    """
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"not a valid ISO-8601 datetime: {value!r}") from exc
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+if TYPE_CHECKING:
+    # The cycle here is real: ``rewrite.py`` needs ``Filter`` /
+    # ``TimeWindow`` as field types of the rewrite-op classes, and
+    # the type-checker wants ``RewriteOp`` available where the
+    # ``SemanticQuery.rewrite()`` method is declared. Both
+    # directions cross, so neither module can top-level-import
+    # the other without a lazy bridge. The runtime body of
+    # ``rewrite()`` is a one-liner that delegates to the free
+    # function imported lazily in the method body — see below.
+    from semql.rewrite import RewriteOp, rewrite
 
 
 FilterOp = Literal[
@@ -369,21 +364,25 @@ class SemanticQuery(BaseModel):
             )
         return self
 
-    def rewrite(self, op: object) -> SemanticQuery:
-        """Apply a :class:`semql.RewriteOp` and return a new query.
+    def rewrite(self, op: RewriteOp) -> SemanticQuery:
+        """Apply a :class:`semql.rewrite.RewriteOp` and return a new query.
 
-        Convenience wrapper over :func:`semql.rewrite.rewrite`. ``op``
-        is typed as ``object`` here because importing the RewriteOp
-        union at module-load time would create a cycle
-        (rewrite.py → spec.py); the implementation in
-        :mod:`semql.rewrite` performs the dispatch and the static
-        type-checkers see the precise op type through the function
-        form ``rewrite(q, op)``."""
+        Convenience wrapper over the free function :func:`semql.rewrite.rewrite`.
+        The two forms are equivalent — kept as sugar for chat-style
+        ``q = q.rewrite(Drilldown(...))`` chains. Implementation lives
+        in :mod:`semql.rewrite` so the dispatch table is in one place.
+
+        Note: this import is intentionally lazy. ``spec`` and
+        ``rewrite`` form a true module cycle (rewrite's op classes
+        carry ``Filter`` / ``TimeWindow`` fields; spec's
+        ``SemanticQuery.rewrite`` calls back into ``rewrite``).
+        Either direction can be top-level — not both. The method
+        body is the one place we reach across, and lazy import
+        inside a method body is the standard Python idiom.
+        """
         from semql.rewrite import rewrite as _rewrite
 
-        # Cast for mypy: the rewrite function is typed against the
-        # closed-enum RewriteOp union. Runtime dispatches via isinstance.
-        return _rewrite(self, op)  # type: ignore[arg-type]
+        return _rewrite(self, op)
 
 
 class SavedQuery(BaseModel):

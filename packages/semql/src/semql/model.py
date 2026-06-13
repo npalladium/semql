@@ -37,7 +37,11 @@ from semql._grounding import (
 from semql._grounding import (
     validate_relations as _grounding_validate_relations,
 )
-from semql.spec import parse_instant as _parse_instant
+# ``parse_instant`` is a leaf utility. Importing it from ``semql.spec``
+# would create a model ↔ spec cycle (the spec tree itself depends on
+# model types). It lives at :mod:`semql.instant` precisely so the
+# model layer can reach it without the round-trip.
+from semql.instant import parse_instant as _parse_instant
 
 
 class Dialect(StrEnum):

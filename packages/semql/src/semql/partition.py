@@ -36,8 +36,9 @@ import sqlglot
 import sqlglot.expressions as exp
 
 from semql.backend import _ident
+from semql.instant import parse_instant
 from semql.model import Cube, TimePartitionedSource
-from semql.spec import TimeWindow, parse_instant
+from semql.spec import TimeWindow
 
 
 def select_physical_sources(
