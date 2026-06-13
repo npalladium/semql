@@ -254,3 +254,45 @@ def test_cross_mode_join_carries_both_predicates() -> None:
     )
     assert "tenant_acme.orders" in out.sql
     assert "tenant_id" in out.sql  # discriminator predicate on events
+
+
+# ---------------------------------------------------------------------------
+# Schema-name injection — `{tenant_schema}` interpolates into an identifier
+# position (no bind form), so the context value must be a safe identifier.
+# ---------------------------------------------------------------------------
+
+
+def _schema_cube() -> Cube:
+    return Cube(
+        name="c",
+        dialect=Dialect.POSTGRES,
+        table="{tenant_schema}.t",
+        alias="c",
+        measures=[Measure(name="n", sql="*", agg="count", unit="count")],
+    )
+
+
+def test_schema_tenancy_refuses_injection_in_context_value() -> None:
+    """A request-controlled ``tenant_schema`` that isn't a plain identifier
+    (here, a stacked ``DROP TABLE``) is refused rather than spliced raw —
+    closing the schema-name injection vector."""
+    cat = Catalog([_schema_cube()])
+    q = SemanticQuery(measures=["c.n"])
+    with pytest.raises(CompileError, match="safe SQL identifier"):
+        cat.compile(q, context={"tenant_schema": "public; DROP TABLE users; --"})
+
+
+def test_schema_tenancy_refuses_quoted_or_spaced_context_value() -> None:
+    cat = Catalog([_schema_cube()])
+    q = SemanticQuery(measures=["c.n"])
+    for bad in ('"evil"', "a b", "schema'); --", "1schema"):
+        with pytest.raises(CompileError, match="safe SQL identifier"):
+            cat.compile(q, context={"tenant_schema": bad})
+
+
+def test_schema_tenancy_accepts_plain_and_qualified_identifier() -> None:
+    cat = Catalog([_schema_cube()])
+    q = SemanticQuery(measures=["c.n"])
+    assert "tenant_acme.t" in cat.compile(q, context={"tenant_schema": "tenant_acme"}).sql
+    # Dot-qualified (catalog.schema) is allowed — still pure identifier chars.
+    assert "db.tenant_acme.t" in cat.compile(q, context={"tenant_schema": "db.tenant_acme"}).sql

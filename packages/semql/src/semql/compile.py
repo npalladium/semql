@@ -514,6 +514,16 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 # Substituted with a bound parameter so the value never appears as a
 # SQL literal.
 _CTX_PLACEHOLDER_RE = re.compile(r"\{ctx\.([a-z_][a-z0-9_]*)\}")
+# A context-sourced ``{key}`` substitution (e.g. ``{tenant_schema}``) lands
+# in an *identifier* position — a schema / table name — where SQL has no
+# bind-parameter form (you cannot parameterise an identifier). Splicing the
+# raw value is therefore an injection vector: a request-controlled
+# ``tenant_schema`` of ``public; DROP TABLE users; --`` would be emitted
+# verbatim, and under schema-tenancy it is also a cross-tenant read. Restrict
+# such values to a safe, optionally dot-qualified SQL identifier and refuse
+# anything else. Cube aliases bypass this — they are compiler-internal and
+# already validated.
+_SAFE_SUBST_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 def _resolve_sql(
@@ -527,21 +537,41 @@ def _resolve_sql(
     caller-supplied ``context``. ClickHouse typed param placeholders like
     ``{p0:String}`` are left untouched — the inner regex requires a plain
     identifier (no ``:Type`` suffix). Unknown placeholders raise
-    ``PlaceholderError``."""
-    lookup: dict[str, str] = dict(context)
+    ``PlaceholderError``.
+
+    Context values are interpolated, not bound (they name schemas / tables),
+    so each is validated against :data:`_SAFE_SUBST_RE` before substitution
+    — an unsafe value raises ``PlaceholderError`` rather than reaching the
+    driver. Cube aliases are compiler-internal and trusted."""
+    alias_lookup: dict[str, str] = {}
     for cube_name, alias in cube_aliases.items():
-        lookup[alias] = alias
-        lookup[cube_name] = alias
+        alias_lookup[alias] = alias
+        alias_lookup[cube_name] = alias
+    known = sorted({*alias_lookup, *context})
 
     def _repl(m: re.Match[str]) -> str:
         name = m.group(1)
-        if name not in lookup:
-            raise PlaceholderError(
-                f"Unknown placeholder {{{name}}} in catalog SQL. Known: {sorted(lookup)}.",
-                placeholder=name,
-                known=sorted(lookup),
-            )
-        return lookup[name]
+        # Cube aliases win over context, matching the prior lookup order.
+        if name in alias_lookup:
+            return alias_lookup[name]
+        if name in context:
+            value = context[name]
+            if _SAFE_SUBST_RE.fullmatch(value) is None:
+                raise PlaceholderError(
+                    f"Context value for placeholder {{{name}}} is not a safe "
+                    f"SQL identifier: {value!r}. Interpolated (non-bound) "
+                    "placeholders must match a [A-Za-z_][A-Za-z0-9_]* "
+                    "identifier (optionally dot-qualified); refusing to "
+                    "splice it raw into the query.",
+                    placeholder=name,
+                    known=known,
+                )
+            return value
+        raise PlaceholderError(
+            f"Unknown placeholder {{{name}}} in catalog SQL. Known: {known}.",
+            placeholder=name,
+            known=known,
+        )
 
     return _PLACEHOLDER_RE.sub(_repl, sql)
 
