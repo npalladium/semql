@@ -20,12 +20,9 @@ never touches it; ``semql_prompt.planner_prompt(...)`` and any user-supplied
 from __future__ import annotations
 
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING
 
+from semql.catalog import Catalog
 from semql.model import Lookup, LookupEnricher, ResolutionContext
-
-if TYPE_CHECKING:
-    from semql.catalog import Catalog
 
 # ---------------------------------------------------------------------------
 # Materialization — turn a Lookup into a concrete (values, labels) tuple

@@ -38,6 +38,17 @@ from semql.federate import (
     compile_federated_query,
 )
 from semql.hooks import CubePromptHook, ErrorTransformHook
+
+# Note: ``LogicalPlan`` is intentionally NOT re-exported at the top
+# level. The IR is load-bearing for the compiler but isn't yet
+# serialisable (no model_dump / model_validate / schema_version).
+# Callers that need the IR — for debugging, snapshot tests, or
+# federation routing — import via the explicit module path
+# (``from semql.logical import LogicalPlan``). The naming review
+# 2026-06 calls for removing it from ``__all__`` until the wire
+# format is stable; this is the corresponding narrowing of the
+# top-level surface.
+from semql.instant import parse_instant
 from semql.introspect import (
     CATALOG_CUBES,
     CATALOG_DIMENSIONS,
@@ -65,17 +76,6 @@ from semql.logical import (
     partition_scans,
     to_logical_plan,
 )
-
-# Note: ``LogicalPlan`` is intentionally NOT re-exported at the top
-# level. The IR is load-bearing for the compiler but isn't yet
-# serialisable (no model_dump / model_validate / schema_version).
-# Callers that need the IR — for debugging, snapshot tests, or
-# federation routing — import via the explicit module path
-# (``from semql.logical import LogicalPlan``). The naming review
-# 2026-06 calls for removing it from ``__all__`` until the wire
-# format is stable; this is the corresponding narrowing of the
-# top-level surface.
-from semql.instant import parse_instant
 from semql.lookups import enrich_result
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup

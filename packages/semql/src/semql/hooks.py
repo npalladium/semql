@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from semql.dialect import dialect_for as sqlglot_dialect_for
+
 if TYPE_CHECKING:
     from semql.compile import CompiledQuery
     from semql.errors import SemQLError
@@ -276,8 +278,6 @@ class LimitCapRewriter:
         import sqlglot
         from sqlglot import exp
         from sqlglot.errors import ParseError
-
-        from semql.dialect import dialect_for as sqlglot_dialect_for
 
         # We need to parse the SQL, modify the LIMIT, and emit it back.
         # This is a bit heavy, but it's the correct way.

@@ -22,6 +22,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 
+# The local ``resolve_field`` function below wraps the resolver in
+# ``semql._resolve``; we import it under an alias so the local
+# name doesn't shadow the import and recurse on itself.
+from semql._resolve import resolve_field as _resolve_field_impl
+from semql.errors import ResolveError
 from semql.model import (
     AuthContext,
     BaseField,
@@ -333,27 +338,21 @@ def resolve_field(
     underlying ``ResolveError`` / ``UnknownIdentifierError`` hierarchy
     from ``semql.errors``.
     """
-    # Build the dict shape the underlying resolver wants. Local import
-    # keeps the module cycle-free at import time.
-    from semql._resolve import resolve_field as _resolve
-
     by_name: dict[str, Cube] = {c.name: c for c in _iter_all_cubes(catalog)}
     if views and "." in qualified:
         prefix, local = qualified.split(".", 1)
         if prefix in views:
             view = views[prefix]
             if local not in view.fields:
-                from semql.errors import ResolveError
-
                 raise ResolveError(
                     f"View {prefix!r} has no field {local!r}. "
                     f"Known fields on this view: {sorted(view.fields)}."
                 )
-            cube, fld = _resolve(view.fields[local], by_name)
+            cube, fld = _resolve_field_impl(view.fields[local], by_name)
             # Carry the local name so callers building output columns
             # match what the view exposes.
             return cube, fld.model_copy(update={"name": local})
-    return _resolve(qualified, by_name)
+    return _resolve_field_impl(qualified, by_name)
 
 
 @dataclass(frozen=True)

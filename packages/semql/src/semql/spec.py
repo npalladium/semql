@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # time-partitioned source range checks) doesn't have to import
 # the whole spec tree. Re-exported here for callers that imported
 # it from ``semql.spec`` historically.
-from semql.instant import parse_instant
+from semql._grounding import validate_keywords, validate_questions
 
 if TYPE_CHECKING:
     # The cycle here is real: ``rewrite.py`` needs ``Filter`` /
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     # the other without a lazy bridge. The runtime body of
     # ``rewrite()`` is a one-liner that delegates to the free
     # function imported lazily in the method body — see below.
-    from semql.rewrite import RewriteOp, rewrite
+    from semql.rewrite import RewriteOp
 
 
 FilterOp = Literal[
@@ -434,8 +434,6 @@ class SavedQuery(BaseModel):
 
     @model_validator(mode="after")
     def _check_grounding(self) -> SavedQuery:
-        from semql._grounding import validate_keywords, validate_questions
-
         validate_questions("SavedQuery", self.name, self.questions)
         normalised = validate_keywords("SavedQuery", self.name, self.keywords)
         # Frozen model — bypass via object.__setattr__ since

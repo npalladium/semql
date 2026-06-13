@@ -15,6 +15,7 @@ the repo — diffs alongside catalog changes are reviewable.
 from __future__ import annotations
 
 from semql.catalog import Catalog
+from semql.model import Cube, DerivedTable
 
 
 def render_catalog_markdown(
@@ -55,9 +56,6 @@ def render_catalog_markdown(
 
 def _render_cube(cube: object) -> list[str]:  # cube: Cube
     """One ``## <name>`` section per cube."""
-    # Imported lazily to keep this module's import surface small.
-    from semql.model import Cube
-
     assert isinstance(cube, Cube)
 
     out: list[str] = [f"## `{cube.name}`"]
@@ -69,12 +67,10 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
         out.append("")
 
     # The "facts" block — every catalog-level setting on one card.
-    from semql.model import DerivedTable as _DT
-
     src = cube.resolved_source
     source_line = (
-        f"- **Source:** derived (`{_DT.__name__}`)"
-        if isinstance(src, _DT)
+        f"- **Source:** derived (`{DerivedTable.__name__}`)"
+        if isinstance(src, DerivedTable)
         else f"- **Table:** `{src.table}`"
     )
     facts: list[str] = [

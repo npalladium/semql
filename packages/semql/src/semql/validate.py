@@ -23,15 +23,32 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, runtime_checkable
 
 from semql._resolve import ResolutionDiagnostic, walk_query_fields
 from semql.errors import closest_match
 from semql.model import Cube
 from semql.spec import SemanticQuery
 
-if TYPE_CHECKING:
-    from semql.catalog import Catalog
+
+@runtime_checkable
+class CatalogLike(Protocol):
+    """Structural protocol for the bits of ``Catalog`` validate needs.
+
+    Lets ``validate`` accept either a real :class:`Catalog` or a
+    ``{cube_name: Cube}`` dict without a top-level import of
+    :mod:`semql.catalog` (which would create a cycle — catalog's
+    ``compile_collect_all`` calls back into validate). The
+    ``isinstance`` check via the runtime class identity of
+    ``Catalog`` survives the cycle because the cycle is broken
+    by lazy imports on catalog's side — by the time ``validate``
+    runs the class is fully defined.
+    """
+
+    def as_dict(self) -> dict[str, Cube]: ...
+
+    relations: str
+
 
 MAX_UNGROUPED_ROWS = 1000
 
@@ -70,7 +87,7 @@ class ValidationWarning(ValidationError):
     """
 
 
-def _catalog_dict(catalog: Catalog | dict[str, Cube]) -> dict[str, Cube]:
+def _catalog_dict(catalog: CatalogLike | dict[str, Cube]) -> dict[str, Cube]:
     if isinstance(catalog, dict):
         return catalog
     return catalog.as_dict()
@@ -91,7 +108,7 @@ def _to_validation_error(d: ResolutionDiagnostic) -> ValidationError:
 
 def validate(
     query: SemanticQuery,
-    catalog: Catalog | dict[str, Cube],
+    catalog: CatalogLike | dict[str, Cube],
 ) -> list[ValidationError]:
     """Return every problem the static checker can find in ``query``.
 
@@ -314,9 +331,12 @@ def validate(
             _check_relations_text(cube.relations, cube.name)
 
     # Also check catalog-level relations when a full Catalog is passed.
-    from semql.catalog import Catalog as _Catalog
-
-    if isinstance(catalog, _Catalog) and catalog.relations:
+    # ``hasattr(..., 'relations')`` keeps the check duck-typed so
+    # ``validate`` doesn't need to import the Catalog class. The
+    # Catalog's ``relations`` attribute is a stable part of the
+    # public surface; the alternative ``isinstance`` check would
+    # require a top-level catalog import (cycle).
+    if hasattr(catalog, "relations") and catalog.relations:
         _check_relations_text(catalog.relations, None)
 
     return errors

@@ -37,6 +37,7 @@ from semql._grounding import (
 from semql._grounding import (
     validate_relations as _grounding_validate_relations,
 )
+
 # ``parse_instant`` is a leaf utility. Importing it from ``semql.spec``
 # would create a model ↔ spec cycle (the spec tree itself depends on
 # model types). It lives at :mod:`semql.instant` precisely so the
@@ -229,6 +230,12 @@ class BaseField(_HashableModel):
         >>> Segment(name="s", sql="{a}.x = 1").kind
         'segment'
         """
+        # Lazy self-import: ``Measure`` / ``Dimension`` / ``TimeDimension``
+        # / ``Segment`` are subclasses declared further down this
+        # module, so they don't exist when ``BaseField`` is defined.
+        # ``isinstance`` is checked at call time, not class-body time,
+        # so a deferred import works. The aliases are then in module
+        # scope and the import resolves to the same object each call.
         from semql.model import Dimension, Measure, Segment, TimeDimension
 
         if isinstance(self, Measure):
