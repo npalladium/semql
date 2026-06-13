@@ -33,6 +33,7 @@ Out of scope (deferred):
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -918,14 +919,14 @@ def _quote_reserved_identifiers(node: exp.Expression) -> exp.Expression:
     return node
 
 
-def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
-    """Parse a catalog SQL fragment into a sqlglot AST node.
+@functools.lru_cache(maxsize=256)
+def _parse_fragment_cached(sql: str, dialect: str) -> exp.Expression:
+    """Parse + reserved-word-quote a fragment once per ``(sql, dialect)`` (C9).
 
-    Used for dim/measure/time-dimension expressions, ``Join.on``, and
-    ``base_predicate``. Reserved-word identifiers are force-quoted (C7) so
-    a column named after a keyword emits valid SQL. Any parse failure
-    surfaces as a ``CompileError`` naming the offending fragment so the
-    catalog author can fix it."""
+    The same ``expr`` strings recur many times across a compilation; this
+    memoises the parse. ``lru_cache`` does not cache exceptions, so a bad
+    fragment still raises ``CompileError`` on every call. Callers must not
+    mutate the returned node — use :func:`_parse_fragment`, which copies."""
     try:
         # sqlglot's parse_one is stubbed to return the ``Expr`` TypeVar, not
         # bare ``Expression``; narrow it here (same quirk the prior code
@@ -936,6 +937,19 @@ def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
             f"Could not parse catalog SQL fragment {sql!r} under dialect {dialect!r}: {exc}"
         ) from exc
     return _quote_reserved_identifiers(parsed)
+
+
+def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
+    """Parse a catalog SQL fragment into a sqlglot AST node.
+
+    Used for dim/measure/time-dimension expressions, ``Join.on``, and
+    ``base_predicate``. Reserved-word identifiers are force-quoted (C7) so
+    a column named after a keyword emits valid SQL.
+
+    Returns an independent ``.copy()`` of the cached parse (C9): callers
+    reparent the node into a larger expression and the reserved-word pass
+    mutates it, so each caller needs its own tree."""
+    return _parse_fragment_cached(sql, dialect).copy()
 
 
 # ---------------------------------------------------------------------------
