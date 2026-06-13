@@ -213,6 +213,7 @@ def test_snap_tenancy_discriminator(snapshot: SnapshotAssertion) -> None:
         tenancy="discriminator",
         tenancy_columns=["tenant_id"],
         security_sql="{e}.team_id = {ctx.team_id}",
+        security_ctx_keys=["team_id"],
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
         dimensions=[Dimension(name="region", sql="{e}.region", type="string")],
     )

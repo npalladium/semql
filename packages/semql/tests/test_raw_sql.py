@@ -70,6 +70,7 @@ def test_all_raw_entry_points_are_marked() -> None:
         alias="o",
         base_predicate="{o}.deleted_at IS NULL",
         security_sql="{o}.tenant_id = {ctx.tenant}",
+        security_ctx_keys=["tenant"],
         dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
     )
     assert isinstance(cube.base_predicate, RawSQL)

@@ -38,6 +38,7 @@ def test_cube_accepts_security_sql_string() -> None:
         table="t",
         alias="c",
         security_sql="{c}.owner_id = {ctx.user_id}",
+        security_ctx_keys=["user_id"],
     )
     assert cube.security_sql == "{c}.owner_id = {ctx.user_id}"
 
@@ -54,6 +55,7 @@ def _orders_with_security() -> Cube:
         table="orders",
         alias="o",
         security_sql="{o}.owner_id = {ctx.user_id}",
+        security_ctx_keys=["user_id"],
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
         dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
     )
@@ -121,6 +123,7 @@ def _events_with_both() -> Cube:
         tenancy="discriminator",
         tenancy_columns=["tenant_id"],
         security_sql="{e}.team_id = {ctx.team_id}",
+        security_ctx_keys=["team_id"],
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
         dimensions=[Dimension(name="region", sql="{e}.region", type="string")],
     )
@@ -183,3 +186,69 @@ def test_security_sql_resolves_alias_placeholder() -> None:
     # No raw ``{o}`` in the output — it resolved to ``o``.
     assert "{o}" not in out.sql
     assert "o.owner_id" in out.sql
+
+
+# ---------------------------------------------------------------------------
+# security_ctx_keys — {ctx.X} keys declared + validated at construction
+# (the cube mirror of ScopePredicate.ctx_keys). S13.
+# ---------------------------------------------------------------------------
+
+
+def test_security_sql_undeclared_ctx_key_rejected_at_construction() -> None:
+    """A {ctx.X} key the cube never declares is a build-time error — a
+    typo no longer waits to surface as a per-request PlaceholderError."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError, match="security_ctx_keys"):
+        Cube(
+            name="c",
+            dialect=Dialect.POSTGRES,
+            table="t",
+            alias="c",
+            security_sql="{c}.owner_id = {ctx.user_id}",
+            # security_ctx_keys omitted — user_id undeclared
+        )
+
+
+def test_security_sql_viewer_id_is_exempt_from_declaration() -> None:
+    """``{ctx.viewer_id}`` auto-flattens from the viewer, so it needs no
+    declaration."""
+    cube = Cube(
+        name="c",
+        dialect=Dialect.POSTGRES,
+        table="t",
+        alias="c",
+        security_sql="{c}.assignee = {ctx.viewer_id}",
+    )
+    assert cube.security_ctx_keys == []
+
+
+def test_security_sql_declared_key_constructs_cleanly() -> None:
+    cube = Cube(
+        name="c",
+        dialect=Dialect.POSTGRES,
+        table="t",
+        alias="c",
+        security_sql="{c}.owner_id = {ctx.user_id}",
+        security_ctx_keys=["user_id"],
+    )
+    assert cube.security_ctx_keys == ["user_id"]
+
+
+def test_compile_reports_missing_declared_ctx_key_up_front() -> None:
+    """A declared key absent from the resolution context fails with a
+    clear message naming the missing key, before emission."""
+    cube = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="orders",
+        alias="o",
+        security_sql="{o}.owner_id = {ctx.user_id}",
+        security_ctx_keys=["user_id"],
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+    )
+    with pytest.raises(CompileError, match="user_id"):
+        Catalog([cube]).compile(
+            SemanticQuery(measures=["orders.count"]),
+            # no ctx.user_id in context
+        )

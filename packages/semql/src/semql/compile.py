@@ -1794,6 +1794,18 @@ class _CompileEnv:
                 )
 
         if cube.security_sql:
+            # Validate the declared ctx keys against the resolution context
+            # up front (mirrors the ScopePredicate.ctx_keys check below), so
+            # a missing value fails with a clear message before emission
+            # rather than mid-substitution.
+            missing = [k for k in cube.security_ctx_keys if f"ctx.{k}" not in self.ctx]
+            if missing:
+                raise CompileError(
+                    f"Cube {cube.name!r} security_sql declares security_ctx_keys="
+                    f"{cube.security_ctx_keys!r} but the following are not in the "
+                    f"resolution context: {missing}. Pass context={{'ctx.<key>': "
+                    "<value>, ...}}."
+                )
             resolved_sql = self._resolve_security_sql(cube, cube.security_sql)
             predicates.append(_parse_fragment(resolved_sql, self.sqlglot_dialect))
 

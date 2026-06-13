@@ -22,6 +22,7 @@ anything the platform shouldn't know about. Round-trips through
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast
@@ -136,6 +137,11 @@ TenancyMode = Literal["schema", "discriminator", "none"]
 # k8s-annotation style: opaque string→string map. SemQL never touches
 # the contents — the user owns the namespace and meaning.
 Metadata = dict[str, str]
+
+# ``{ctx.X}`` placeholder keys inside ``security_sql`` — must mirror the
+# ``_CTX_PLACEHOLDER_RE`` the compiler resolves with, so construction-time
+# validation sees exactly the keys the compiler will look up.
+_CTX_KEY_RE = re.compile(r"\{ctx\.([a-z_][a-z0-9_]*)\}")
 
 
 class RawSQL(str):
@@ -844,6 +850,15 @@ class Cube(BaseModel):
     # ``{ctx.X}`` placeholders (bound from the compile-time
     # ``context`` dict, never inlined as a SQL literal).
     security_sql: _Raw | None = None
+    # The ``{ctx.X}`` keys ``security_sql`` needs — the cube-level mirror
+    # of :attr:`ScopePredicate.ctx_keys`. Every ``{ctx.X}`` used in
+    # ``security_sql`` (other than the auto-flattened ``viewer_id``) MUST
+    # be declared here, validated at construction so a typo is a build
+    # error rather than a per-request PlaceholderError. The compiler also
+    # checks the declared keys against the resolution context up front,
+    # so a missing context value fails before emission with a clear
+    # message instead of mid-query.
+    security_ctx_keys: list[str] = []
     # Names the dimension on *this* cube that uniquely identifies a row.
     # Used by the Catalog to auto-derive ``many_to_one`` Joins from
     # other cubes' ``Dimension.foreign_key`` declarations.
@@ -1212,6 +1227,29 @@ class Cube(BaseModel):
                     "but its source SQL contains '{tenant_schema}'. The two "
                     "isolation strategies are mutually exclusive — pick one."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_security_ctx_keys(self) -> Cube:
+        """Every ``{ctx.X}`` in ``security_sql`` must be declared in
+        ``security_ctx_keys`` (the cube mirror of ScopePredicate.ctx_keys)
+        — except ``viewer_id``, which the compiler auto-flattens from the
+        viewer. Catches a placeholder typo at construction instead of as a
+        per-request PlaceholderError."""
+        if not self.security_sql:
+            return self
+        used = set(_CTX_KEY_RE.findall(self.security_sql))
+        # ``viewer_id`` is always available when a viewer is present —
+        # the compiler auto-binds ``ctx.viewer_id``. Don't force authors
+        # to redeclare it.
+        undeclared = sorted(used - set(self.security_ctx_keys) - {"viewer_id"})
+        if undeclared:
+            raise ValueError(
+                f"Cube {self.name!r}: security_sql uses {{ctx.X}} keys "
+                f"{undeclared} that are not declared in security_ctx_keys="
+                f"{self.security_ctx_keys!r}. Declare them (or fix a typo) so "
+                "the context requirement is validated at construction."
+            )
         return self
 
     def _all_source_sql(self) -> str:
