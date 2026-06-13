@@ -22,17 +22,17 @@ import sqlglot
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 from semql import (
-    Backend,
     BoolExpr,
     Catalog,
     Cube,
+    Dialect,
     Dimension,
     Filter,
     Measure,
     SemanticQuery,
     TimeDimension,
     compile_query,
-    is_safe_select,
+    is_read_only_statement,
     to_logical_plan,
     validate,
 )
@@ -66,7 +66,7 @@ def _outcome(thunk: object) -> tuple[str, object, object]:
 def _catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="orders",
         alias="o",
         base_predicate="{o}.deleted_at IS NULL",
@@ -98,7 +98,7 @@ def _fixed_query(draw: st.DrawFn) -> SemanticQuery:
 @given(query=_fixed_query())
 def test_fixed_catalog_compiles_to_safe_select(query: SemanticQuery) -> None:
     out = _catalog().compile(query)
-    assert is_safe_select(out.sql)
+    assert is_read_only_statement(out.sql)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ def test_p2_values_are_bound_never_spliced(
         out = compile_query(query, catalog.as_dict())
     except SemQLError:
         return
-    assert is_safe_select(out.sql)
+    assert is_read_only_statement(out.sql)
     # Every filter string value is sentinel-wrapped; a spliced value would
     # carry its marker into the SQL text. The marker must never appear.
     assert SENTINEL not in out.sql

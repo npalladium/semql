@@ -9,7 +9,7 @@ asserts, for every dialect:
 
 1. the payload travels in ``out.params``, not ``out.sql``;
 2. the emitted SQL is a single statement (no stacked-query escape); and
-3. ``is_safe_select`` still holds (one read-only SELECT).
+3. ``is_read_only_statement`` still holds (one read-only SELECT).
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from __future__ import annotations
 import pytest
 import sqlglot
 from semql import (
-    Backend,
     BoolExpr,
     Catalog,
     Cube,
+    Dialect,
     Dimension,
     Filter,
     FilterOp,
@@ -28,7 +28,7 @@ from semql import (
     SemanticQuery,
     TimeDimension,
     TimeWindow,
-    is_safe_select,
+    is_read_only_statement,
 )
 from sqlglot import exp
 
@@ -55,15 +55,15 @@ PAYLOADS = [
 ]
 
 _DIALECTS = [
-    Backend.POSTGRES,
-    Backend.CLICKHOUSE,
-    Backend.DUCKDB,
-    Backend.BIGQUERY,
-    Backend.SNOWFLAKE,
+    Dialect.POSTGRES,
+    Dialect.CLICKHOUSE,
+    Dialect.DUCKDB,
+    Dialect.BIGQUERY,
+    Dialect.SNOWFLAKE,
 ]
 
 
-def _catalog(backend: Backend) -> Catalog:
+def _catalog(backend: Dialect) -> Catalog:
     alias = "t"
     return Catalog(
         [
@@ -109,7 +109,7 @@ def _assert_neutralised(out: object, payload: str, dialect: str) -> None:
     assert not any(payload in lit for lit in literals), (
         f"payload spliced into a SQL literal: {payload!r}\n{sql}"
     )
-    assert is_safe_select(sql)
+    assert is_read_only_statement(sql)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def _assert_neutralised(out: object, payload: str, dialect: str) -> None:
 @pytest.mark.parametrize("backend", _DIALECTS, ids=lambda b: b.value)
 @pytest.mark.parametrize("payload", PAYLOADS)
 @pytest.mark.parametrize("op", ["eq", "neq", "contains"])
-def test_injection_via_single_value_filter(backend: Backend, payload: str, op: FilterOp) -> None:
+def test_injection_via_single_value_filter(backend: Dialect, payload: str, op: FilterOp) -> None:
     out = _catalog(backend).compile(
         SemanticQuery(
             measures=["orders.count"],
@@ -136,7 +136,7 @@ def test_injection_via_single_value_filter(backend: Backend, payload: str, op: F
 
 
 @pytest.mark.parametrize("backend", _DIALECTS, ids=lambda b: b.value)
-def test_injection_via_in_list(backend: Backend) -> None:
+def test_injection_via_in_list(backend: Dialect) -> None:
     out = _catalog(backend).compile(
         SemanticQuery(
             measures=["orders.count"],
@@ -148,7 +148,7 @@ def test_injection_via_in_list(backend: Backend) -> None:
     for payload in PAYLOADS:
         assert payload in bound, f"IN element not bound: {payload!r}"
         assert not any(payload in lit for lit in literals), f"IN element spliced: {payload!r}"
-    assert is_safe_select(out.sql)
+    assert is_read_only_statement(out.sql)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ def test_injection_via_in_list(backend: Backend) -> None:
 
 @pytest.mark.parametrize("payload", PAYLOADS)
 def test_injection_via_time_window_range(payload: str) -> None:
-    out = _catalog(Backend.POSTGRES).compile(
+    out = _catalog(Dialect.POSTGRES).compile(
         SemanticQuery(
             measures=["orders.count"],
             time_dimension=TimeWindow(dimension="orders.created_at", range=(payload, "2026-01-01")),
@@ -192,7 +192,7 @@ def test_injection_via_nested_boolexpr(payload: str) -> None:
             ),
         ],
     )
-    out = _catalog(Backend.POSTGRES).compile(SemanticQuery(measures=["orders.count"], where=where))
+    out = _catalog(Dialect.POSTGRES).compile(SemanticQuery(measures=["orders.count"], where=where))
     _assert_neutralised(out, payload, "postgres")
 
 
@@ -203,7 +203,7 @@ def test_injection_via_nested_boolexpr(payload: str) -> None:
 
 
 def test_tautology_payload_is_compared_not_evaluated() -> None:
-    out = _catalog(Backend.POSTGRES).compile(
+    out = _catalog(Dialect.POSTGRES).compile(
         SemanticQuery(
             measures=["orders.count"],
             filters=[Filter(dimension="orders.region", op="eq", values=["' OR 1=1 --"])],

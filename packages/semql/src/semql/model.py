@@ -40,7 +40,16 @@ from semql._grounding import (
 from semql.spec import parse_instant as _parse_instant
 
 
-class Backend(StrEnum):
+class Dialect(StrEnum):
+    """The SQL dialect a :class:`Cube` emits for.
+
+    >>> from semql.model import Dialect
+    >>> Dialect.POSTGRES.value
+    'postgres'
+    >>> Dialect.META.value
+    'meta'
+    """
+
     POSTGRES = "postgres"
     CLICKHOUSE = "clickhouse"
     DUCKDB = "duckdb"
@@ -125,7 +134,14 @@ def _freeze(value: object) -> object:
     Mirrors :class:`_HashableModel`'s contract: equal field values produce
     equal frozen keys, so equal models hash equal. ``dict`` items are
     sorted by key (insertion order is not part of value identity); ``set``
-    becomes a ``frozenset``; nested models recurse through their fields."""
+    becomes a ``frozenset``; nested models recurse through their fields.
+
+    >>> from semql.model import _freeze
+    >>> _freeze({"b": 1, "a": 2}) == _freeze({"a": 2, "b": 1})
+    True
+    >>> _freeze([1, 2, 3])
+    (1, 2, 3)
+    """
     if isinstance(value, BaseModel):
         return (
             type(value).__name__,
@@ -200,6 +216,14 @@ class BaseField(_HashableModel):
         with ``ColumnMeta.kind`` on ``CompiledQuery`` which uses the same
         vocabulary for output columns. Implemented as a property so it
         survives ``model_copy`` (the underlying class is unchanged).
+
+        >>> from semql.model import Measure, Dimension, Segment
+        >>> Measure(name="r", sql="{a}.a", agg="sum").kind
+        'measure'
+        >>> Dimension(name="x", sql="{a}.x", type="string").kind
+        'dimension'
+        >>> Segment(name="s", sql="{a}.x = 1").kind
+        'segment'
         """
         from semql.model import Dimension, Measure, Segment, TimeDimension
 
@@ -522,7 +546,7 @@ class DerivedTable(_HashableModel):
     catalog (the first is ``Measure.sql``). The compiler surfaces the
     resolved SQL of both the main ``sql`` and every CTE on
     :attr:`semql.compile.CompiledQuery.derived_sources` so static checks
-    (``is_safe_select``, dialect snapshots) cover every raw fragment,
+    (``is_read_only_statement``, dialect snapshots) cover every raw fragment,
     not just the outer SELECT."""
 
     model_config = ConfigDict(frozen=True)
@@ -659,7 +683,7 @@ class PartitionedScan(BaseModel):
 
 class Cube(BaseModel):
     name: str
-    backend: Backend
+    backend: Dialect
     # Shorthand for a plain-table source: ``Cube(table="schema.t", ...)``
     # is equivalent to ``Cube(source=PhysicalTable(table="schema.t"), ...)``.
     # Exactly one of ``table`` / ``source`` must be specified; mixing a
@@ -1407,7 +1431,7 @@ class Entity(_HashableModel):
 __all__ = [
     "AggLiteral",
     "AuthContext",
-    "Backend",
+    "Dialect",
     "BaseField",
     "ChartTypeLiteral",
     "Cube",

@@ -25,7 +25,11 @@ def parse_instant(value: str) -> datetime:
     timestamps are read as UTC so a naive endpoint stays comparable with
     an offset-bearing one; per-cube timezone semantics are tracked
     separately (architecture review B9). Raises ``ValueError`` naming the
-    offending value if it is not valid ISO-8601."""
+    offending value if it is not valid ISO-8601.
+
+    >>> parse_instant("2024-01-01")
+    datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)
+    """
     try:
         dt = datetime.fromisoformat(value)
     except ValueError as exc:
@@ -97,7 +101,14 @@ class Filter(BaseModel):
 
     def validate_for_type(self, dim_type: str) -> None:
         """Compile-time type check. Raises ValueError on mismatch; the
-        compiler re-raises as CompileError."""
+        compiler re-raises as CompileError.
+
+        >>> Filter(dimension="x", op="eq", values=["yes"]).validate_for_type("string")
+        >>> Filter(dimension="x", op="eq", values=["yes"]).validate_for_type("bool")
+        Traceback (most recent call last):
+            ...
+        ValueError: Filter on bool dimension 'x' got non-bool value 'yes'.
+        """
         if self.op in ("is_null", "not_null"):
             return
         if not self.values:

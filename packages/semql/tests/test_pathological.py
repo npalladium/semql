@@ -12,11 +12,11 @@ from __future__ import annotations
 import pytest
 from semql import (
     MAX_UNGROUPED_ROWS,
-    Backend,
     BoolExpr,
     Catalog,
     CompileError,
     Cube,
+    Dialect,
     Dimension,
     Filter,
     FilterTypeError,
@@ -26,7 +26,7 @@ from semql import (
     TimeDimension,
     TimeWindow,
     UnknownIdentifierError,
-    is_safe_select,
+    is_read_only_statement,
 )
 
 # ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ from semql import (
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -137,7 +137,7 @@ def test_deeply_nested_boolexpr_filter_compiles() -> None:
         ],
     )
     out = _single().compile(SemanticQuery(measures=["orders.count"], where=where))
-    assert is_safe_select(out.sql)
+    assert is_read_only_statement(out.sql)
     # Three leaf values → three bound params, none inlined.
     assert len(out.params) == 3
 
@@ -152,7 +152,7 @@ def test_equal_time_window_endpoints_compile() -> None:
             ),
         )
     )
-    assert is_safe_select(out.sql)
+    assert is_read_only_statement(out.sql)
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ def test_duplicate_cube_names_refused_at_construction() -> None:
 def test_cubes_sharing_an_alias_refused_when_joined() -> None:
     orders = Cube(
         name="orders",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -214,7 +214,7 @@ def test_cubes_sharing_an_alias_refused_when_joined() -> None:
     )
     customers = Cube(
         name="customers",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="customers",
         alias="o",  # collision
         dimensions=[Dimension(name="name", sql="{o}.name", type="string")],
@@ -228,7 +228,7 @@ def test_cubes_sharing_an_alias_refused_when_joined() -> None:
 def _fanout_catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -237,7 +237,7 @@ def _fanout_catalog() -> Catalog:
     )
     line_items = Cube(
         name="line_items",
-        backend=Backend.POSTGRES,
+        backend=Dialect.POSTGRES,
         table="line_items",
         alias="li",
         measures=[Measure(name="qty", sql="{li}.qty", agg="sum")],

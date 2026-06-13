@@ -194,5 +194,14 @@ def to_cnf(node: _Literal) -> _Literal:
         literals) or a single ``Filter`` if the input collapsed
         to a single literal. Identity is preserved when the input
         is already in CNF and idempotent under rebuild.
+
+    >>> from semql.spec import Filter, BoolExpr
+    >>> a = Filter(dimension="o.x", op="eq", values=[1])
+    >>> b = Filter(dimension="o.y", op="eq", values=[2])
+    >>> c = Filter(dimension="o.z", op="eq", values=[3])
+    >>> tree = BoolExpr(op="or", children=[a, BoolExpr(op="and", children=[b, c])])
+    >>> out = to_cnf(tree)
+    >>> out.op
+    'and'
     """
     return _to_cnf(node)
