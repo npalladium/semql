@@ -157,6 +157,10 @@ class Registry:
 
         Raises ``UnknownUnit`` if either side isn't registered, or
         ``IncompatibleUnits`` if both are known but unreachable.
+
+        >>> from semql.units import DEFAULT_REGISTRY as r
+        >>> r.convert(3600, "seconds", "hours")
+        1.0
         """
         a = self.canonical(from_unit)
         b = self.canonical(to_unit)
@@ -193,8 +197,7 @@ class Registry:
         Use this for ``format="duration"`` style adaptive picking
         when ``display_unit`` is not set. Example:
 
-        >>> r = Registry()
-        >>> # ...defaults loaded...
+        >>> from semql.units import DEFAULT_REGISTRY as r
         >>> r.auto_pick(5400, "seconds", ["seconds", "minutes", "hours", "days"])
         (1.5, 'hours')
         """
