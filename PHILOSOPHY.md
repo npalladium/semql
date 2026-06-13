@@ -95,6 +95,17 @@ Not a BI tool. SemQL is a compiler and protocol layer.
 
 Not a framework. It composes with your stack — it does not own it.
 
+Core ships primitives; recipes wire them up.
+Core returns `CompiledQuery` and stays sans-io — no executors, no
+enrichers, no JSON-RPC. The opinionated layers that own a call site
+(MCP, the planner-prompt package, the planned `semql-pydantic-ai`
+sibling) live outside core as sibling packages and earn their keep
+by being replaceable. A defensive guarantee that reaches the LLM
+consumer — e.g. `enrich_result` running on every `query_execute` —
+is implemented in the recipe, not in core. Core's job is to make
+the recipe possible; the recipe's job is to make the LLM consumer
+correct.
+
 Human-first, LLM-friendly.
 The protocol does not know who is calling.
 The ergonomics are designed for people.
