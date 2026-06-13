@@ -103,11 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    backend = _BACKENDS_BY_NAME[args.backend]
-    connection = _connect(args.backend, args.conn)
+    dialect = _BACKENDS_BY_NAME[args.dialect]
+    connection = _connect(args.dialect, args.conn)
     src = introspect_to_python(
         connection,
-        backend=backend,
+        dialect=dialect,
         schema=args.schema,
         include_tables=args.include,
         exclude_tables=args.exclude,

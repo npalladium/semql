@@ -28,7 +28,7 @@ from semql_prompt import (
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         description="One row per order.",
@@ -47,7 +47,7 @@ def _orders() -> Cube:
 def _customers() -> Cube:
     return Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         measures=[Measure(name="count", sql="*", agg="count")],

@@ -33,7 +33,7 @@ def _orders_with_rollup() -> tuple[dict[str, Cube], Cube, Rollup]:
         name="orders",
         alias="o",
         table="prod.orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
         time_dimensions=[
             TimeDimension(

@@ -21,7 +21,7 @@ from semql_prompt import (
 def _cat() -> dict[str, Cube]:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         display_name="Customer Orders",

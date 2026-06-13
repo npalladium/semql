@@ -21,7 +21,7 @@ def cat() -> dict[str, Cube]:
     return {
         "t": Cube(
             name="t",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="s.t",
             alias="t",
             measures=[

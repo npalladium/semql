@@ -42,7 +42,7 @@ from semql.model import Cube, Dialect, Dimension, Measure
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -191,7 +191,7 @@ def test_collect_all_aggregates_unknown_join_target() -> None:
 
     bad = Cube(
         name="bad",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="bad",
         alias="b",
         joins=[Join(to="ghost", relationship="many_to_one", on="{b}.id = 1")],

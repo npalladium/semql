@@ -19,7 +19,7 @@ def _customers(measures: list[Measure]) -> Cube:
     # customers is the "one" side: one customer, many orders.
     return Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         primary_key="id",
@@ -35,7 +35,7 @@ def _customers(measures: list[Measure]) -> Cube:
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",

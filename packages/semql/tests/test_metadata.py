@@ -37,7 +37,7 @@ from semql_prompt import planner_prompt
 def _orders(**meta_overrides: dict[str, str]) -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -237,7 +237,7 @@ def test_metadata_rejects_non_string_values() -> None:
     with pytest.raises((ValueError, TypeError)):
         Cube(
             name="bad",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="bad",
             alias="b",
             metadata={"k": 42},  # type: ignore[dict-item]
@@ -247,8 +247,8 @@ def test_metadata_rejects_non_string_values() -> None:
 def test_metadata_separate_instances_dont_share_default() -> None:
     """Default-factory invariant: each instance gets a fresh dict.
     Mutating one cube's metadata mustn't change another's."""
-    a = Cube(name="a", backend=Dialect.POSTGRES, table="a", alias="a")
-    b = Cube(name="b", backend=Dialect.POSTGRES, table="b", alias="b")
+    a = Cube(name="a", dialect=Dialect.POSTGRES, table="a", alias="a")
+    b = Cube(name="b", dialect=Dialect.POSTGRES, table="b", alias="b")
     assert a.metadata == {}
     assert b.metadata == {}
     # If they shared a mutable default, this would smear:

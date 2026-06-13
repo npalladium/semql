@@ -36,7 +36,7 @@ from semql_prompt import (
 def _public_orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -47,7 +47,7 @@ def _public_orders() -> Cube:
 def _admin_audit() -> Cube:
     return Cube(
         name="audit_events",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.audit",
         alias="a",
         required_roles=["admin"],
@@ -59,7 +59,7 @@ def _admin_audit() -> Cube:
 def _support_tickets() -> Cube:
     return Cube(
         name="tickets",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.tickets",
         alias="t",
         required_roles=["support"],

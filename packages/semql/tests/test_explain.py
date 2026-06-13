@@ -23,7 +23,7 @@ def _orders_catalog() -> Catalog:
                 name="orders",
                 alias="o",
                 table="prod.orders",
-                backend=Dialect.POSTGRES,
+                dialect=Dialect.POSTGRES,
                 dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
                 measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
             )

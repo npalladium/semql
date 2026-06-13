@@ -57,7 +57,7 @@ class DialectStrategy(Protocol):
     out-of-tree Snowflake / BigQuery strategies.
     """
 
-    backend: Dialect
+    dialect: Dialect
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder: ...
     def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression: ...
@@ -150,7 +150,7 @@ def _aliased_derived(cube: Cube, src: DerivedTable, resolve_sql: SqlResolver) ->
     the cube's own dialect so backend-specific shapes (ClickHouse ARRAY
     JOIN, BigQuery UNNEST, etc.) survive the round-trip."""
     resolved = resolve_sql(src.sql)
-    parsed = sqlglot.parse_one(resolved, dialect=sqlglot_dialect_for(cube.backend))
+    parsed = sqlglot.parse_one(resolved, dialect=sqlglot_dialect_for(cube.dialect))
     if not isinstance(parsed, exp.Subquery):
         parsed = exp.Subquery(this=parsed)
     parsed.set("alias", exp.TableAlias(this=exp.to_identifier(cube.alias)))
@@ -177,10 +177,10 @@ class _StdSqlDialect:
     keep ``ILIKE`` natively). ``%v%`` always bakes into the bound value —
     the ``LIKE`` semantics survive the BigQuery transpile."""
 
-    backend: Dialect  # set by subclass
+    dialect: Dialect  # set by subclass
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
-        return placeholder_for(name, dim_type, self.backend)
+        return placeholder_for(name, dim_type, self.dialect)
 
     def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression:
         return exp.Anonymous(
@@ -241,7 +241,7 @@ class _StdSqlDialect:
 class PostgresDialect(_StdSqlDialect):
     """Postgres convention. Placeholders render as ``%(name)s``."""
 
-    backend = Dialect.POSTGRES
+    dialect = Dialect.POSTGRES
 
 
 class DuckDBDialect(_StdSqlDialect):
@@ -250,7 +250,7 @@ class DuckDBDialect(_StdSqlDialect):
     DuckDB shares ``ILIKE``, ``date_trunc``, and the aliased-table FROM
     shape."""
 
-    backend = Dialect.DUCKDB
+    dialect = Dialect.DUCKDB
 
 
 class BigQueryDialect(_StdSqlDialect):
@@ -258,7 +258,7 @@ class BigQueryDialect(_StdSqlDialect):
     transpiles the ``ILIKE`` AST to ``LOWER(...) LIKE LOWER(...)`` on
     emit, so case-insensitive contains still works against a column."""
 
-    backend = Dialect.BIGQUERY
+    dialect = Dialect.BIGQUERY
 
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
         # BigQuery has no ``PERCENTILE_CONT``. ``APPROX_QUANTILES(expr, 100)``
@@ -314,7 +314,7 @@ class SnowflakeDialect(_StdSqlDialect):
     """Snowflake convention. Placeholders render as ``:name``. ``ILIKE``
     and ``date_trunc`` are native to Snowflake — no transpilation needed."""
 
-    backend = Dialect.SNOWFLAKE
+    dialect = Dialect.SNOWFLAKE
 
     def emit_time_spine(
         self,
@@ -368,7 +368,7 @@ class ClickHouseDialect:
     ``contains`` passes the raw substring and emits
     ``positionCaseInsensitive``."""
 
-    backend = Dialect.CLICKHOUSE
+    dialect = Dialect.CLICKHOUSE
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         return placeholder_for(name, dim_type, Dialect.CLICKHOUSE)
@@ -442,7 +442,7 @@ class MetaDialect:
     time. Inherits Postgres parameter and truncation conventions for the
     (rare) cases the compiler emits one against a META cube."""
 
-    backend = Dialect.META
+    dialect = Dialect.META
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         return placeholder_for(name, dim_type, Dialect.META)
@@ -501,7 +501,7 @@ _DEFAULTS: dict[Dialect, DialectStrategy] = {
 
 
 def dialect_for(
-    backend: Dialect,
+    dialect: Dialect,
     overrides: dict[Dialect, DialectStrategy] | None = None,
 ) -> DialectStrategy:
     """Look up the dialect for ``backend``, honouring ``overrides``.
@@ -511,17 +511,17 @@ def dialect_for(
     e.g. a ``RecordingDialect`` for delegation tests, or a custom
     ``SnowflakeDialect`` shipped from outside this repo.
     """
-    if overrides is not None and backend in overrides:
-        return overrides[backend]
-    if backend in _DEFAULTS:
-        return _DEFAULTS[backend]
+    if overrides is not None and dialect in overrides:
+        return overrides[dialect]
+    if dialect in _DEFAULTS:
+        return _DEFAULTS[dialect]
     raise KeyError(
-        f"No registered DialectStrategy for {backend!r}. "
+        f"No registered DialectStrategy for {dialect!r}. "
         "Pass one via the `strategies` kwarg on compile_query."
     )
 
 
-def render(node: exp.Expression, backend: Dialect) -> str:
+def render(node: exp.Expression, dialect: Dialect) -> str:
     """Render a sqlglot node as the dialect-canonical SQL for ``backend``.
 
     ``normalize_functions=False`` keeps function names verbatim (so an
@@ -530,7 +530,7 @@ def render(node: exp.Expression, backend: Dialect) -> str:
     production code that consumes our SQL both expect the lowercase
     form."""
     return node.sql(
-        dialect=sqlglot_dialect_for(backend),
+        dialect=sqlglot_dialect_for(dialect),
         pretty=False,
         normalize_functions=False,
     )

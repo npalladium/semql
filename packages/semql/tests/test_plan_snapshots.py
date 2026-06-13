@@ -30,7 +30,7 @@ def _orders_catalog() -> dict[str, Cube]:
     return {
         "orders": Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="{schema}.orders",
             alias="o",
             base_predicate="{o}.deleted_at IS NULL",
@@ -95,7 +95,7 @@ def test_plan_snap_time_breakdown_with_granularity(snapshot: SnapshotAssertion) 
     catalog = {
         "orders": Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="{schema}.orders",
             alias="o",
             measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -125,7 +125,7 @@ def test_plan_snap_compare_mode(snapshot: SnapshotAssertion) -> None:
     catalog = {
         "orders": Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="{schema}.orders",
             alias="o",
             measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

@@ -75,7 +75,7 @@ def test_quick_start_import_shape_works() -> None:
 
     orders = Cube(
         name="orders",
-        backend=semql.Dialect.POSTGRES,
+        dialect=semql.Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],

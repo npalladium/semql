@@ -44,7 +44,7 @@ def test_measure_accepts_non_additive_true() -> None:
 def test_non_additive_flag_appears_in_prompt() -> None:
     cube = Cube(
         name="users",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="users",
         alias="u",
         measures=[
@@ -77,7 +77,7 @@ def test_non_additive_flag_appears_in_prompt() -> None:
 def test_non_additive_measure_still_compiles_at_a_grain() -> None:
     cube = Cube(
         name="users",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="users",
         alias="u",
         measures=[

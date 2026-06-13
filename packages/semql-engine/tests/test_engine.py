@@ -63,10 +63,10 @@ class _DialectTranslatingAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _orders_cube(backend: Dialect = Dialect.POSTGRES) -> Cube:
+def _orders_cube(dialect: Dialect = Dialect.POSTGRES) -> Cube:
     return Cube(
         name="orders",
-        backend=backend,
+        dialect=dialect,
         table="orders",
         alias="o",
         primary_key="id",
@@ -91,10 +91,10 @@ def _orders_cube(backend: Dialect = Dialect.POSTGRES) -> Cube:
     )
 
 
-def _customers_cube(backend: Dialect = Dialect.BIGQUERY) -> Cube:
+def _customers_cube(dialect: Dialect = Dialect.BIGQUERY) -> Cube:
     return Cube(
         name="customers",
-        backend=backend,
+        dialect=dialect,
         table="customers",
         alias="c",
         primary_key="id",
@@ -358,7 +358,7 @@ def test_engine_runs_raw_rows_with_filtered_measure(
     by region' lands exactly as the user would write by hand."""
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",
@@ -456,7 +456,7 @@ def test_engine_runs_raw_rows_plan_with_count_distinct(
     mode would refuse this query."""
     orders_with_distinct = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",
@@ -511,7 +511,7 @@ def test_engine_runs_raw_rows_plan_with_having(
     below the threshold."""
     orders_with_distinct = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",

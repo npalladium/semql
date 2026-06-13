@@ -33,10 +33,10 @@ from semql_engine import AdapterResult, Engine
 # ---------------------------------------------------------------------------
 
 
-def _orders(backend: Dialect = Dialect.POSTGRES) -> Cube:
+def _orders(dialect: Dialect = Dialect.POSTGRES) -> Cube:
     return Cube(
         name="orders",
-        backend=backend,
+        dialect=dialect,
         table="orders",
         alias="o",
         primary_key="id",
@@ -57,10 +57,10 @@ def _orders(backend: Dialect = Dialect.POSTGRES) -> Cube:
     )
 
 
-def _customers(backend: Dialect = Dialect.BIGQUERY) -> Cube:
+def _customers(dialect: Dialect = Dialect.BIGQUERY) -> Cube:
     return Cube(
         name="customers",
-        backend=backend,
+        dialect=dialect,
         table="customers",
         alias="c",
         primary_key="id",

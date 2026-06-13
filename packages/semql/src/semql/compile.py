@@ -188,7 +188,7 @@ class ColumnMeta:
 
 @dataclass
 class CompiledQuery:
-    backend: Dialect
+    dialect: Dialect
     sql: str
     params: dict[str, Any]
     columns: list[str]
@@ -225,7 +225,7 @@ class CompiledQuery:
         without changing the call site.
         """
         return {
-            "backend": self.backend.value,
+            "dialect": self.dialect.value,
             "sql": self.sql,
             "params": dict(self.params),
             "columns": list(self.columns),
@@ -244,12 +244,12 @@ class CompiledQuery:
         byte-stable: ``CompiledQuery.model_validate(cq.model_dump())``
         equals ``cq`` field-for-field.
         """
-        backend = data["backend"]
-        if isinstance(backend, str):
-            backend = Dialect(backend)
+        dialect = data["dialect"]
+        if isinstance(dialect, str):
+            dialect = Dialect(dialect)
         column_meta = [ColumnMeta.model_validate(m) for m in data.get("column_meta", [])]
         return cls(
-            backend=backend,
+            dialect=dialect,
             sql=data["sql"],
             params=dict(data.get("params", {})),
             columns=list(data.get("columns", [])),
@@ -339,7 +339,7 @@ def _collect_hoisted_ctes(
 def _apply_with_clause(
     select_node: exp.Select,
     ctes: list[tuple[str, str]],
-    backend: Dialect,
+    dialect: Dialect,
 ) -> exp.Select:
     """Attach a ``WITH`` clause hoisting every ``ctes`` entry to the front
     of ``select_node``.
@@ -350,10 +350,10 @@ def _apply_with_clause(
     UNNEST) survive the round-trip. No-op when ``ctes`` is empty."""
     if not ctes:
         return select_node
-    dialect = sqlglot_dialect_for(backend)
+    sqlglot_dialect = sqlglot_dialect_for(dialect)
     out: exp.Select = select_node
     for name, body_sql in ctes:
-        out = out.with_(name, as_=body_sql, dialect=dialect)
+        out = out.with_(name, as_=body_sql, dialect=sqlglot_dialect)
     return out
 
 
@@ -680,7 +680,7 @@ def _filter_node(
     f: Filter,
     field: exp.Expression,
     field_type: str,
-    dialect: DialectStrategy,
+    strategy: DialectStrategy,
     bind: Callable[[Any, str], exp.Placeholder],
 ) -> exp.Expression:
     """Build a predicate node for a Filter.
@@ -704,7 +704,7 @@ def _filter_node(
         ) from exc
 
     if op == "contains":
-        return dialect.emit_contains(field, str(f.values[0]), bind)
+        return strategy.emit_contains(field, str(f.values[0]), bind)
 
     placeholders: list[exp.Placeholder] = [bind(v, field_type) for v in f.values]
 
@@ -1307,7 +1307,7 @@ def _pick_single_dialect(touched: list[Cube]) -> Dialect:
     """Single-backend gate. Cross-backend queries route to
     :func:`semql.compile_federated_query` — non-federated compile is
     one-backend-only."""
-    backends = {c.backend for c in touched}
+    backends = {c.dialect for c in touched}
     if len(backends) > 1:
         backend_names = sorted(b.value for b in backends)
         raise CrossDialectError(
@@ -1418,7 +1418,7 @@ class _CompileEnv:
         _check_required_filters(self.touched, q)
         _check_alias_uniqueness(self.touched)
 
-        self.backend = _pick_single_dialect(self.touched)
+        self.dialect = _pick_single_dialect(self.touched)
         self.left_join_cubes: set[str] = set(q.left_joins)
 
         # Anti-join support: cubes named in ``q.left_joins`` get
@@ -1526,8 +1526,8 @@ class _CompileEnv:
         _check_fan_out(self.measure_fields, self.join_edges)
 
         self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
-        self.dialect = dialect_for(self.backend, dialects)
-        self.sqlglot_dialect = sqlglot_dialect_for(self.backend)
+        self.strategy = dialect_for(self.dialect, dialects)
+        self.sqlglot_dialect = sqlglot_dialect_for(self.dialect)
 
         # Param binder state. Memoise ``(value, dim_type) → placeholder``
         # so a filter value referenced in both compare-mode CTEs binds
@@ -1679,11 +1679,11 @@ class _CompileEnv:
         """Allocate (or reuse) a parameter placeholder for ``value``."""
         key = (value, dim_type)
         if key in self._binds:
-            return self.dialect.placeholder(self._binds[key], dim_type)
+            return self.strategy.placeholder(self._binds[key], dim_type)
         name = f"p{len(self.params)}"
         self.params[name] = value
         self._binds[key] = name
-        return self.dialect.placeholder(name, dim_type)
+        return self.strategy.placeholder(name, dim_type)
 
     def resolve_in_ctx(self, sql: str) -> str:
         """Apply ``{alias}`` / ``{ctx.X}`` substitution to a raw SQL fragment."""
@@ -1830,7 +1830,7 @@ class _CompileEnv:
         # dialect-agnostic exp.Sum / Count / etc. nodes via _agg_node.
         if m.agg in _PERCENTILE_AGGS:
             q_val = _PERCENTILE_AGGS[m.agg]
-            agg: exp.Expression = self.dialect.emit_percentile(q_val, inner)
+            agg: exp.Expression = self.strategy.emit_percentile(q_val, inner)
         else:
             agg = _agg_node(m, inner)
         if m.filter:
@@ -1896,12 +1896,12 @@ class _CompileEnv:
                 emit_physical_sources(root, matched) if matched else _empty_source_for(root)
             )
         else:
-            source = self.dialect.emit_source(root, self.catalog, self.resolve_in_ctx)
+            source = self.strategy.emit_source(root, self.catalog, self.resolve_in_ctx)
         sel = sel.from_(self.wrap_for_tenancy(root, source))
         for plan_join in plan_joins:
             tgt = plan_join.right
             j = plan_join.model
-            tgt_dialect = dialect_for(tgt.backend, self.dialects)
+            tgt_dialect = dialect_for(tgt.dialect, self.dialects)
             if tgt.physical_sources:
                 matched_t = self._matched_physical_sources_for(tgt)
                 target_source: exp.Expression = (
@@ -1974,7 +1974,7 @@ class _CompileEnv:
                 assert granularity is not None
                 expr = self._masked_field_expr(
                     col.field,
-                    self.dialect.trunc(granularity, self.parse(col.field.sql)),
+                    self.strategy.trunc(granularity, self.parse(col.field.sql)),
                     col_name,
                 )
             elif col.kind == "measure":
@@ -2012,7 +2012,7 @@ class _CompileEnv:
         where_terms: list[exp.Expression] = []
 
         for cube_w in self.cubes_in_from:
-            if cube_w.base_predicate and cube_w.backend is not Dialect.META:
+            if cube_w.base_predicate and cube_w.dialect is not Dialect.META:
                 where_terms.append(self.parse(cube_w.base_predicate))
 
         for pred in self.plan.filters:
@@ -2099,7 +2099,7 @@ class _CompileEnv:
             fld_type = "time"
         else:
             fld_type = "string"
-        return _filter_node(f, fld_node, fld_type, self.dialect, self.bind)
+        return _filter_node(f, fld_node, fld_type, self.strategy, self.bind)
 
     def _group_by_stage(self, sel: exp.Select) -> exp.Select:
         """Emit GROUP BY from the plan's ``Aggregate`` node.
@@ -2149,7 +2149,7 @@ class _CompileEnv:
                     None,
                 )
                 if td is not None:
-                    sel = sel.group_by(self.dialect.trunc(granularity, self.parse(td.sql)))
+                    sel = sel.group_by(self.strategy.trunc(granularity, self.parse(td.sql)))
         return sel
 
     def emit(self) -> CompiledQuery:
@@ -2359,7 +2359,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
         col = _resolve_compare_outer_ref(
             hf.dimension, outer_columns, measure_col_names, what="HAVING"
         )
-        outer = outer.having(_filter_node(hf, exp.column(col), "number", env.dialect, env.bind))
+        outer = outer.having(_filter_node(hf, exp.column(col), "number", env.strategy, env.bind))
 
     if env.plan.limit.limit is not None:
         outer = outer.limit(int(env.plan.limit.limit))
@@ -2367,7 +2367,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
         outer = outer.offset(int(env.plan.limit.offset))
 
     outer = _apply_with_clause(
-        outer, _collect_hoisted_ctes(env.touched, env.resolve_in_ctx), env.backend
+        outer, _collect_hoisted_ctes(env.touched, env.resolve_in_ctx), env.dialect
     )
     sql = outer.sql(dialect=env.sqlglot_dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
@@ -2382,7 +2382,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
     )
     cm = _apply_mask_metadata(cm, env)
     return CompiledQuery(
-        backend=env.backend,
+        dialect=env.dialect,
         sql=sql,
         params=env.params,
         columns=outer_columns,
@@ -2478,7 +2478,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
         else:
             target_node = measure_alias_map[lookup_name].copy()
         select_node = select_node.having(
-            _filter_node(hf, target_node, "number", env.dialect, env.bind)
+            _filter_node(hf, target_node, "number", env.strategy, env.bind)
         )
 
     # Time spine — wrap the aggregation in a CTE and LEFT JOIN a
@@ -2517,7 +2517,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
         assert granularity_val is not None
         start_ph = env.bind(time_range_for_query[0], "time")
         end_ph = env.bind(time_range_for_query[1], "time")
-        spine_inner = env.dialect.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
+        spine_inner = env.strategy.emit_time_spine(granularity_val, start_ph, end_ph, time_col_name)
 
         outer = exp.Select()
         outer = outer.with_("agg", select_node)
@@ -2579,7 +2579,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     select_node = _apply_with_clause(
         select_node,
         _collect_hoisted_ctes(env.touched, env.resolve_in_ctx),
-        env.backend,
+        env.dialect,
     )
     sql = select_node.sql(dialect=env.sqlglot_dialect, pretty=False, normalize_functions=False)
     cm = _build_column_meta(
@@ -2594,7 +2594,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     )
     cm = _apply_mask_metadata(cm, env)
     return CompiledQuery(
-        backend=env.backend,
+        dialect=env.dialect,
         sql=sql,
         params=env.params,
         columns=columns,

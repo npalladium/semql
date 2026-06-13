@@ -91,7 +91,7 @@ def test_lookup_accepts_dynamic_loader() -> None:
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

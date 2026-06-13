@@ -19,7 +19,7 @@ from semql_prompt import planner_prompt
 def _cat() -> Catalog:
     users = Cube(
         name="users",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="users",
         alias="u",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],

@@ -27,12 +27,12 @@ string you can paste into any Graphviz renderer
 ([Edotor](https://edotor.net) is a quick web one).
 
 ```python
-from semql import Backend, Catalog, Cube, Dimension, Join, Measure
+from semql import Dialect, Catalog, Cube, Dimension, Join, Measure
 from semql_erd import render_dot
 
 orders = Cube(
     name="orders",
-    backend=Backend.POSTGRES,
+    dialect=Dialect.POSTGRES,
     table="orders",
     alias="o",
     measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],
@@ -41,7 +41,7 @@ orders = Cube(
 )
 customers = Cube(
     name="customers",
-    backend=Backend.POSTGRES,
+    dialect=Dialect.POSTGRES,
     table="customers",
     alias="c",
     dimensions=[Dimension(name="name", sql="{c}.name", type="string")],

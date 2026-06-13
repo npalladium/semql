@@ -24,7 +24,7 @@ from semql_prompt import (
 def _orders(*, expose: bool = True, required: list[str] | None = None) -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         expose_in_prompt=expose,
@@ -62,7 +62,7 @@ def _orders(*, expose: bool = True, required: list[str] | None = None) -> Cube:
 def _hidden() -> Cube:
     return Cube(
         name="internal",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="internal",
         alias="i",
         expose_in_prompt=False,

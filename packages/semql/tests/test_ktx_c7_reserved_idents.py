@@ -17,10 +17,10 @@ from semql.model import Cube, Dialect, Dimension, Measure
 from semql.spec import SemanticQuery
 
 
-def _cube(backend: Dialect) -> Cube:
+def _cube(dialect: Dialect) -> Cube:
     return Cube(
         name="t",
-        backend=backend,
+        dialect=dialect,
         table="s.t",
         alias="t",
         measures=[Measure(name="n", sql="*", agg="count", unit="count")],
@@ -33,9 +33,9 @@ def _cube(backend: Dialect) -> Cube:
     )
 
 
-@pytest.mark.parametrize("backend", [Dialect.POSTGRES, Dialect.DUCKDB])
-def test_reserved_identifiers_are_quoted(backend: Dialect) -> None:
-    cat = {"t": _cube(backend)}
+@pytest.mark.parametrize("dialect", [Dialect.POSTGRES, Dialect.DUCKDB])
+def test_reserved_identifiers_are_quoted(dialect: Dialect) -> None:
+    cat = {"t": _cube(dialect)}
     q = SemanticQuery(
         measures=["t.n"],
         dimensions=["t.ord", "t.val", "t.grp", "t.plain"],
@@ -46,9 +46,9 @@ def test_reserved_identifiers_are_quoted(backend: Dialect) -> None:
     assert 't."group"' in sql, sql
 
 
-@pytest.mark.parametrize("backend", [Dialect.POSTGRES, Dialect.DUCKDB])
-def test_ordinary_identifiers_are_not_quoted(backend: Dialect) -> None:
-    cat = {"t": _cube(backend)}
+@pytest.mark.parametrize("dialect", [Dialect.POSTGRES, Dialect.DUCKDB])
+def test_ordinary_identifiers_are_not_quoted(dialect: Dialect) -> None:
+    cat = {"t": _cube(dialect)}
     q = SemanticQuery(measures=["t.n"], dimensions=["t.plain"])
     sql = compile_query(q, cat, context={}).sql
     # No over-quoting of a non-reserved identifier.

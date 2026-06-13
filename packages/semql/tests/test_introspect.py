@@ -67,7 +67,7 @@ def test_quote_literal_unicode_pass_through() -> None:
 def sample_catalog() -> dict[str, Cube]:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         description="Order lines",
@@ -101,7 +101,7 @@ def test_meta_values_for_catalog_cubes_contains_expected_fields(
     assert "'Order lines'" in sql
     assert "'o'" in sql
     # Column header tuple in the SELECT.
-    for col in ("name", "backend", "exposed", "description", "alias"):
+    for col in ("name", "dialect", "exposed", "description", "alias"):
         assert col in sql
 
 
@@ -143,7 +143,7 @@ def test_meta_values_for_catalog_measures_with_no_measures() -> None:
     """A catalog with cubes but no measures produces the empty-shape
     VALUES literal."""
     empty = {
-        "x": Cube(name="x", backend=Dialect.POSTGRES, table="x", alias="x"),
+        "x": Cube(name="x", dialect=Dialect.POSTGRES, table="x", alias="x"),
     }
     sql = build_meta_values("catalog_measures", empty)
     assert "WHERE FALSE" in sql.upper()
@@ -151,7 +151,7 @@ def test_meta_values_for_catalog_measures_with_no_measures() -> None:
 
 def test_meta_values_for_catalog_dimensions_with_no_dimensions() -> None:
     empty = {
-        "x": Cube(name="x", backend=Dialect.POSTGRES, table="x", alias="x"),
+        "x": Cube(name="x", dialect=Dialect.POSTGRES, table="x", alias="x"),
     }
     sql = build_meta_values("catalog_dimensions", empty)
     assert "WHERE FALSE" in sql.upper()
@@ -177,7 +177,7 @@ def test_catalog_cubes_dimensions_match_meta_values_columns() -> None:
     column list in its VALUES literal — otherwise a query naming a
     META cube field would compile to a column the subquery doesn't
     expose."""
-    expected_cols = {"name", "backend", "exposed", "description", "alias"}
+    expected_cols = {"name", "dialect", "exposed", "description", "alias"}
     actual_cols = {d.name for d in CATALOG_CUBES.dimensions}
     assert actual_cols == expected_cols
 
@@ -209,7 +209,7 @@ def test_meta_cubes_list_contains_all_three() -> None:
 
 def test_meta_cubes_are_meta_backend() -> None:
     for cube in META_CUBES:
-        assert cube.backend is Dialect.META
+        assert cube.dialect is Dialect.META
 
 
 def test_meta_cubes_hidden_from_prompt() -> None:

@@ -54,12 +54,12 @@ _BACKEND_TO_DIALECT: dict[Dialect, str] = {
 }
 
 
-def dialect_for(backend: Dialect) -> str:
+def dialect_for(dialect: Dialect) -> str:
     """Return the sqlglot dialect string for ``backend``.
 
     Unknown backends raise ``KeyError`` so a missing mapping is loud,
     not silent."""
-    return _BACKEND_TO_DIALECT[backend]
+    return _BACKEND_TO_DIALECT[dialect]
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ class _ChDialect(ClickHouse):
 SqlglotDialect.classes["clickhouse"] = _ChDialect
 
 
-def placeholder_for(name: str, dim_type: str, backend: Dialect) -> exp.Placeholder:
+def placeholder_for(name: str, dim_type: str, dialect: Dialect) -> exp.Placeholder:
     """Build an ``exp.Placeholder`` AST for the given backend.
 
     The returned node's ``.sql(dialect=dialect_for(backend))`` matches
@@ -101,7 +101,7 @@ def placeholder_for(name: str, dim_type: str, backend: Dialect) -> exp.Placehold
     this when constructing predicates / projections via sqlglot AST in
     a future Commit-2 path."""
     p = exp.Placeholder(this=name)
-    if backend is Dialect.CLICKHOUSE:
+    if dialect is Dialect.CLICKHOUSE:
         p.set("kind", _CH_DIM_TYPE_TO_CH_TYPE.get(dim_type, "String"))
     return p
 

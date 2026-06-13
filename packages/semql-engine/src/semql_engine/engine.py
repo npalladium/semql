@@ -221,11 +221,11 @@ class Engine:
         # hard-coded call) so tests can drive expiry deterministically.
         self._clock: Callable[[], float] = time.monotonic
 
-    def register(self, backend: Dialect, adapter: Adapter) -> None:
+    def register(self, dialect: Dialect, adapter: Adapter) -> None:
         """Bind an adapter to a backend. Replacing an existing
         registration is allowed (so callers can swap adapters mid-flight
         in tests)."""
-        self._adapters[backend] = adapter
+        self._adapters[dialect] = adapter
 
     @property
     def cache_hits(self) -> int:
@@ -249,7 +249,7 @@ class Engine:
         return (
             plan.merge.sql,
             _freeze_param(plan.merge.params),
-            tuple((f.backend.value, f.sql, _freeze_param(f.params)) for f in plan.fragments),
+            tuple((f.dialect.value, f.sql, _freeze_param(f.params)) for f in plan.fragments),
             tuple(plan.columns),
         )
 
@@ -319,18 +319,18 @@ class Engine:
     def _execute_uncached(self, plan: FederatedPlan) -> ExecutionResult:
         fragment_results: list[AdapterResult] = []
         for i, fragment in enumerate(plan.fragments):
-            adapter = self._adapters.get(fragment.backend)
+            adapter = self._adapters.get(fragment.dialect)
             if adapter is None:
                 raise EngineError(
                     f"No adapter registered for backend "
-                    f"{fragment.backend.value!r}. Call Engine.register("
-                    f"Dialect.{fragment.backend.name}, your_adapter) "
+                    f"{fragment.dialect.value!r}. Call Engine.register("
+                    f"Dialect.{fragment.dialect.name}, your_adapter) "
                     f"before running this plan."
                 )
             result = adapter.execute(fragment.sql, fragment.params)
             if set(result.columns) != set(fragment.columns):
                 raise EngineError(
-                    f"Fragment {i} (backend {fragment.backend.value!r}) "
+                    f"Fragment {i} (backend {fragment.dialect.value!r}) "
                     f"adapter returned columns {result.columns!r} but the "
                     f"fragment declares {fragment.columns!r}. Adapter "
                     f"must preserve the SELECT-list aliases."
@@ -509,10 +509,10 @@ class AsyncEngine:
         self._merge_engine = merge_engine
         self.last_iter_run_used_fast_path: bool = False
 
-    def register(self, backend: Dialect, adapter: AsyncAdapter) -> None:
+    def register(self, dialect: Dialect, adapter: AsyncAdapter) -> None:
         """Bind an async adapter to a backend. Replacing an existing
         registration is allowed."""
-        self._adapters[backend] = adapter
+        self._adapters[dialect] = adapter
 
     async def run(self, plan: FederatedPlan) -> ExecutionResult:
         """Execute a :class:`FederatedPlan` end-to-end on an event loop.
@@ -530,7 +530,7 @@ class AsyncEngine:
 
         results = await asyncio.gather(
             *(
-                self._adapters[frag.backend].execute(frag.sql, frag.params)
+                self._adapters[frag.dialect].execute(frag.sql, frag.params)
                 for frag in plan.fragments
             )
         )
@@ -592,7 +592,7 @@ class AsyncEngine:
         if _can_stream_single_fragment(plan):
             fragment = plan.fragments[0]
             self.last_iter_run_used_fast_path = True
-            adapter = self._adapters[fragment.backend]
+            adapter = self._adapters[fragment.dialect]
             result = await adapter.execute(fragment.sql, fragment.params)
             self._validate_result(0, fragment, result)
             rows = [tuple(row) for row in result.rows]
@@ -604,7 +604,7 @@ class AsyncEngine:
 
         results = await asyncio.gather(
             *(
-                self._adapters[frag.backend].execute(frag.sql, frag.params)
+                self._adapters[frag.dialect].execute(frag.sql, frag.params)
                 for frag in plan.fragments
             )
         )
@@ -624,11 +624,11 @@ class AsyncEngine:
 
     def _adapters_present(self, plan: FederatedPlan) -> None:
         for frag in plan.fragments:
-            if frag.backend not in self._adapters:
+            if frag.dialect not in self._adapters:
                 raise EngineError(
                     f"No adapter registered for backend "
-                    f"{frag.backend.value!r}. Call AsyncEngine.register("
-                    f"Dialect.{frag.backend.name}, your_adapter) before "
+                    f"{frag.dialect.value!r}. Call AsyncEngine.register("
+                    f"Dialect.{frag.dialect.name}, your_adapter) before "
                     f"running this plan."
                 )
 
@@ -641,7 +641,7 @@ class AsyncEngine:
     def _validate_result(self, index: int, fragment: Any, result: AdapterResult) -> None:  # noqa: ANN401
         if set(result.columns) != set(fragment.columns):
             raise EngineError(
-                f"Fragment {index} (backend {fragment.backend.value!r}) "
+                f"Fragment {index} (backend {fragment.dialect.value!r}) "
                 f"adapter returned columns {result.columns!r} but the "
                 f"fragment declares {fragment.columns!r}. Adapter "
                 f"must preserve the SELECT-list aliases."

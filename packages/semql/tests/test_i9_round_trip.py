@@ -38,7 +38,7 @@ def test_compiled_query_round_trip_through_dict(catalog: dict) -> None:
     assert restored.sql == cq.sql
     assert restored.params == cq.params
     assert restored.columns == cq.columns
-    assert restored.backend == cq.backend
+    assert restored.dialect == cq.dialect
     assert restored.touched_cube_names == cq.touched_cube_names
 
 
@@ -56,7 +56,7 @@ def test_compiled_query_round_trip_through_json(catalog: dict) -> None:
     assert restored.sql == cq.sql
     assert restored.params == cq.params
     assert restored.columns == cq.columns
-    assert restored.backend is Dialect.POSTGRES
+    assert restored.dialect is Dialect.POSTGRES
     assert restored.column_meta == cq.column_meta
 
 

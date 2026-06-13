@@ -31,7 +31,7 @@ from semql import (
 
 orders = Cube(
     name="orders",
-    backend=Dialect.POSTGRES,
+    dialect=Dialect.POSTGRES,
     table="orders",
     alias="o",
     measures=[
@@ -83,7 +83,7 @@ resolves it (along with `{schema}`-style context placeholders and
   as parameters, never inline as literals.
 - **MCP-ready** — `Catalog.prompt()` produces the planner system-prompt
   fragment; `semql-mcp` wraps it as a server.
-- **Pluggable backends** — `BackendDialect` Protocol lets out-of-tree
+- **Pluggable backends** — `DialectStrategy` Protocol lets out-of-tree
   Snowflake / BigQuery adapters slot in without forking the compiler.
 
 ## Philosophy

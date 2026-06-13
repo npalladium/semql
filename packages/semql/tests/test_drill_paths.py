@@ -20,7 +20,7 @@ from semql import Cube, Dialect, Dimension
 def _geo_cube(drills: list[list[str]] | None = None) -> Cube:
     return Cube(
         name="sales",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="sales",
         alias="s",
         dimensions=[
@@ -33,7 +33,7 @@ def _geo_cube(drills: list[list[str]] | None = None) -> Cube:
 
 
 def test_drill_paths_defaults_to_empty_list() -> None:
-    cube = Cube(name="x", backend=Dialect.POSTGRES, table="x", alias="x")
+    cube = Cube(name="x", dialect=Dialect.POSTGRES, table="x", alias="x")
     assert cube.drill_paths == []
 
 

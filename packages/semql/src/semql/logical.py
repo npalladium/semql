@@ -700,17 +700,17 @@ def partition_scans(plan: LogicalPlan) -> dict[Dialect, LogicalPlan]:
     independently, replacing the ad-hoc ``_build_partition_sub_query``
     path that duplicates join-graph + filter logic today.
     """
-    by_backend: dict[Dialect, list[Scan]] = {}
+    by_dialect: dict[Dialect, list[Scan]] = {}
     for scan in plan.scans:
-        by_backend.setdefault(scan.cube.backend, []).append(scan)
+        by_dialect.setdefault(scan.cube.dialect, []).append(scan)
 
-    if len(by_backend) == 1:
-        (single,) = by_backend.values()
+    if len(by_dialect) == 1:
+        (single,) = by_dialect.values()
         # Single-backend: no partitioning needed.
-        return {single[0].cube.backend: plan}
+        return {single[0].cube.dialect: plan}
 
     out: dict[Dialect, LogicalPlan] = {}
-    for backend, scans in by_backend.items():
+    for dialect, scans in by_dialect.items():
         scanned_names = {s.cube.name for s in scans}
         # Joins touching this partition: only ones whose BOTH sides
         # are on this backend are kept.  Cross-backend joins are
@@ -722,7 +722,7 @@ def partition_scans(plan: LogicalPlan) -> dict[Dialect, LogicalPlan]:
         # touched cube.  A full predicate-router is a future pass;
         # for now the helper's job is to give each backend the
         # minimum surface to compile against.
-        out[backend] = replace(plan, scans=scans, joins=kept_joins)
+        out[dialect] = replace(plan, scans=scans, joins=kept_joins)
     return out
 
 

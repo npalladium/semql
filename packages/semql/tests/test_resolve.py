@@ -92,7 +92,7 @@ def test_split_rejects_empty_string() -> None:
 def small_catalog() -> dict[str, Cube]:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],
@@ -101,7 +101,7 @@ def small_catalog() -> dict[str, Cube]:
     )
     customers = Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         dimensions=[Dimension(name="name", sql="{c}.name", type="string")],
@@ -220,7 +220,7 @@ def test_resolve_with_empty_catalog_lists_no_knowns() -> None:
 
 
 def test_resolve_returns_unknown_field_when_cube_has_no_fields() -> None:
-    bare = Cube(name="bare", backend=Dialect.POSTGRES, table="bare", alias="b")
+    bare = Cube(name="bare", dialect=Dialect.POSTGRES, table="bare", alias="b")
     with pytest.raises(UnknownIdentifierError) as exc_info:
         resolve_field("bare.something", {"bare": bare})
     err = exc_info.value

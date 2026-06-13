@@ -31,7 +31,7 @@ from semql.errors import CompileError
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -47,7 +47,7 @@ def _orders_cube() -> Cube:
 def _customers_cube() -> Cube:
     return Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         primary_key="id",
@@ -262,7 +262,7 @@ def test_inline_ratio_operand_cant_be_another_ratio() -> None:
     are ambiguous (do you SUM the ratios? AVG?). Flatten in the spec."""
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[

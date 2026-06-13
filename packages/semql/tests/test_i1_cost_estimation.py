@@ -33,7 +33,7 @@ from semql.cost import CostEstimate, QueryBudget
 def _orders(size_hint: int | None = 1_000_000) -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",
@@ -73,7 +73,7 @@ def test_estimate_cost_aggregates_across_cubes() -> None:
     cube1 = _orders(size_hint=10_000)
     cube2 = Cube(
         name="customers",
-        backend=Dialect.BIGQUERY,
+        dialect=Dialect.BIGQUERY,
         table="customers",
         alias="c",
         primary_key="id",
@@ -133,7 +133,7 @@ def test_query_budget_max_cubes_ceiling() -> None:
     cube1 = _orders(size_hint=100)
     cube2 = Cube(
         name="customers",
-        backend=Dialect.BIGQUERY,
+        dialect=Dialect.BIGQUERY,
         table="customers",
         alias="c",
         primary_key="id",

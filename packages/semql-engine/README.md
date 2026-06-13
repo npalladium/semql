@@ -20,8 +20,8 @@ catalog = Catalog([...])  # cubes spanning multiple backends
 plan = compile_federated_query(query, catalog.as_dict())
 
 engine = Engine()
-engine.register(Backend.POSTGRES, my_pg_adapter)
-engine.register(Backend.BIGQUERY, my_bq_adapter)
+engine.register(Dialect.POSTGRES, my_pg_adapter)
+engine.register(Dialect.BIGQUERY, my_bq_adapter)
 rows = list(engine.run(plan))
 ```
 

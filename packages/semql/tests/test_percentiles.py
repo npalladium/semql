@@ -29,10 +29,10 @@ from semql.errors import FederationError
 from semql.federate import compile_federated_query
 
 
-def _cube(backend: Dialect, name: str = "orders") -> Cube:
+def _cube(dialect: Dialect, name: str = "orders") -> Cube:
     return Cube(
         name=name,
-        backend=backend,
+        dialect=dialect,
         table="orders",
         alias="o",
         measures=[
@@ -51,16 +51,16 @@ def _cube(backend: Dialect, name: str = "orders") -> Cube:
 
 
 @pytest.mark.parametrize(
-    "backend",
+    "dialect",
     [Dialect.POSTGRES, Dialect.DUCKDB, Dialect.SNOWFLAKE],
 )
-def test_percentile_emits_ansi_within_group(backend: Dialect) -> None:
+def test_percentile_emits_ansi_within_group(dialect: Dialect) -> None:
     """The ANSI shape compiles via sqlglot's ``WithinGroup`` node.
     Postgres + Snowflake render the textbook form ``PERCENTILE_CONT(q)
     WITHIN GROUP (ORDER BY ...)``; DuckDB renders its accepted
     shorthand ``PERCENTILE_CONT(q ORDER BY ...)`` — both compile
     against the same node and both are valid in their dialect."""
-    cat = Catalog([_cube(backend)])
+    cat = Catalog([_cube(dialect)])
     q = SemanticQuery(measures=["orders.amount_median"], dimensions=["orders.region"])
     out = cat.compile(q)
     upper = out.sql.upper()
@@ -141,7 +141,7 @@ def _federated_catalog_with_percentiles() -> dict[str, Cube]:
     )
     customers = Cube(
         name="customers",
-        backend=Dialect.BIGQUERY,
+        dialect=Dialect.BIGQUERY,
         table="customers",
         alias="c",
         primary_key="id",

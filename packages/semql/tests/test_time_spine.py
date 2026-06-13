@@ -29,7 +29,7 @@ CONTEXT = {"schema": "test"}
 def _pg_orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         measures=[
@@ -48,13 +48,13 @@ def _pg_orders() -> Cube:
 
 def _duckdb_orders() -> Cube:
     cube = _pg_orders()
-    return cube.model_copy(update={"backend": Dialect.DUCKDB})
+    return cube.model_copy(update={"dialect": Dialect.DUCKDB})
 
 
 def _ch_events() -> Cube:
     return Cube(
         name="events",
-        backend=Dialect.CLICKHOUSE,
+        dialect=Dialect.CLICKHOUSE,
         table="{schema}.events",
         alias="e",
         measures=[Measure(name="count", sql="*", agg="count")],
@@ -185,7 +185,7 @@ def test_fill_nulls_emits_spine_clickhouse() -> None:
 def test_fill_nulls_emits_spine_bigquery() -> None:
     cube = Cube(
         name="orders",
-        backend=Dialect.BIGQUERY,
+        dialect=Dialect.BIGQUERY,
         table="{schema}.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count")],
@@ -208,7 +208,7 @@ def test_fill_nulls_emits_spine_bigquery() -> None:
 def test_fill_nulls_emits_spine_snowflake() -> None:
     cube = Cube(
         name="orders",
-        backend=Dialect.SNOWFLAKE,
+        dialect=Dialect.SNOWFLAKE,
         table="{schema}.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count")],

@@ -132,14 +132,14 @@ def test_unknown_identifier_payload_omits_alternatives_when_far(
 def test_join_path_error_payload_carries_cube_names() -> None:
     a = Cube(
         name="a",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="a",
         alias="a",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
     )
     b = Cube(
         name="b",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="b",
         alias="b",
         dimensions=[Dimension(name="x", sql="{b}.x", type="string")],
@@ -162,7 +162,7 @@ def test_filter_type_error_payload_carries_dimension_op() -> None:
     cat = {
         "orders": Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="orders",
             alias="o",
             measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -184,7 +184,7 @@ def test_filter_type_error_payload_carries_dimension_op() -> None:
 def test_placeholder_error_payload_carries_placeholder_and_known() -> None:
     bad = Cube(
         name="bad",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{nope}.bad",
         alias="b",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -382,7 +382,7 @@ def test_filter_type_error_payload_includes_next_tool_for_lookup_dim() -> None:
 
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -414,7 +414,7 @@ def test_filter_type_error_payload_omits_next_tool_when_no_lookup() -> None:
     affordance — the LLM must reason from the field's type."""
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -451,7 +451,7 @@ def test_collect_all_on_query_path_returns_validation_records() -> None:
 
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         required_filters=["region"],
@@ -476,7 +476,7 @@ def test_collect_all_on_query_path_returns_validation_records() -> None:
 def test_collect_all_returns_empty_list_on_success() -> None:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],

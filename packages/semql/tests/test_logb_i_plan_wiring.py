@@ -73,7 +73,7 @@ def test_time_aggregation_emits_truncated_bucket(catalog: dict) -> None:
     cq = _compile(catalog, q)
     # The bucketed column is the truncation of orders.created_at; the
     # exact dialect render is snapshotted in test_compile.py.
-    assert cq.backend is Dialect.POSTGRES
+    assert cq.dialect is Dialect.POSTGRES
     assert "revenue" in cq.columns
     assert "created_at_month" in cq.columns
 

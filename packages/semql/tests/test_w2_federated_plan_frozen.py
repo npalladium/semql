@@ -35,7 +35,7 @@ def _single_backend_plan() -> FederatedPlan:
             name="orders",
             alias="o",
             table="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
             dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
         )

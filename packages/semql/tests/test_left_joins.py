@@ -26,7 +26,7 @@ def _identity_cube() -> Cube:
     """Spine: one row per employee."""
     return Cube(
         name="identity",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="identities",
         alias="id",
         primary_key="id",
@@ -42,7 +42,7 @@ def _punch_log_cube() -> Cube:
     """Fact: one row per punch-in event. FK declared on this side."""
     return Cube(
         name="user_punch_log",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="user_punch_log",
         alias="upl",
         primary_key="id",
@@ -192,7 +192,7 @@ def test_left_join_strands_cube_behind_the_fact_refuses_clearly() -> None:
         name="orders",
         alias="o",
         table="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         measures=[Measure(name="revenue", sql="{o}.amt", agg="sum")],
         dimensions=[Dimension(name="id", sql="{o}.id", type="string")],
         joins=[
@@ -204,14 +204,14 @@ def test_left_join_strands_cube_behind_the_fact_refuses_clearly() -> None:
         name="customers",
         alias="c",
         table="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="name", sql="{c}.name", type="string")],
     )
     products = Cube(
         name="products",
         alias="p",
         table="products",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="pname", sql="{p}.name", type="string")],
     )
     catalog = Catalog([orders, customers, products])

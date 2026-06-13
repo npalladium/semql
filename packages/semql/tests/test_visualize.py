@@ -29,7 +29,7 @@ from semql.visualize import (
 def _orders(default_chart_type: object | None = None) -> Cube:
     kwargs: dict[str, object] = {
         "name": "orders",
-        "backend": Dialect.POSTGRES,
+        "dialect": Dialect.POSTGRES,
         "table": "orders",
         "alias": "o",
         "measures": [
@@ -63,7 +63,7 @@ def _orders(default_chart_type: object | None = None) -> Cube:
 def _customers(default_chart_type: object | None = None) -> Cube:
     kwargs: dict[str, object] = {
         "name": "customers",
-        "backend": Dialect.POSTGRES,
+        "dialect": Dialect.POSTGRES,
         "table": "customers",
         "alias": "c",
         "measures": [Measure(name="count", sql="*", agg="count", unit="count")],

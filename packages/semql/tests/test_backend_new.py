@@ -33,7 +33,7 @@ from sqlglot import exp
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,  # backend on cube doesn't affect the strategy under test
+        dialect=Dialect.POSTGRES,  # backend on cube doesn't affect the strategy under test
         table="public.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -67,16 +67,16 @@ def test_duckdb_placeholder_renders_dollar_prefix() -> None:
 
 
 @pytest.mark.parametrize(
-    ("strategy_cls", "backend"),
+    ("strategy_cls", "dialect"),
     [
         (BigQueryDialect, Dialect.BIGQUERY),
         (SnowflakeDialect, Dialect.SNOWFLAKE),
         (DuckDBDialect, Dialect.DUCKDB),
     ],
 )
-def test_trunc_emits_date_trunc(strategy_cls: type, backend: Dialect) -> None:
+def test_trunc_emits_date_trunc(strategy_cls: type, dialect: Dialect) -> None:
     s = strategy_cls()
-    out = render(s.trunc("day", exp.column("ts", table="x")), backend)
+    out = render(s.trunc("day", exp.column("ts", table="x")), dialect)
     assert "date_trunc" in out.lower()
     assert "day" in out.lower()
 
@@ -137,17 +137,17 @@ def test_duckdb_emit_contains_uses_native_ilike() -> None:
 
 
 @pytest.mark.parametrize(
-    ("strategy_cls", "backend"),
+    ("strategy_cls", "dialect"),
     [
         (BigQueryDialect, Dialect.BIGQUERY),
         (SnowflakeDialect, Dialect.SNOWFLAKE),
         (DuckDBDialect, Dialect.DUCKDB),
     ],
 )
-def test_emit_source_renders_aliased_table(strategy_cls: type, backend: Dialect) -> None:
+def test_emit_source_renders_aliased_table(strategy_cls: type, dialect: Dialect) -> None:
     cube = _orders()
     identity: SqlResolver = lambda x: x  # noqa: E731 -- inline identity resolver; named def is overkill for a one-line test fixture
-    out = render(strategy_cls().emit_source(cube, {"orders": cube}, identity), backend)
+    out = render(strategy_cls().emit_source(cube, {"orders": cube}, identity), dialect)
     # All three dialects emit ``public.orders AS o`` (possibly quoted on BQ).
     assert "orders" in out and "o" in out
 
@@ -174,7 +174,7 @@ def test_dialect_for_returns_new_defaults() -> None:
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected_placeholder"),
+    ("dialect", "expected_placeholder"),
     [
         (Dialect.BIGQUERY, "@p0"),
         (Dialect.SNOWFLAKE, ":p0"),
@@ -182,13 +182,13 @@ def test_dialect_for_returns_new_defaults() -> None:
     ],
 )
 def test_compile_against_new_backend_uses_dialect_placeholder(
-    backend: Dialect, expected_placeholder: str
+    dialect: Dialect, expected_placeholder: str
 ) -> None:
     from semql import Catalog, Filter, SemanticQuery
 
     cube = Cube(
         name="orders",
-        backend=backend,
+        dialect=dialect,
         table="public.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -200,6 +200,6 @@ def test_compile_against_new_backend_uses_dialect_placeholder(
             filters=[Filter(dimension="orders.region", op="eq", values=["us"])],
         )
     )
-    assert out.backend is backend
+    assert out.dialect is dialect
     assert expected_placeholder in out.sql
     assert out.params == {"p0": "us"}

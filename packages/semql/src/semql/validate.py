@@ -240,7 +240,7 @@ def validate(
                 )
             )
 
-    backends = {c.backend for c in touched}
+    backends = {c.dialect for c in touched}
     if len(backends) > 1:
         names = sorted(b.value for b in backends)
         errors.append(

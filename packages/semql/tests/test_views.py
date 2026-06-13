@@ -27,7 +27,7 @@ from semql_prompt import planner_prompt
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[

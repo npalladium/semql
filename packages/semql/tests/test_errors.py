@@ -111,7 +111,7 @@ def test_filter_type_mismatch_raises_filter_type_error(catalog: dict[str, Cube])
 def test_placeholder_error_carries_name() -> None:
     bad = Cube(
         name="bad",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{nope}.bad",
         alias="b",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -126,14 +126,14 @@ def test_placeholder_error_carries_name() -> None:
 def test_join_path_error_carries_cube_names() -> None:
     a = Cube(
         name="a",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="a",
         alias="a",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
     )
     b = Cube(
         name="b",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="b",
         alias="b",
         dimensions=[Dimension(name="x", sql="{b}.x", type="string")],
@@ -169,7 +169,7 @@ def test_unused_join_not_treated_as_unreachable() -> None:
     JoinPathError rather than a bare CompileError string."""
     a = Cube(
         name="a",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="a",
         alias="a",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],

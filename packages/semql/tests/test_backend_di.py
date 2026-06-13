@@ -25,12 +25,12 @@ from sqlglot import exp
 
 
 def _as_dialect_map(
-    s: object, backend: Dialect = Dialect.POSTGRES
+    s: object, dialect: Dialect = Dialect.POSTGRES
 ) -> dict[Dialect, DialectStrategy]:
     """Helper: cast a structurally-conformant dialect into the
     Protocol-typed dict the compiler accepts. mypy can't infer Protocol
     conformance inside a dict literal, so we name it here once."""
-    return {backend: cast(DialectStrategy, s)}
+    return {dialect: cast(DialectStrategy, s)}
 
 
 @dataclass
@@ -46,8 +46,8 @@ class RecordingDialect:
     source_calls: list[str] = field(default_factory=list[str])
 
     @property
-    def backend(self) -> Dialect:
-        return self.inner.backend
+    def dialect(self) -> Dialect:
+        return self.inner.dialect
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         self.placeholder_calls.append((name, dim_type))
@@ -81,7 +81,7 @@ class RecordingDialect:
 def _orders_catalog() -> dict[str, Cube]:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.orders",
         alias="o",
         measures=[
@@ -182,7 +182,7 @@ def test_compiler_delegates_emit_source_for_every_from_cube() -> None:
 
 
 class _FakeSnowflakeDialect:
-    backend = Dialect.SNOWFLAKE
+    dialect = Dialect.SNOWFLAKE
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:  # noqa: ARG002
         # Snowflake convention is ``:name`` — stash that as the raw form
@@ -222,7 +222,7 @@ def test_third_party_strategy_through_override_kwarg() -> None:
     and pass it via ``dialects={...}`` — no fork of semql required."""
     orders = Cube(
         name="orders",
-        backend=Dialect.SNOWFLAKE,
+        dialect=Dialect.SNOWFLAKE,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -235,7 +235,7 @@ def test_third_party_strategy_through_override_kwarg() -> None:
             filters=[Filter(dimension="orders.region", op="eq", values=["us"])],
         ),
         catalog,
-        dialects=_as_dialect_map(_FakeSnowflakeDialect(), backend=Dialect.SNOWFLAKE),
+        dialects=_as_dialect_map(_FakeSnowflakeDialect(), dialect=Dialect.SNOWFLAKE),
     )
     # The Snowflake placeholder convention (`:name`) shows up in the SQL.
     assert ":p0" in out.sql

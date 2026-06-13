@@ -31,7 +31,7 @@ from semql_introspect._probe import (
 def introspect_catalog(
     connection: Any,  # noqa: ANN401 — any DB-API 2.0 conn
     *,
-    backend: Dialect,
+    dialect: Dialect,
     schema: str,
     include_tables: list[str] | None = None,
     exclude_tables: list[str] | None = None,
@@ -44,7 +44,7 @@ def introspect_catalog(
     dialects (ClickHouse, BigQuery)."""
     return introspect_to_result(
         connection,
-        backend=backend,
+        dialect=dialect,
         schema=schema,
         include_tables=include_tables,
         exclude_tables=exclude_tables,
@@ -54,7 +54,7 @@ def introspect_catalog(
 def introspect_to_result(
     connection: Any,  # noqa: ANN401
     *,
-    backend: Dialect,
+    dialect: Dialect,
     schema: str,
     include_tables: list[str] | None = None,
     exclude_tables: list[str] | None = None,
@@ -66,13 +66,13 @@ def introspect_to_result(
         include_tables=include_tables,
         exclude_tables=exclude_tables,
     )
-    return introspect(probe, backend=backend)
+    return introspect(probe, dialect=dialect)
 
 
 def introspect_to_python(
     connection: Any,  # noqa: ANN401
     *,
-    backend: Dialect,
+    dialect: Dialect,
     schema: str,
     include_tables: list[str] | None = None,
     exclude_tables: list[str] | None = None,
@@ -81,7 +81,7 @@ def introspect_to_python(
     """Return a self-contained Python module string with the inferred cubes."""
     result = introspect_to_result(
         connection,
-        backend=backend,
+        dialect=dialect,
         schema=schema,
         include_tables=include_tables,
         exclude_tables=exclude_tables,

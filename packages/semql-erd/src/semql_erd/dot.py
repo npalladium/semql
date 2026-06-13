@@ -66,7 +66,7 @@ def _cube_label(cube: Cube) -> str:
     header_parts = [cube.name]
     if cube.display_name:
         header_parts.append(f"({cube.display_name})")
-    header_parts.append(f"\n[{cube.backend.value}]")
+    header_parts.append(f"\n[{cube.dialect.value}]")
     header = " ".join(header_parts)
 
     sections: list[str] = [header]

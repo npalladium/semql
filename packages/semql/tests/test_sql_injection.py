@@ -63,13 +63,13 @@ _DIALECTS = [
 ]
 
 
-def _catalog(backend: Dialect) -> Catalog:
+def _catalog(dialect: Dialect) -> Catalog:
     alias = "t"
     return Catalog(
         [
             Cube(
                 name="orders",
-                backend=backend,
+                dialect=dialect,
                 table="orders",
                 alias=alias,
                 measures=[Measure(name="count", sql="*", agg="count")],
@@ -117,17 +117,17 @@ def _assert_neutralised(out: object, payload: str, dialect: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backend", _DIALECTS, ids=lambda b: b.value)
+@pytest.mark.parametrize("dialect", _DIALECTS, ids=lambda b: b.value)
 @pytest.mark.parametrize("payload", PAYLOADS)
 @pytest.mark.parametrize("op", ["eq", "neq", "contains"])
-def test_injection_via_single_value_filter(backend: Dialect, payload: str, op: FilterOp) -> None:
-    out = _catalog(backend).compile(
+def test_injection_via_single_value_filter(dialect: Dialect, payload: str, op: FilterOp) -> None:
+    out = _catalog(dialect).compile(
         SemanticQuery(
             measures=["orders.count"],
             filters=[Filter(dimension="orders.region", op=op, values=[payload])],
         )
     )
-    _assert_neutralised(out, payload, backend.value)
+    _assert_neutralised(out, payload, dialect.value)
 
 
 # ---------------------------------------------------------------------------
@@ -135,16 +135,16 @@ def test_injection_via_single_value_filter(backend: Dialect, payload: str, op: F
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backend", _DIALECTS, ids=lambda b: b.value)
-def test_injection_via_in_list(backend: Dialect) -> None:
-    out = _catalog(backend).compile(
+@pytest.mark.parametrize("dialect", _DIALECTS, ids=lambda b: b.value)
+def test_injection_via_in_list(dialect: Dialect) -> None:
+    out = _catalog(dialect).compile(
         SemanticQuery(
             measures=["orders.count"],
             filters=[Filter(dimension="orders.region", op="in", values=list(PAYLOADS))],
         )
     )
     bound = set(out.params.values())
-    literals = _string_literals(out.sql, backend.value)
+    literals = _string_literals(out.sql, dialect.value)
     for payload in PAYLOADS:
         assert payload in bound, f"IN element not bound: {payload!r}"
         assert not any(payload in lit for lit in literals), f"IN element spliced: {payload!r}"

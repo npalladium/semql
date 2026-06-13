@@ -27,7 +27,7 @@ def _orders_and_customers() -> dict[str, Cube]:
             name="orders",
             alias="o",
             table="prod.orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
             measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
         ),
@@ -35,14 +35,14 @@ def _orders_and_customers() -> dict[str, Cube]:
             name="customers",
             alias="c",
             table="prod.customers",
-            backend=Dialect.BIGQUERY,
+            dialect=Dialect.BIGQUERY,
             dimensions=[Dimension(name="name", sql="{c}.name", type="string")],
         ),
         "clickhouse_logs": Cube(
             name="clickhouse_logs",
             alias="cl",
             table="events.log",
-            backend=Dialect.CLICKHOUSE,
+            dialect=Dialect.CLICKHOUSE,
             dimensions=[Dimension(name="event", sql="{cl}.event", type="string")],
         ),
     }
@@ -58,7 +58,7 @@ def test_partition_scans_single_backend() -> None:
     partitions = partition_scans(plan)
 
     assert set(partitions.keys()) == {Dialect.POSTGRES}
-    assert partitions[Dialect.POSTGRES].scans[0].cube.backend is Dialect.POSTGRES
+    assert partitions[Dialect.POSTGRES].scans[0].cube.dialect is Dialect.POSTGRES
 
 
 def test_partition_scans_multi_backend() -> None:
@@ -88,8 +88,8 @@ def test_partition_scans_multi_backend() -> None:
     # Each partition contains scans only for cubes on its backend.
     pg = partitions[Dialect.POSTGRES]
     bq = partitions[Dialect.BIGQUERY]
-    assert all(s.cube.backend is Dialect.POSTGRES for s in pg.scans)
-    assert all(s.cube.backend is Dialect.BIGQUERY for s in bq.scans)
+    assert all(s.cube.dialect is Dialect.POSTGRES for s in pg.scans)
+    assert all(s.cube.dialect is Dialect.BIGQUERY for s in bq.scans)
 
 
 def test_partition_scans_three_backends() -> None:

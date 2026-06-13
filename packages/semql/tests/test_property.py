@@ -38,6 +38,7 @@ from semql import (
 )
 from semql.cnf import to_cnf
 from semql.compile import compile_plan
+from semql.dialect import dialect_for as sqlglot_dialect_for
 from semql.errors import SemQLError
 from sqlglot import exp
 
@@ -66,7 +67,7 @@ def _outcome(thunk: object) -> tuple[str, object, object]:
 def _catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         base_predicate="{o}.deleted_at IS NULL",
@@ -98,7 +99,7 @@ def _fixed_query(draw: st.DrawFn) -> SemanticQuery:
 @given(query=_fixed_query())
 def test_fixed_catalog_compiles_to_safe_select(query: SemanticQuery) -> None:
     out = _catalog().compile(query)
-    assert is_read_only_statement(out.sql)
+    assert is_read_only_statement(out.sql, dialect=sqlglot_dialect_for(out.dialect))
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ def test_p2_values_are_bound_never_spliced(
         out = compile_query(query, catalog.as_dict())
     except SemQLError:
         return
-    assert is_read_only_statement(out.sql)
+    assert is_read_only_statement(out.sql, dialect=sqlglot_dialect_for(out.dialect))
     # Every filter string value is sentinel-wrapped; a spliced value would
     # carry its marker into the SQL text. The marker must never appear.
     assert SENTINEL not in out.sql
@@ -161,7 +162,7 @@ def test_p3_emitted_sql_parses_under_its_dialect(
         out = compile_query(query, catalog.as_dict())
     except SemQLError:
         return
-    parsed = sqlglot.parse_one(out.sql, dialect=out.backend.value)
+    parsed = sqlglot.parse_one(out.sql, dialect=out.dialect.value)
     # ``exp.Command`` is sqlglot's "couldn't really parse this" fallback.
     assert not isinstance(parsed, exp.Command)
     assert not list(parsed.find_all(exp.Command)), f"unparsed fragment in:\n{out.sql}"

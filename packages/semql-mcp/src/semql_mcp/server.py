@@ -165,7 +165,7 @@ class MCPServer:
             except Exception as exc:
                 return _error_payload(exc)
             return {
-                "backend": compiled.backend.value,
+                "dialect": compiled.dialect.value,
                 "sql": compiled.sql,
                 "params": compiled.params,
                 "columns": compiled.columns,
@@ -252,7 +252,7 @@ class MCPServer:
                         "params": compiled.params,
                     }
                 return {
-                    "backend": compiled.backend.value,
+                    "dialect": compiled.dialect.value,
                     "sql": compiled.sql,
                     "params": compiled.params,
                     "columns": compiled.columns,
@@ -516,7 +516,7 @@ def _make_query_cube_tool(
         except Exception as exc:
             return _error_payload(exc)
         envelope: dict[str, Any] = {
-            "backend": compiled.backend.value,
+            "dialect": compiled.dialect.value,
             "sql": compiled.sql,
             "params": compiled.params,
             "columns": compiled.columns,
@@ -577,7 +577,7 @@ def _make_saved_query_tool(
         except Exception as exc:
             return _error_payload(exc)
         envelope: dict[str, Any] = {
-            "backend": compiled.backend.value,
+            "dialect": compiled.dialect.value,
             "sql": compiled.sql,
             "params": compiled.params,
             "columns": compiled.columns,

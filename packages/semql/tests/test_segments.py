@@ -29,7 +29,7 @@ from semql_prompt import planner_prompt
 def _orders_with_segments() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -67,7 +67,7 @@ def test_segment_description_defaults_to_empty() -> None:
 
 
 def test_cube_segments_default_to_empty_list() -> None:
-    cube = Cube(name="c", backend=Dialect.POSTGRES, table="c", alias="c")
+    cube = Cube(name="c", dialect=Dialect.POSTGRES, table="c", alias="c")
     assert cube.segments == []
 
 
@@ -169,7 +169,7 @@ def test_prompt_includes_segment_descriptions() -> None:
 def test_prompt_omits_segments_section_when_none() -> None:
     cube = Cube(
         name="bare",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="bare",
         alias="b",
         dimensions=[Dimension(name="x", sql="{b}.x", type="string")],

@@ -33,7 +33,7 @@ def _gated_catalog() -> Catalog:
     """A cube only viewers with the ``admin`` role may see."""
     secret = Cube(
         name="secret",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="secret",
         alias="s",
         required_roles=["admin"],

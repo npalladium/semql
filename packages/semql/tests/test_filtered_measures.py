@@ -31,7 +31,7 @@ from semql import (
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -147,7 +147,7 @@ def test_filtered_measure_composes_with_outer_where() -> None:
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected_marker"),
+    ("dialect", "expected_marker"),
     [
         (Dialect.POSTGRES, "FILTER"),
         (Dialect.CLICKHOUSE, "FILTER"),
@@ -157,10 +157,10 @@ def test_filtered_measure_composes_with_outer_where() -> None:
         (Dialect.SNOWFLAKE, "IFF"),
     ],
 )
-def test_filter_renders_per_dialect(backend: Dialect, expected_marker: str) -> None:
+def test_filter_renders_per_dialect(dialect: Dialect, expected_marker: str) -> None:
     cube = Cube(
         name="orders",
-        backend=backend,
+        dialect=dialect,
         table="orders",
         alias="o",
         measures=[
@@ -187,7 +187,7 @@ def test_filtered_measure_in_compare_window() -> None:
 
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[

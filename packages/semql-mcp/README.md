@@ -25,13 +25,13 @@ pip install semql-mcp
 ## Quick start — compile-only
 
 ```python
-from semql import Backend, Catalog, Cube, Dimension, Measure
+from semql import Dialect, Catalog, Cube, Dimension, Measure
 from semql_mcp import MCPServer
 
 catalog = Catalog([
     Cube(
         name="orders",
-        backend=Backend.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],

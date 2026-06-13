@@ -30,7 +30,7 @@ def _cube(
 ) -> Cube:
     return Cube(
         name=name,
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table=f"public.{name}",
         alias=name[:2],
         measures=[Measure(name="cnt", sql=f"{{{name[:2]}}}.id", agg="count")],

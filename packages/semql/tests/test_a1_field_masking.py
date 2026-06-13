@@ -140,7 +140,7 @@ def _hr_only_salary_cube() -> dict:
     """Catalog with a measure that's HR-only and masked-for-analyst."""
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         measures=[
@@ -189,7 +189,7 @@ def test_viewer_with_mask_value_substitutes_literal() -> None:
     """``mask_value`` is a SQL literal, not a NULL cast."""
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         measures=[

@@ -105,7 +105,7 @@ def test_documented_function_exports_are_callable() -> None:
 def _smoke_catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         base_predicate="{o}.deleted_at IS NULL",

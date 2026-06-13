@@ -26,7 +26,7 @@ def _catalog() -> dict[str, Cube]:
         name="orders",
         alias="o",
         table="prod.orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
         time_dimensions=[TimeDimension(name="created_at", sql="{o}.created_at")],
     )

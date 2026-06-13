@@ -55,7 +55,7 @@ def test_compiled_sql_round_trip_is_safe() -> None:
     surfaces here, not in production logs."""
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],

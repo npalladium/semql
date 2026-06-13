@@ -49,7 +49,7 @@ def test_resolved_segment_carries_kind_segment() -> None:
 
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         segments=[Segment(name="paid", sql="{o}.status = 'paid'")],

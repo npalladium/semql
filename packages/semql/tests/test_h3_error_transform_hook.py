@@ -24,7 +24,7 @@ from semql.errors import CompileError
 def _catalog(error_transform: object = None) -> Catalog:
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

@@ -24,14 +24,14 @@ from semql.docs import render_catalog_markdown
 def _full_catalog() -> Catalog:
     customers = Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         dimensions=[Dimension(name="id", sql="{c}.id", type="uuid")],
     )
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         description="One row per checkout.",

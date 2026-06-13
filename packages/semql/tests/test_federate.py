@@ -33,10 +33,10 @@ from semql.spec import Filter, SemanticQuery, TimeWindow
 # ---------------------------------------------------------------------------
 
 
-def _orders(backend: Dialect = Dialect.POSTGRES) -> Cube:
+def _orders(dialect: Dialect = Dialect.POSTGRES) -> Cube:
     return Cube(
         name="orders",
-        backend=backend,
+        dialect=dialect,
         table="orders",
         alias="o",
         primary_key="id",
@@ -61,10 +61,10 @@ def _orders(backend: Dialect = Dialect.POSTGRES) -> Cube:
     )
 
 
-def _customers(backend: Dialect = Dialect.BIGQUERY) -> Cube:
+def _customers(dialect: Dialect = Dialect.BIGQUERY) -> Cube:
     return Cube(
         name="customers",
-        backend=backend,
+        dialect=dialect,
         table="customers",
         alias="c",
         primary_key="id",
@@ -99,7 +99,7 @@ def test_single_backend_query_returns_one_fragment_plan() -> None:
         catalog,
     )
     assert len(plan.fragments) == 1
-    assert plan.fragments[0].backend is Dialect.POSTGRES
+    assert plan.fragments[0].dialect is Dialect.POSTGRES
     assert plan.merge.sql == "SELECT * FROM frag_0"
     # Columns + meta match the underlying CompiledQuery.
     assert plan.columns == plan.fragments[0].columns
@@ -127,8 +127,8 @@ def test_cross_backend_enrichment_emits_two_fragments() -> None:
     assert len(plan.fragments) == 2
 
     # Primary partition (Postgres) comes first.
-    assert plan.fragments[0].backend is Dialect.POSTGRES
-    assert plan.fragments[1].backend is Dialect.BIGQUERY
+    assert plan.fragments[0].dialect is Dialect.POSTGRES
+    assert plan.fragments[1].dialect is Dialect.BIGQUERY
 
     # Primary fragment exposes the bridge key (customer_id) + revenue.
     assert "customer_id" in plan.fragments[0].columns

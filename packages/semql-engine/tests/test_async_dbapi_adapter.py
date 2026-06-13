@@ -107,7 +107,7 @@ def duckdb_as_pg() -> duckdb.DuckDBPyConnection:
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",

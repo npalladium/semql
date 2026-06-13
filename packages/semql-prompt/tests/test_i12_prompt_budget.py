@@ -40,7 +40,7 @@ from semql_prompt import (
 def _orders(description: str = "Orders table — the main fact table") -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         primary_key="id",
@@ -69,7 +69,7 @@ def _orders(description: str = "Orders table — the main fact table") -> Cube:
 def _customers(description: str = "Customer dimension") -> Cube:
     return Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="c",
         primary_key="id",

@@ -34,7 +34,7 @@ def _catalog(*, region_alias: list[str] | None = None) -> dict[str, Cube]:
         name="orders",
         alias="o",
         table="prod.orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
         dimensions=[
             Dimension(name="customer_id", sql="{o}.customer_id", type="number"),
@@ -53,7 +53,7 @@ def _catalog(*, region_alias: list[str] | None = None) -> dict[str, Cube]:
         name="customers",
         alias="c",
         table="prod.customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[
             Dimension(name="id", sql="{c}.id", type="number"),
             Dimension(name="region", sql="{c}.region", type="string"),

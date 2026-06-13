@@ -41,7 +41,7 @@ def _run[T](coro: Awaitable[T]) -> T:
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

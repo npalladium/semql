@@ -30,7 +30,7 @@ def render_catalog_markdown(
     in the output. Off by default — most consumers want their own
     cubes documented, not the framework's introspection layer.
     """
-    cubes = [c for c in catalog.as_dict().values() if include_meta or c.backend.value != "meta"]
+    cubes = [c for c in catalog.as_dict().values() if include_meta or c.dialect.value != "meta"]
 
     lines: list[str] = [f"# {title}", ""]
     lines.append(f"_{len(cubes)} cube(s) documented._")
@@ -74,7 +74,7 @@ def _render_cube(cube: object) -> list[str]:  # cube: Cube
         else f"- **Table:** `{src.table}`"
     )
     facts: list[str] = [
-        f"- **Dialect:** `{cube.backend.value}`",
+        f"- **Dialect:** `{cube.dialect.value}`",
         source_line,
         f"- **Alias:** `{cube.alias}`",
     ]

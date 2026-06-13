@@ -37,7 +37,7 @@ def _make_cube(**overrides: object) -> Cube:
     """Minimal cube; tests override the fields they care about."""
     defaults: dict = {
         "name": "orders",
-        "backend": Dialect.POSTGRES,
+        "dialect": Dialect.POSTGRES,
         "table": "{schema}.orders",
         "alias": "o",
         "measures": [Measure(name="count", sql="*", agg="count")],
@@ -171,7 +171,7 @@ def test_lint_passes_cube_with_pk_and_joins() -> None:
     """A cube with primary_key AND joins is connected."""
     customers = Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.customers",
         alias="c",
         primary_key="id",

@@ -125,7 +125,7 @@ def test_clickhouse_emit_contains_passes_value_literally() -> None:
 def test_postgres_emit_source_vanilla_cube_returns_table_as_alias() -> None:
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -145,7 +145,7 @@ def test_postgres_emit_source_threads_resolver_over_table_name() -> None:
     substituted before the table is wrapped with ``AS alias``."""
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -164,7 +164,7 @@ def test_postgres_emit_source_quotes_reserved_word_table_name() -> None:
     double-quoted so the generated SQL parses as a valid SELECT."""
     cube = Cube(
         name="evt",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="using",
         alias="u",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],

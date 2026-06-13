@@ -27,7 +27,7 @@ from semql import Dialect, Catalog, Cube, Dimension, Measure
 default = Catalog([
     Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],

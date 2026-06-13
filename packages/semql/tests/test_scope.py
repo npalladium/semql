@@ -38,7 +38,7 @@ from semql.errors import CompileError
 def _tickets() -> Cube:
     return Cube(
         name="tickets",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="tickets",
         alias="t",
         scope="reportees",
@@ -181,7 +181,7 @@ def test_cube_without_scope_is_unaffected_by_registry() -> None:
     a populated scope_fns registry."""
     open_cube = Cube(
         name="public",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="public_data",
         alias="p",
         measures=[Measure(name="count", sql="*", agg="count")],

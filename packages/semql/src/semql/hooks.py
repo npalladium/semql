@@ -281,7 +281,7 @@ class LimitCapRewriter:
 
         # We need to parse the SQL, modify the LIMIT, and emit it back.
         # This is a bit heavy, but it's the correct way.
-        dialect = sqlglot_dialect_for(compiled.backend)
+        dialect = sqlglot_dialect_for(compiled.dialect)
         try:
             ast = sqlglot.parse_one(compiled.sql, dialect=dialect)
         except ParseError:

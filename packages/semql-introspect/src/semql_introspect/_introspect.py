@@ -86,7 +86,7 @@ def _dedupe_aliases(cubes: list[Cube]) -> list[Cube]:
     return out
 
 
-def introspect(probe: SchemaProbe, *, backend: Dialect) -> IntrospectionResult:
+def introspect(probe: SchemaProbe, *, dialect: Dialect) -> IntrospectionResult:
     """Build a catalog from a probe + a target backend.
 
     ``backend`` is the semql ``Dialect`` enum tag stamped onto every
@@ -182,7 +182,7 @@ def introspect(probe: SchemaProbe, *, backend: Dialect) -> IntrospectionResult:
         cubes.append(
             Cube(
                 name=tbl.name,
-                backend=backend,
+                dialect=dialect,
                 table=tbl.name,
                 alias=alias,
                 primary_key=cube_pk,

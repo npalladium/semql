@@ -33,7 +33,7 @@ def _run[T](coro: Awaitable[T]) -> T:
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -154,8 +154,8 @@ def test_saved_query_tool_returns_compile_envelope() -> None:
     assert "sql" in out
     assert "params" in out
     assert "columns" in out
-    assert "backend" in out
-    assert out["backend"] == "postgres"
+    assert "dialect" in out
+    assert out["dialect"] == "postgres"
     assert "SUM" in out["sql"].upper()
     # The status='paid' filter from the saved query is in the params.
     assert "paid" in str(out["params"].values())
@@ -168,7 +168,7 @@ def test_saved_query_tool_accepts_context_kwarg() -> None:
     def _orders_with_tenancy() -> Cube:
         return Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="{tenant_schema}.orders",
             alias="o",
             tenancy="schema",

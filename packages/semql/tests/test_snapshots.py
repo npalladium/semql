@@ -31,7 +31,7 @@ from syrupy.assertion import SnapshotAssertion
 def _orders_catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         base_predicate="{o}.deleted_at IS NULL",
@@ -48,7 +48,7 @@ def _orders_catalog() -> Catalog:
     )
     customers = Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.customers",
         alias="c",
         dimensions=[Dimension(name="name", sql="{c}.name", type="string")],
@@ -59,7 +59,7 @@ def _orders_catalog() -> Catalog:
 def _sessions_catalog() -> Catalog:
     sessions = Cube(
         name="sessions",
-        backend=Dialect.CLICKHOUSE,
+        dialect=Dialect.CLICKHOUSE,
         table="sessions",
         alias="s",
         base_predicate="{s}.event_type = 'active'",
@@ -207,7 +207,7 @@ def test_snap_count_distinct_non_additive_measure(snapshot: SnapshotAssertion) -
 def test_snap_tenancy_discriminator(snapshot: SnapshotAssertion) -> None:
     events = Cube(
         name="events",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="events",
         alias="e",
         tenancy="discriminator",

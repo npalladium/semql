@@ -29,7 +29,7 @@ def _cube_with_aliases() -> dict:
     return {
         "orders": Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="{schema}.orders",
             alias="o",
             measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

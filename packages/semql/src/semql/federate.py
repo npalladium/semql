@@ -347,7 +347,7 @@ def _find_bridges(
             if j.to not in in_scope:
                 continue
             target = by_name[j.to]
-            if target.backend == cube.backend:
+            if target.dialect == cube.dialect:
                 continue
             key = tuple(sorted((cube.name, target.name)))
             if key in seen:
@@ -414,7 +414,7 @@ class _PartitionPlan:
     pass-through.
     """
 
-    backend: Dialect
+    dialect: Dialect
     cubes: list[Cube]
     sub_query: SemanticQuery
     # Map from the original measure ref ("orders.revenue") to the
@@ -457,8 +457,8 @@ def _build_partition_sub_query(
     once.  Refuses queries with measures on non-primary partitions.
     """
     partition_names = {c.name for c in partition_cubes}
-    backend = partition_cubes[0].backend
-    is_primary = backend is primary_partition
+    dialect = partition_cubes[0].dialect
+    is_primary = dialect is primary_partition
 
     sub_measures: list[str] = []
     measure_columns: dict[str, str] = {}
@@ -473,7 +473,7 @@ def _build_partition_sub_query(
                 # measure resolves to a non-primary partition — refused
                 raise FederationError(
                     f"Measure {ref!r} resolves to cube {owner.name!r} on "
-                    f"backend {owner.backend.value!r}, which is not the "
+                    f"backend {owner.dialect.value!r}, which is not the "
                     f"primary measure partition {primary_partition.value!r}. "
                     f"All measures must live on a single backend in v1; the "
                     f"in-process executor can lift this restriction.",
@@ -581,7 +581,7 @@ def _build_partition_sub_query(
         # Ordering & limits happen at merge.
     )
     return _PartitionPlan(
-        backend=backend,
+        dialect=dialect,
         cubes=partition_cubes,
         sub_query=sub_query,
         measure_columns=measure_columns,
@@ -638,10 +638,10 @@ def _emit_merge_sql(
     LEFT JOINs onto it via the appropriate bridge.
     """
     # Index the partitions by backend for join-key lookup.
-    by_backend: dict[Dialect, tuple[int, _PartitionPlan]] = {
-        p.backend: (i, p) for i, p in enumerate(partitions)
+    by_dialect: dict[Dialect, tuple[int, _PartitionPlan]] = {
+        p.dialect: (i, p) for i, p in enumerate(partitions)
     }
-    primary_idx, _primary_plan = by_backend[primary_partition]
+    primary_idx, _primary_plan = by_dialect[primary_partition]
 
     def frag_alias(idx: int) -> str:
         return f"f{idx}"
@@ -850,7 +850,7 @@ def _raw_measure_col(measure_name: str) -> str:
 class _RawRowPartitionPlan:
     """Per-backend sub-query for raw-row federation."""
 
-    backend: Dialect
+    dialect: Dialect
     cubes: list[Cube]
     sub_query: SemanticQuery
     raw_measure_columns: dict[str, tuple[str, str]]
@@ -1009,7 +1009,7 @@ def _route_where_tree(
         new_sub_q = sub_q.model_copy(update=sub_q_updates)
         out.append(
             _RawRowPartitionPlan(
-                backend=p.backend,
+                dialect=p.dialect,
                 cubes=p.cubes,
                 sub_query=new_sub_q,
                 raw_measure_columns=p.raw_measure_columns,
@@ -1067,7 +1067,7 @@ def _route_where_distributive(
         new_sub_q = sub_q.model_copy(update=sub_q_updates)
         out.append(
             _PartitionPlan(
-                backend=p.backend,
+                dialect=p.dialect,
                 cubes=p.cubes,
                 sub_query=new_sub_q,
                 measure_columns=p.measure_columns,
@@ -1150,8 +1150,8 @@ def _build_partition_sub_query_raw_rows(
     bridges: list[_Bridge],
 ) -> _RawRowPartitionPlan:
     partition_names = {c.name for c in partition_cubes}
-    backend = partition_cubes[0].backend
-    is_primary = backend is primary_partition
+    dialect = partition_cubes[0].dialect
+    is_primary = dialect is primary_partition
     raw_measure_columns: dict[str, tuple[str, str]] = {}
     ratio_measure_columns: dict[str, tuple[str, str, str, str]] = {}
     synthetic_dims: dict[str, list[Dimension]] = {}
@@ -1270,7 +1270,7 @@ def _build_partition_sub_query_raw_rows(
         ungrouped=True,
     )
     return _RawRowPartitionPlan(
-        backend=backend,
+        dialect=dialect,
         cubes=partition_cubes,
         sub_query=sub_query,
         raw_measure_columns=raw_measure_columns,
@@ -1294,10 +1294,10 @@ def _emit_merge_sql_raw_rows(
     *,
     cross_partition_clauses: _Cnf | None = None,
 ) -> tuple[str, MergeSpec]:
-    by_backend: dict[Dialect, tuple[int, _RawRowPartitionPlan]] = {
-        p.backend: (i, p) for i, p in enumerate(partitions)
+    by_dialect: dict[Dialect, tuple[int, _RawRowPartitionPlan]] = {
+        p.dialect: (i, p) for i, p in enumerate(partitions)
     }
-    primary_idx, _ = by_backend[primary_partition]
+    primary_idx, _ = by_dialect[primary_partition]
 
     def frag_alias(idx: int) -> str:
         return f"f{idx}"
@@ -1650,7 +1650,7 @@ def compile_federated_query(
     touched = _touched(q, catalog)
     if not touched:
         raise FederationError("Empty query.", reason="empty")
-    backends_seen = {c.backend for c in touched}
+    backends_seen = {c.dialect for c in touched}
 
     if len(backends_seen) == 1:
         c = compile_query(
@@ -1700,12 +1700,12 @@ def compile_federated_query(
         )
 
     if q.measures:
-        primary_partition = _resolve_field_to_cube(q.measures[0], catalog).backend
+        primary_partition = _resolve_field_to_cube(q.measures[0], catalog).dialect
         for ref in q.measures[1:]:
-            if _resolve_field_to_cube(ref, catalog).backend is not primary_partition:
+            if _resolve_field_to_cube(ref, catalog).dialect is not primary_partition:
                 raise FederationError("Measures span backends.", reason="measures_span_backends")
     else:
-        primary_partition = touched[0].backend
+        primary_partition = touched[0].dialect
 
     bridges = _find_bridges(touched, catalog)
     if not bridges:
@@ -1713,7 +1713,7 @@ def compile_federated_query(
 
     grouped: dict[Dialect, list[Cube]] = {}
     for cube in touched:
-        grouped.setdefault(cube.backend, []).append(cube)
+        grouped.setdefault(cube.dialect, []).append(cube)
     backend_order = [primary_partition] + [b for b in grouped if b is not primary_partition]
 
     if mode == "raw_rows":

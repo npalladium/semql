@@ -29,12 +29,12 @@ pip install duckdb               # DuckDB
 
 ```python
 import duckdb
-from semql import Backend, Catalog, Cube, Dimension, Measure, TimeDimension
+from semql import Dialect, Catalog, Cube, Dimension, Measure, TimeDimension
 from semql_validate_db import validate_against_db
 
 orders = Cube(
     name="orders",
-    backend=Backend.DUCKDB,
+    dialect=Dialect.DUCKDB,
     table="orders",
     alias="o",
     measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],

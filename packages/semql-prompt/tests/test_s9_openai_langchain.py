@@ -31,7 +31,7 @@ from semql_prompt import render_tool_description, to_langchain_tools, to_openai_
 def _cube(name: str = "orders", required_roles: list[str] | None = None) -> Cube:
     return Cube(
         name=name,
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table=f"public.{name}",
         alias=name[:2],
         description=f"The {name} cube.",

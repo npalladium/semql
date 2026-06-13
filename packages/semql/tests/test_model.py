@@ -28,7 +28,7 @@ from semql.model import (
 def test_field_names_collects_all_kinds() -> None:
     cube = Cube(
         name="c",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="t",
         alias="a",
         measures=[Measure(name="m1", sql="x", agg="sum")],
@@ -39,7 +39,7 @@ def test_field_names_collects_all_kinds() -> None:
 
 
 def test_field_names_empty_cube_returns_empty_set() -> None:
-    cube = Cube(name="c", backend=Dialect.POSTGRES, table="t", alias="a")
+    cube = Cube(name="c", dialect=Dialect.POSTGRES, table="t", alias="a")
     assert cube.field_names() == set()
 
 
@@ -48,7 +48,7 @@ def test_field_names_dedupes_implicitly() -> None:
     name collisions the compiler later prefixes with the cube name."""
     cube = Cube(
         name="c",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="t",
         alias="a",
         measures=[Measure(name="count", sql="*", agg="count")],
@@ -76,7 +76,7 @@ def test_cube_rejects_unknown_chart_type() -> None:
     with pytest.raises(ValidationError):
         Cube(
             name="c",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="t",
             alias="a",
             default_chart_type="treemap",  # type: ignore[arg-type]
@@ -85,7 +85,7 @@ def test_cube_rejects_unknown_chart_type() -> None:
 
 def test_cube_rejects_unknown_backend() -> None:
     with pytest.raises(ValidationError):
-        Cube(name="c", backend="elasticsearch", table="t", alias="a")  # type: ignore[arg-type]
+        Cube(name="c", dialect="elasticsearch", table="t", alias="a")  # type: ignore[arg-type]
 
 
 def test_join_rejects_unknown_relationship() -> None:
@@ -125,7 +125,7 @@ def test_frozen_models_reject_field_mutation(instance: object) -> None:
 def test_cube_is_not_frozen() -> None:
     """Cube is intentionally mutable so callers can build it up
     incrementally. Pin that decision so a future refactor surfaces."""
-    cube = Cube(name="c", backend=Dialect.POSTGRES, table="t", alias="a")
+    cube = Cube(name="c", dialect=Dialect.POSTGRES, table="t", alias="a")
     cube.description = "set later"
     assert cube.description == "set later"
 
@@ -136,7 +136,7 @@ def test_cube_is_not_frozen() -> None:
 
 
 def test_cube_defaults() -> None:
-    cube = Cube(name="c", backend=Dialect.POSTGRES, table="t", alias="a")
+    cube = Cube(name="c", dialect=Dialect.POSTGRES, table="t", alias="a")
     assert cube.measures == []
     assert cube.dimensions == []
     assert cube.time_dimensions == []
@@ -179,8 +179,8 @@ def test_separate_cubes_dont_share_default_lists() -> None:
     """Mutable defaults must be per-instance, not shared. Pydantic v2
     handles this correctly by default; pin the invariant so a refactor
     doesn't smear state across catalog cubes."""
-    a = Cube(name="a", backend=Dialect.POSTGRES, table="t", alias="a")
-    b = Cube(name="b", backend=Dialect.POSTGRES, table="t", alias="b")
+    a = Cube(name="a", dialect=Dialect.POSTGRES, table="t", alias="a")
+    b = Cube(name="b", dialect=Dialect.POSTGRES, table="t", alias="b")
     assert a.measures is not b.measures
     assert a.dimensions is not b.dimensions
     assert a.required_filters is not b.required_filters

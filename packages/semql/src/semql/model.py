@@ -694,7 +694,7 @@ class PartitionedScan(BaseModel):
 
 class Cube(BaseModel):
     name: str
-    backend: Dialect
+    dialect: Dialect
     # Shorthand for a plain-table source: ``Cube(table="schema.t", ...)``
     # is equivalent to ``Cube(source=PhysicalTable(table="schema.t"), ...)``.
     # Exactly one of ``table`` / ``source`` must be specified; mixing a

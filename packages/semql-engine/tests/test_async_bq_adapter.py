@@ -287,7 +287,7 @@ def test_async_bq_adapter_runs_through_async_engine_via_duckdb_stand_in() -> Non
 
     cube = Cube(
         name="orders",
-        backend=Dialect.BIGQUERY,
+        dialect=Dialect.BIGQUERY,
         table="orders",
         alias="o",
         primary_key="id",

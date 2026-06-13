@@ -35,7 +35,7 @@ def _run[T](coro: Awaitable[T]) -> T:
 def _orders_catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         description="Order lines.",
@@ -105,8 +105,8 @@ def test_query_semantic_returns_compiled_shape() -> None:
     assert "params" in out
     assert "columns" in out
     assert "column_meta" in out
-    assert "backend" in out
-    assert out["backend"] == "postgres"
+    assert "dialect" in out
+    assert out["dialect"] == "postgres"
     assert "SUM" in out["sql"].upper()
     assert out["columns"] == ["region", "revenue"]
     # column_meta lines up 1:1 with columns and carries kind+unit info
@@ -227,7 +227,7 @@ def test_catalog_prompt_returns_planner_fragment() -> None:
 def test_catalog_prompt_respects_only_exposed_flag() -> None:
     hidden = Cube(
         name="internal",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="internal",
         alias="i",
         expose_in_prompt=False,
@@ -257,7 +257,7 @@ def test_query_semantic_accepts_context_kwarg() -> None:
     substitution) needs a way to reach the server side."""
     cube = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="{schema}.orders",
         alias="o",
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
@@ -359,7 +359,7 @@ def test_query_execute_returns_rows_plus_envelope() -> None:
     assert "SUM" in calls[0][0].upper()
     # Response envelope.
     assert out["columns"] == ["region", "revenue"]
-    assert out["backend"] == "postgres"
+    assert out["dialect"] == "postgres"
     assert out["rows"] == [
         {"region": "us", "revenue": 1000},
         {"region": "eu", "revenue": 700},

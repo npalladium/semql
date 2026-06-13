@@ -12,11 +12,11 @@ the heuristic guesses.
 
 ```python
 import duckdb
-from semql.model import Backend
+from semql.model import Dialect
 from semql_introspect import introspect_to_python
 
 con = duckdb.connect("warehouse.db")
-print(introspect_to_python(con, backend=Backend.DUCKDB, schema="main"))
+print(introspect_to_python(con, dialect=Dialect.DUCKDB, schema="main"))
 ```
 
 Or via CLI:

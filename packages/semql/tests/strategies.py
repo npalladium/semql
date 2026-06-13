@@ -199,7 +199,7 @@ def random_cube(
     *,
     alias: str | None = None,
     name: str | None = None,
-    backend: Dialect = Dialect.POSTGRES,
+    dialect: Dialect = Dialect.POSTGRES,
 ) -> Cube:
     """A single-backend cube with realistic names. SQL fragments use
     ``{alias}.{field}`` so they always parse; the join key columns
@@ -247,7 +247,7 @@ def random_cube(
 
     return Cube(
         name=cube_name,
-        backend=backend,
+        dialect=dialect,
         table=table,
         alias=a,
         measures=measures,
@@ -261,12 +261,12 @@ def random_catalog(draw: st.DrawFn, features: frozenset[str] = FEATURES) -> Cata
     """A tree-shaped catalog (one backend). Edges are FK-on-child
     (``{child}.p<i> = {parent}.id``); relationships bias to ``many_to_one``
     so most queries don't trip the fan-out guard."""
-    backend = draw(st.sampled_from(_DIALECT_BACKENDS))
+    dialect = draw(st.sampled_from(_DIALECT_BACKENDS))
     n_cubes = draw(st.integers(1, 4)) if "joins" in features else 1
     names = draw(st.lists(identifier, min_size=n_cubes, max_size=n_cubes, unique=True))
     cubes: list[Cube] = []
     for i in range(n_cubes):
-        cube = draw(random_cube(features, alias=_ALIASES[i], name=names[i], backend=backend))
+        cube = draw(random_cube(features, alias=_ALIASES[i], name=names[i], dialect=dialect))
         cubes.append(cube)
 
     if "joins" in features and n_cubes > 1:
@@ -355,7 +355,7 @@ def _bool_expr(leaves: st.SearchStrategy[Filter]) -> st.SearchStrategy[object]:
 @st.composite
 def random_query(draw: st.DrawFn, catalog: Catalog, features: frozenset[str]) -> SemanticQuery:
     cubes = list(catalog.as_dict().values())
-    cubes = [c for c in cubes if c.backend is not Dialect.META]
+    cubes = [c for c in cubes if c.dialect is not Dialect.META]
     m_refs = [f"{c.name}.{m.name}" for c in cubes for m in c.measures]
     string_dims = [f"{c.name}.{d.name}" for c in cubes for d in c.dimensions if d.type == "string"]
     numeric_dims = [f"{c.name}.{d.name}" for c in cubes for d in c.dimensions if d.type == "number"]
@@ -438,7 +438,7 @@ def broken_pair(draw: st.DrawFn) -> tuple[Catalog, SemanticQuery, str]:
     """A valid pair with exactly one breakage applied. Returns
     ``(catalog, broken_query, breakage_label)``."""
     catalog, q = draw(catalog_and_query())
-    cubes = [c for c in catalog.as_dict().values() if c.backend is not Dialect.META]
+    cubes = [c for c in catalog.as_dict().values() if c.dialect is not Dialect.META]
     a_cube = cubes[0]
     breakage = draw(st.sampled_from(["unknown_measure", "unknown_dimension", "filter_on_measure"]))
 

@@ -98,7 +98,7 @@ def test_catalog_prompt_accepts_current_date_kwarg() -> None:
         [
             Cube(
                 name="orders",
-                backend=Dialect.POSTGRES,
+                dialect=Dialect.POSTGRES,
                 table="public.orders",
                 alias="o",
                 measures=[Measure(name="cnt", sql="*", agg="count")],
@@ -116,7 +116,7 @@ def test_catalog_prompt_no_date_unchanged() -> None:
         [
             Cube(
                 name="orders",
-                backend=Dialect.POSTGRES,
+                dialect=Dialect.POSTGRES,
                 table="public.orders",
                 alias="o",
                 measures=[Measure(name="cnt", sql="*", agg="count")],

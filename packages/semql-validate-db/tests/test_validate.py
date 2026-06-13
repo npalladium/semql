@@ -32,7 +32,7 @@ def conn() -> Generator[duckdb.DuckDBPyConnection, None, None]:
 def _orders_cube() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.DUCKDB,
+        dialect=Dialect.DUCKDB,
         table="orders",
         alias="o",
         measures=[
@@ -51,7 +51,7 @@ def _orders_cube() -> Cube:
 def _customers_cube() -> Cube:
     return Cube(
         name="customers",
-        backend=Dialect.DUCKDB,
+        dialect=Dialect.DUCKDB,
         table="customers",
         alias="c",
         primary_key="id",

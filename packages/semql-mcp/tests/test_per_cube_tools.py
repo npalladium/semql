@@ -36,7 +36,7 @@ def _run[T](coro: Awaitable[T]) -> T:
 def _cat() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         description="One row per order; revenue/count grouped by region.",
@@ -52,7 +52,7 @@ def _cat() -> Catalog:
     )
     hidden = Cube(
         name="internal_only",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="internal",
         alias="i",
         expose_in_prompt=False,
@@ -191,7 +191,7 @@ def test_query_cube_compiles_with_prefixed_names() -> None:
     out = _run(call())
     assert "SUM" in out["sql"].upper()
     assert out["columns"] == ["region", "revenue"]
-    assert out["backend"] == "postgres"
+    assert out["dialect"] == "postgres"
 
 
 def test_query_cube_threads_time_window() -> None:

@@ -739,7 +739,7 @@ def _render_cube(
     # Deprecated cubes are filtered out of the prompt entirely by the
     # caller (``render_catalog_block``); they don't appear here.
     stability_tag = " `[beta]`" if cube.stability == "beta" else ""
-    header = f"### {cube.name} ({cube.backend.value}){_human(cube.display_name)}{stability_tag}"
+    header = f"### {cube.name} ({cube.dialect.value}){_human(cube.display_name)}{stability_tag}"
     out: list[str] = [header]
     if cube.description:
         out.append(cube.description)
@@ -1118,7 +1118,7 @@ def build_router_prompt_fragment(
             blurb = cube.description.split(".")[0] if cube.description else ""
             blurb = f" — {blurb}." if blurb else "."
             human = _human(cube.display_name)
-            topics.append(f"  - `{cube.name}` ({cube.backend.value}){human}{blurb}")
+            topics.append(f"  - `{cube.name}` ({cube.dialect.value}){human}{blurb}")
         parts.append("\n".join(topics))
 
         if views:

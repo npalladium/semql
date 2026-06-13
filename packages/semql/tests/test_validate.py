@@ -24,7 +24,7 @@ from semql.validate import ValidationError, validate
 def _cat() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -46,7 +46,7 @@ def _cat() -> Catalog:
     )
     restricted = Cube(
         name="restricted",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="restricted",
         alias="r",
         expose_in_prompt=False,

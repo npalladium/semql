@@ -52,7 +52,7 @@ from semql import (
 
 orders = Cube(
     name="orders",
-    backend=Dialect.POSTGRES,
+    dialect=Dialect.POSTGRES,
     table="orders",
     alias="o",
     measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],

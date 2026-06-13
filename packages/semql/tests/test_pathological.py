@@ -37,7 +37,7 @@ from semql import (
 def _orders() -> Cube:
     return Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[
@@ -205,7 +205,7 @@ def test_duplicate_cube_names_refused_at_construction() -> None:
 def test_cubes_sharing_an_alias_refused_when_joined() -> None:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -214,7 +214,7 @@ def test_cubes_sharing_an_alias_refused_when_joined() -> None:
     )
     customers = Cube(
         name="customers",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="customers",
         alias="o",  # collision
         dimensions=[Dimension(name="name", sql="{o}.name", type="string")],
@@ -228,7 +228,7 @@ def test_cubes_sharing_an_alias_refused_when_joined() -> None:
 def _fanout_catalog() -> Catalog:
     orders = Cube(
         name="orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="orders",
         alias="o",
         measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
@@ -237,7 +237,7 @@ def _fanout_catalog() -> Catalog:
     )
     line_items = Cube(
         name="line_items",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         table="line_items",
         alias="li",
         measures=[Measure(name="qty", sql="{li}.qty", agg="sum")],

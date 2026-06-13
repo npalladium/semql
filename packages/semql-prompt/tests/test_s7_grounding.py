@@ -28,7 +28,7 @@ from semql_prompt import planner_prompt, prompt_hash
 
 def _cube(name: str = "orders", **kwargs: Any) -> Cube:  # noqa: ANN401 — test factory
     defaults: dict[str, Any] = {
-        "backend": Dialect.POSTGRES,
+        "dialect": Dialect.POSTGRES,
         "table": f"public.{name}",
         "alias": name[0],
         "measures": [Measure(name="cnt", sql="*", agg="count")],

@@ -88,14 +88,14 @@ def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
         rows = [
             (
                 quote_literal(c.name),
-                quote_literal(c.backend.value),
+                quote_literal(c.dialect.value),
                 _bool(c.expose_in_prompt),
                 quote_literal(c.description),
                 quote_literal(c.alias),
             )
             for c in catalog.values()
         ]
-        return _rows_to_values(rows, ["name", "backend", "exposed", "description", "alias"])
+        return _rows_to_values(rows, ["name", "dialect", "exposed", "description", "alias"])
 
     if cube_name == "catalog_measures":
         meas_rows: list[tuple[str, ...]] = [
@@ -155,7 +155,7 @@ def build_meta_values(cube_name: str, catalog: dict[str, Cube]) -> str:
 
 CATALOG_CUBES = Cube(
     name="catalog_cubes",
-    backend=Dialect.META,
+    dialect=Dialect.META,
     table="catalog_cubes",
     alias="cc",
     expose_in_prompt=False,
@@ -163,7 +163,7 @@ CATALOG_CUBES = Cube(
     measures=[Measure(name="count", sql="*", agg="count", unit="count")],
     dimensions=[
         Dimension(name="name", sql="{cc}.name", type="string"),
-        Dimension(name="backend", sql="{cc}.backend", type="string"),
+        Dimension(name="dialect", sql="{cc}.dialect", type="string"),
         Dimension(name="exposed", sql="{cc}.exposed", type="bool"),
         Dimension(name="description", sql="{cc}.description", type="string"),
         Dimension(name="alias", sql="{cc}.alias", type="string"),
@@ -173,7 +173,7 @@ CATALOG_CUBES = Cube(
 
 CATALOG_MEASURES = Cube(
     name="catalog_measures",
-    backend=Dialect.META,
+    dialect=Dialect.META,
     table="catalog_measures",
     alias="cm",
     expose_in_prompt=False,
@@ -192,7 +192,7 @@ CATALOG_MEASURES = Cube(
 
 CATALOG_DIMENSIONS = Cube(
     name="catalog_dimensions",
-    backend=Dialect.META,
+    dialect=Dialect.META,
     table="catalog_dimensions",
     alias="cd",
     expose_in_prompt=False,
@@ -277,7 +277,7 @@ def iter_cubes(
     disables authorisation entirely (today's default).
     """
     for cube in _iter_all_cubes(catalog):
-        if not include_meta and cube.backend is Dialect.META:
+        if not include_meta and cube.dialect is Dialect.META:
             continue
         if only_exposed and not cube.expose_in_prompt:
             continue

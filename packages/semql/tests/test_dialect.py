@@ -20,7 +20,7 @@ from sqlglot import exp
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected"),
+    ("dialect", "expected"),
     [
         (Dialect.POSTGRES, "postgres"),
         (Dialect.CLICKHOUSE, "clickhouse"),
@@ -32,8 +32,8 @@ from sqlglot import exp
         (Dialect.META, "postgres"),
     ],
 )
-def test_dialect_for_returns_canonical_string(backend: Dialect, expected: str) -> None:
-    assert dialect_for(backend) == expected
+def test_dialect_for_returns_canonical_string(dialect: Dialect, expected: str) -> None:
+    assert dialect_for(dialect) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def _make_test_cubes() -> list[Cube]:
     return [
         Cube(
             name="orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             table="orders",
             alias="o",
             measures=[
@@ -107,7 +107,7 @@ def _make_test_cubes() -> list[Cube]:
         ),
         Cube(
             name="sessions",
-            backend=Dialect.CLICKHOUSE,
+            dialect=Dialect.CLICKHOUSE,
             table="sessions",
             alias="s",
             measures=[
@@ -124,7 +124,7 @@ def test_catalog_fragments_round_trip_through_sqlglot(cube: Cube) -> None:
     under the cube's declared backend. Failures here mean a future
     ``compile_query`` switch onto the sqlglot AST path can't form the
     same SQL we emit today."""
-    dialect = dialect_for(cube.backend)
+    dialect = dialect_for(cube.dialect)
     fragments = (
         [d.sql for d in cube.dimensions]
         + [m.sql for m in cube.measures if m.sql != "*"]

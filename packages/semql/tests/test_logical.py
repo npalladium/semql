@@ -48,7 +48,7 @@ def _orders_catalog() -> dict[str, Cube]:
             name="orders",
             alias="o",
             table="prod.orders",
-            backend=Dialect.POSTGRES,
+            dialect=Dialect.POSTGRES,
             dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
             time_dimensions=[
                 TimeDimension(
@@ -222,7 +222,7 @@ def test_to_logical_plan_simple() -> None:
         name="orders",
         alias="orders",
         table="raw_orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="id", sql="id", type="string")],
         measures=[Measure(name="revenue", sql="amount", agg="sum")],
     )
@@ -267,7 +267,7 @@ def test_compile_query_does_not_depend_on_partial_logical_plan(
         name="orders",
         alias="orders",
         table="raw_orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="id", sql="id", type="string")],
         measures=[Measure(name="revenue", sql="amount", agg="sum")],
     )
@@ -293,7 +293,7 @@ def test_compile_query_lowers_via_logical_plan(
         name="orders",
         alias="orders",
         table="raw_orders",
-        backend=Dialect.POSTGRES,
+        dialect=Dialect.POSTGRES,
         dimensions=[Dimension(name="id", sql="id", type="string")],
         measures=[Measure(name="revenue", sql="amount", agg="sum")],
     )
