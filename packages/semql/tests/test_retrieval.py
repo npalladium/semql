@@ -141,6 +141,33 @@ def test_bm25_respects_k_cap(cubes: list[Cube]) -> None:
     assert len(r.top_k("orders sessions payments", k=2)) <= 2
 
 
+def test_bm25_close_releases_connection(cubes: list[Cube]) -> None:
+    """close() shuts the in-memory FTS5 connection; querying after is a
+    clear error rather than a use-after-free against a stale handle."""
+    import sqlite3
+
+    r = SQLiteBM25Retriever.from_cubes(cubes)
+    r.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        r.top_k("orders", k=1)
+    # The underlying connection is actually closed (not just the flag).
+    with pytest.raises(sqlite3.ProgrammingError):
+        r._conn.execute("SELECT 1")  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
+def test_bm25_close_is_idempotent(cubes: list[Cube]) -> None:
+    r = SQLiteBM25Retriever.from_cubes(cubes)
+    r.close()
+    r.close()  # must not raise
+
+
+def test_bm25_context_manager_closes_on_exit(cubes: list[Cube]) -> None:
+    with SQLiteBM25Retriever.from_cubes(cubes) as r:
+        assert r.top_k("orders", k=1) is not None
+    with pytest.raises(RuntimeError, match="closed"):
+        r.top_k("orders", k=1)
+
+
 # ---------------------------------------------------------------------------
 # NumpyCosineRetriever — uses a deterministic toy embedder
 # ---------------------------------------------------------------------------

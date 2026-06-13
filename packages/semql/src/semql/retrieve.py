@@ -33,10 +33,12 @@ store in via the ``Retriever`` Protocol.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
 from semql.model import Cube, GlossaryEntry
@@ -161,6 +163,7 @@ class SQLiteBM25Retriever:
     def __init__(self, docs: list[_Doc]) -> None:
         # In-memory connection — never persisted. ``check_same_thread``
         # is fine because retrievers are read-only after construction.
+        self._closed = False
         self._docs = docs
         self._conn = sqlite3.connect(":memory:")
         self._conn.execute(
@@ -199,7 +202,36 @@ class SQLiteBM25Retriever:
         safe = ['"' + t.replace('"', "") + '"' for t in tokens]
         return " OR ".join(safe)
 
+    def close(self) -> None:
+        """Release the in-memory SQLite connection. Idempotent — safe to
+        call more than once. After close the retriever can't serve
+        queries; build a fresh one (retrievers are cheap to construct)."""
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
+    def __enter__(self) -> SQLiteBM25Retriever:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Safety net for callers that neither close() nor use the context
+        # manager — without it the FTS5 connection leaks until GC (and on
+        # some interpreters not even then). Suppress everything: __del__
+        # must never raise, and the connection may already be gone.
+        with contextlib.suppress(Exception):
+            self.close()
+
     def top_k(self, user_query: str, k: int) -> list[tuple[str, float]]:
+        if self._closed:
+            raise RuntimeError("SQLiteBM25Retriever is closed; build a new one.")
         match_expr = self._escape(user_query)
         if not match_expr:
             return []
