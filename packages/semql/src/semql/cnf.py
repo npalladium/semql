@@ -62,6 +62,12 @@ def _to_cnf(node: _Literal) -> _Literal:
         #    converts ``OR(AND, AND, ...)`` into ``AND(OR, OR, ...)``.
         if node.op == "or":
             clauses = _distribute_or_over_and(children)
+            # Distribution can emit identical clauses — e.g. ``a OR b OR (a
+            # AND b)`` distributes to ``(a OR b) AND (a OR b)``. Dedup them
+            # so the result is in fully-reduced CNF in a single pass (i.e.
+            # ``to_cnf`` is idempotent); otherwise the redundant conjunct
+            # would survive into the emitted ``WHERE``.
+            clauses = _flatten_and_dedup("and", clauses)
             return _rebuild("and", clauses)
         return _rebuild("and", children)
 
@@ -116,13 +122,12 @@ def _distribute_or_over_and(children: list[_Literal]) -> list[_Literal]:
         return []
     out: list[_Literal] = []
     for combo in _cartesian_product(child_literals):
-        seen: set[str] = set()
-        unique: list[_Literal] = []
-        for lit in combo:
-            key = _key(lit)
-            if key not in seen:
-                seen.add(key)
-                unique.append(lit)
+        # A combo element may itself be an OR (a non-AND child that was
+        # already an OR clause). Flatten those up and dedup so the clause is
+        # a flat OR-of-literals — OR is associative, so ``a OR (a OR b)``
+        # collapses to ``a OR b`` rather than nesting. Without this the first
+        # pass leaves a nested OR that only a second to_cnf would flatten.
+        unique = _flatten_and_dedup("or", list(combo))
         if len(unique) == 1:
             out.append(unique[0])
         else:
