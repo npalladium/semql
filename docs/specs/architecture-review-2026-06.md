@@ -149,8 +149,11 @@ review, the rest should be confirmed with a failing test before fixing
 10. **Smaller**: no cube-alias uniqueness validation (duplicate SQL
     aliases possible); `model.py` at 1,543 lines and growing; frozen
     models with list fields aren't actually hashable (fixed only on
-    Lookup); MutableEntity builder contradicts pinned decision D3
-    (resolved: the entities spec drops it); Entity docstring promises
+    Lookup); MutableEntity builder contradicted pinned decision D3
+    (**removed 2026-06-13**: the staged builder class + its test are
+    deleted, so the `MutableEntity` name is now free for the entities
+    spec's read/write subclass; no production code referenced it);
+    Entity docstring promises
     catalog validation that doesn't exist yet (entities spec M1 covers
     it); JWKS/httpx network I/O inside the "no I/O" core package;
     X509Mapper collapses `alice@a.com`/`alice@b.com` to viewer `alice`.
