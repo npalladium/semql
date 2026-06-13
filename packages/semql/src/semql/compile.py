@@ -1218,6 +1218,26 @@ def _check_required_filters(touched: list[Cube], q: SemanticQuery) -> None:
                 )
 
 
+def _check_alias_uniqueness(touched: list[Cube]) -> None:
+    """Refuse a query whose participating cubes share a SQL alias.
+
+    The compiler emits ``FROM a AS <alias> JOIN b AS <alias> ON ...``
+    verbatim; if two distinct cubes joined in one query carry the same
+    ``alias``, every ``{alias}.col`` reference is ambiguous — silently
+    wrong SQL. This fires per query rather than catalog-wide, so variant
+    cubes that share an alias but are never co-queried stay legal."""
+    owner: dict[str, str] = {}
+    for c in touched:
+        prior = owner.get(c.alias)
+        if prior is not None and prior != c.name:
+            raise CompileError(
+                f"Query joins cubes {prior!r} and {c.name!r}, which share "
+                f"SQL alias {c.alias!r} — every {{{c.alias}}} reference would "
+                f"be ambiguous. Give one cube a distinct alias."
+            )
+        owner[c.alias] = c.name
+
+
 def _pick_single_backend(touched: list[Cube]) -> Backend:
     """Single-backend gate. Cross-backend queries route to
     :func:`semql.compile_federated_query` — non-federated compile is
@@ -1331,6 +1351,7 @@ class _CompileEnv:
         _check_viewer_authorization(self.touched, viewer, policy)
         _check_field_visibility(q, catalog, viewer)
         _check_required_filters(self.touched, q)
+        _check_alias_uniqueness(self.touched)
 
         self.backend = _pick_single_backend(self.touched)
         self.left_join_cubes: set[str] = set(q.left_joins)

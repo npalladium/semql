@@ -53,6 +53,53 @@ def test_catalog_rejects_duplicate_cube_names() -> None:
         Catalog([a, b])
 
 
+def test_compile_refuses_query_joining_alias_colliding_cubes() -> None:
+    """Two cubes sharing a SQL alias is a wrong-SQL bug only when they're
+    joined in one query: the compiler emits ``FROM a AS t JOIN b AS t ON
+    ...`` and every ``{t}.col`` is ambiguous. The refusal is per query
+    (not catalog-wide) so variant cubes that share an alias but are never
+    co-queried stay legal."""
+    from semql.errors import CompileError
+
+    orders = Cube(
+        name="orders",
+        backend=Backend.POSTGRES,
+        table="orders",
+        alias="t",
+        primary_key="id",
+        measures=[Measure(name="revenue", sql="{t}.amount", agg="sum", unit="currency")],
+        dimensions=[
+            Dimension(name="id", sql="{t}.id", type="number"),
+            Dimension(name="cust", sql="{t}.cust", type="number", foreign_key="customers"),
+        ],
+    )
+    customers = Cube(
+        name="customers",
+        backend=Backend.POSTGRES,
+        table="customers",
+        alias="t",  # collides with orders
+        primary_key="id",
+        dimensions=[
+            Dimension(name="id", sql="{t}.id", type="number"),
+            Dimension(name="region", sql="{t}.region", type="string"),
+        ],
+    )
+    cat = Catalog([orders, customers])  # construction stays legal
+    with pytest.raises(CompileError, match="share SQL alias"):
+        cat.compile(SemanticQuery(measures=["orders.revenue"], dimensions=["customers.region"]))
+
+
+def test_compile_allows_alias_colliding_cubes_not_co_queried() -> None:
+    """A catalog may hold variant cubes that share an alias (e.g.
+    role-gated alternatives); a query touching only one of them compiles
+    fine — the collision check is scoped to a query's joined cubes."""
+    a = _orders()  # alias "o"
+    b = _customers().model_copy(update={"alias": "o"})  # shares "o", never joined here
+    cat = Catalog([a, b])
+    out = cat.compile(SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]))
+    assert "SUM" in out.sql
+
+
 def test_catalog_rejects_unknown_join_target() -> None:
     orphan = Cube(
         name="orphan",
