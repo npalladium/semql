@@ -128,7 +128,7 @@ StorageType = Literal[
     "uuid",
     "bool",
 ]
-GranularityLiteral = Literal["hour", "day", "week", "month", "quarter", "year"]
+GranularityLiteral = Literal["second", "minute", "hour", "day", "week", "month", "quarter", "year"]
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]
 
@@ -452,6 +452,8 @@ class TimeDimension(BaseField):
     # date (no hour grain, no timezone shift — see DimTypeLiteral).
     type: Literal["time", "date"] = "time"
     granularities: tuple[GranularityLiteral, ...] = (
+        "second",
+        "minute",
         "hour",
         "day",
         "week",
@@ -466,9 +468,10 @@ class TimeDimension(BaseField):
         """A ``date`` time-dimension cannot be truncated below a day.
 
         When the caller doesn't pin ``granularities``, default a date to
-        the day-and-coarser set (the class default carries ``hour``, which
-        is meaningless for a date). When they pin one explicitly, refuse
-        ``hour`` rather than silently dropping it.
+        the day-and-coarser set (the class default carries the sub-day
+        grains ``second`` / ``minute`` / ``hour``, which are meaningless
+        for a date). When they pin one explicitly, refuse any sub-day
+        grain rather than silently dropping it.
 
         ``data`` is the raw pre-validation input (pydantic ``mode="before"``)
         — a ``dict`` for the usual kwargs path, but possibly an already-built
@@ -481,10 +484,12 @@ class TimeDimension(BaseField):
             return fields
         if "granularities" not in fields:
             return {**fields, "granularities": ("day", "week", "month", "quarter", "year")}
-        if "hour" in tuple(fields["granularities"]):
+        sub_day = {"second", "minute", "hour"} & set(fields["granularities"])
+        if sub_day:
             raise ValueError(
-                "a date TimeDimension cannot have 'hour' granularity: a "
-                "calendar date has no time-of-day to truncate."
+                f"a date TimeDimension cannot have sub-day granularity "
+                f"{sorted(sub_day)}: a calendar date has no time-of-day to "
+                "truncate."
             )
         return fields
 

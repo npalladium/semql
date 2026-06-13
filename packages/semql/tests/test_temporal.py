@@ -37,6 +37,8 @@ def test_granularity_literal_includes_quarter_and_year() -> None:
     from typing import get_args
 
     assert set(get_args(GranularityLiteral)) == {
+        "second",
+        "minute",
         "hour",
         "day",
         "week",

@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # it from ``semql.spec`` historically.
 from semql._grounding import validate_keywords, validate_questions
 from semql.instant import parse_instant
+from semql.model import GranularityLiteral
 
 if TYPE_CHECKING:
     # The cycle here is real: ``rewrite.py`` needs ``Filter`` /
@@ -55,7 +56,7 @@ class TimeWindow(BaseModel):
             "Qualified time-dimension name (e.g. 'orders.created_at') the window restricts."
         ),
     )
-    granularity: Literal["hour", "day", "week", "month", "quarter", "year"] | None = Field(
+    granularity: GranularityLiteral | None = Field(
         default=None,
         description="Bucket size for time GROUP BY; required when fill_nulls_with is set.",
     )
@@ -491,7 +492,7 @@ class SemanticQueryDefaults(BaseModel):
     model_config = ConfigDict(frozen=True)
     limit: int | None = None
     time_window: TimeWindow | None = None
-    granularity: Literal["hour", "day", "week", "month", "quarter", "year"] | None = None
+    granularity: GranularityLiteral | None = None
 
 
 def _apply_query_defaults(

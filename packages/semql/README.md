@@ -83,9 +83,10 @@ resolves it (along with `{schema}`-style context placeholders and
   the inner query in `current` / `prior` CTEs joined via `FULL OUTER
   JOIN` and emits `{m}_current` / `{m}_prior` / `{m}_delta` /
   `{m}_pct_change` columns per measure.
-- **Temporal model** — time dimensions group by `hour` / `day` /
-  `week` / `month` / `quarter` / `year`; a `type="date"` time dimension
-  drops sub-day grain and timezone shifts; per-cube `timezone` makes
+- **Temporal model** — time dimensions group by `second` / `minute` /
+  `hour` / `day` / `week` / `month` / `quarter` / `year`; a
+  `type="date"` time dimension drops sub-day grain and timezone shifts;
+  per-cube `timezone` makes
   `date_trunc` tenant-correct and transpiles per dialect (`AT TIME
   ZONE`, `CONVERT_TIMEZONE`, ClickHouse's native arg, …).
 - **Explicit raw SQL** — every hand-written fragment (`Measure.sql`,

@@ -96,6 +96,8 @@ class DialectStrategy(Protocol):
 
 
 _CH_TRUNC: dict[str, str] = {
+    "second": "toStartOfSecond",
+    "minute": "toStartOfMinute",
     "hour": "toStartOfHour",
     "day": "toStartOfDay",
     "week": "toStartOfWeek",
