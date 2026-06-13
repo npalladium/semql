@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import pytest
 from semql.compile import compile_query
-from semql.parse import ParserDecision, parse_sql_statement
+from semql.errors import CompileError
+from semql.parse import ParseError, ParserDecision, parse_sql_statement
 from semql.spec import SemanticQuery
 
 CONTEXT = {"schema": "test_schema"}
@@ -393,3 +394,222 @@ def test_compare_to_prior_period_via_hint() -> None:
     q = out.query
     assert q.compare is not None
     assert q.compare.mode == "previous_period"
+
+
+# ---------------------------------------------------------------------------
+# Invalid queries must FAIL — strict mode raises, lenient mode records a
+# ``parse_errors`` entry. These pin the parser's refusal contract: an
+# unsupported or unresolvable query never compiles to a wrong-but-silent SQL.
+# ---------------------------------------------------------------------------
+
+
+# (label, sql) — each must surface at least one parse_errors entry (lenient)
+# and raise ParseError (strict). Parser-level failures only; compile-level
+# refusals (e.g. required_filters) are exercised separately below.
+INVALID_PARSE_CASES: list[tuple[str, str]] = [
+    ("unknown_cube", "SELECT region FROM nonexistent"),
+    ("unknown_dimension", "SELECT bogus_dim FROM orders"),
+    ("unknown_measure", "SELECT SUM(bogus) FROM orders"),
+    ("unknown_field_in_where", "SELECT region FROM orders WHERE bogus = 1 GROUP BY region"),
+    (
+        "non_joinable_cubes",
+        "SELECT s.app_name, SUM(o.revenue) FROM orders o "
+        "JOIN sessions s ON o.x = s.y GROUP BY s.app_name",
+    ),
+    (
+        "ambiguous_unqualified_column",
+        "SELECT name, SUM(o.revenue) FROM orders o "
+        "JOIN customers c ON o.a = c.b JOIN products p ON o.c = p.d GROUP BY name",
+    ),
+    ("delete_statement", "DELETE FROM orders"),
+    ("update_statement", "UPDATE orders SET region = 'x'"),
+    ("not_a_select", "WITH x AS (SELECT 1) INSERT INTO orders VALUES (1)"),
+    ("unparseable_garbage", "this is not sql at all !!!"),
+    ("subquery_projection", "SELECT (SELECT 1) FROM orders"),
+    (
+        "having_with_or",
+        "SELECT region, COUNT(*) AS n FROM orders GROUP BY region "
+        "HAVING COUNT(*) > 5 OR COUNT(*) < 1",
+    ),
+]
+
+
+_INVALID_SQLS = [c[1] for c in INVALID_PARSE_CASES]
+_INVALID_IDS = [c[0] for c in INVALID_PARSE_CASES]
+
+
+@pytest.mark.parametrize("sql", _INVALID_SQLS, ids=_INVALID_IDS)
+def test_invalid_query_records_parse_error_in_lenient_mode(sql: str, catalog: dict) -> None:
+    """Lenient mode collects ≥1 ``parse_errors`` for an invalid query
+    instead of silently returning an empty/wrong SemanticQuery."""
+    out = parse_sql_statement(sql, catalog=catalog, strict=False)
+    assert out.parse_errors, f"expected a parse error for: {sql}"
+
+
+@pytest.mark.parametrize("sql", _INVALID_SQLS, ids=_INVALID_IDS)
+def test_invalid_query_raises_in_strict_mode(sql: str, catalog: dict) -> None:
+    """Strict mode (the default) raises ``ParseError`` on an invalid query."""
+    with pytest.raises(ParseError):
+        parse_sql_statement(sql, catalog=catalog, strict=True)
+
+
+def test_fan_out_measure_refused_at_compile() -> None:
+    """A ``one_to_many`` JOIN that keeps the many side referenced fans out
+    the parent's additive measure — the compiler refuses rather than emit
+    an over-counting SUM. (Parses fine; the refusal is a compile contract.)"""
+    from semql import Catalog, Cube, Dialect, Dimension, Join, Measure
+
+    orders = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+        joins=[Join(to="order_items", relationship="one_to_many", on="{o}.id = {i}.order_id")],
+    )
+    order_items = Cube(
+        name="order_items",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.order_items",
+        alias="i",
+        dimensions=[Dimension(name="sku", sql="{i}.sku", type="string")],
+    )
+    cat = Catalog([orders, order_items]).as_dict()
+    out = parse_sql_statement(
+        "SELECT i.sku, SUM(o.revenue) AS rev FROM orders o "
+        "JOIN order_items i ON o.id = i.order_id GROUP BY i.sku",
+        catalog=cat,
+    )
+    assert out.parse_errors == ()
+    with pytest.raises(CompileError, match=r"(?i)fan.?out|over-count|duplicat"):
+        compile_query(out.query, cat, context=CONTEXT)
+
+
+def test_required_filter_cube_refused_at_compile(catalog: dict) -> None:
+    """A cube with ``required_filters`` parses cleanly but the compiler
+    refuses when the mandatory filter is absent — the refusal is a
+    compile-time contract, not a parser one."""
+    out = parse_sql_statement("SELECT COUNT(*) FROM restricted", catalog=catalog, strict=True)
+    assert out.parse_errors == ()
+    with pytest.raises(CompileError, match=r"(?i)require|filter"):
+        compile_query(out.query, catalog, context=CONTEXT)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — each pins a bug found by the SQL stress test. Without
+# the fix, the predicate / measure / order key was silently dropped or
+# emitted as wrong SQL (the same class as the ORDER-BY-aggregate bug).
+# ---------------------------------------------------------------------------
+
+
+def test_not_in_is_not_dropped(catalog: dict) -> None:
+    """``NOT IN`` parses as ``exp.Not`` wrapping ``In``; it must become a
+    ``not_in`` filter, not vanish."""
+    out = parse_sql_statement(
+        "SELECT region, SUM(revenue) FROM orders WHERE region NOT IN ('a', 'b') GROUP BY region",
+        catalog=catalog,
+    )
+    assert any(
+        f.dimension == "orders.region" and f.op == "not_in" and f.values == ["a", "b"]
+        for f in out.query.filters
+    ), out.query.filters
+
+
+def test_is_not_null_is_not_dropped(catalog: dict) -> None:
+    """``IS NOT NULL`` parses as ``exp.Not`` wrapping ``Is``; it must
+    become a ``not_null`` filter, not vanish."""
+    out = parse_sql_statement(
+        "SELECT region, SUM(revenue) FROM orders WHERE status IS NOT NULL GROUP BY region",
+        catalog=catalog,
+    )
+    assert any(f.dimension == "orders.status" and f.op == "not_null" for f in out.query.filters), (
+        out.query.filters
+    )
+
+
+def test_not_wrapped_comparison_negates_operator(catalog: dict) -> None:
+    """``NOT (x = y)`` and ``NOT x > y`` flip the operator rather than drop."""
+    out = parse_sql_statement(
+        "SELECT region, SUM(revenue) FROM orders "
+        "WHERE NOT (status = 'paid') AND NOT amount > 100 GROUP BY region",
+        catalog=catalog,
+    )
+    ops = {(f.dimension, f.op) for f in out.query.filters}
+    assert ("orders.status", "neq") in ops, ops
+    assert ("orders.amount", "lte") in ops, ops
+
+
+def test_boolean_literal_becomes_bool_not_string(catalog: dict) -> None:
+    """``WHERE is_paid = true`` yields a Python ``True``, not the string
+    ``'TRUE'`` (which a bool dimension filter would reject)."""
+    out = parse_sql_statement(
+        "SELECT region, SUM(revenue) FROM orders WHERE is_paid = true GROUP BY region",
+        catalog=catalog,
+    )
+    paid = [f for f in out.query.filters if f.dimension == "orders.is_paid"]
+    assert paid and paid[0].values == [True], paid
+    # And it compiles (a bool dimension accepts the bool value).
+    assert "is_paid" in compile_query(out.query, catalog, context=CONTEXT).sql
+
+
+def test_median_measure_is_not_dropped(catalog: dict) -> None:
+    """A ``MEDIAN(...)`` wrapper marks a measure even though sqlglot models
+    it as a dedicated ``exp.Median`` node (not ``Anonymous``)."""
+    # ``orders`` in the shared fixture has no median measure, so use a
+    # local catalog with one — the point is the parser/aggregate plumbing.
+    from semql import Catalog, Cube, Dialect, Dimension, Measure
+
+    cube = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="med", sql="{o}.amount", agg="median", non_additive=True)],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    )
+    cat = Catalog([cube]).as_dict()
+    out = parse_sql_statement("SELECT region, MEDIAN(med) FROM orders GROUP BY region", catalog=cat)
+    assert "orders.med" in out.query.measures
+    assert "PERCENTILE_CONT" in compile_query(out.query, cat, context=CONTEXT).sql
+
+
+def test_having_count_star_is_not_dropped(catalog: dict) -> None:
+    """``HAVING COUNT(*) > N`` — the inner ``*`` resolves to the cube's
+    row-count measure rather than dropping the predicate."""
+    out = parse_sql_statement(
+        "SELECT region, COUNT(*) AS n FROM orders GROUP BY region HAVING COUNT(*) >= 10",
+        catalog=catalog,
+    )
+    assert any(f.dimension == "orders.count" and f.op == "gte" for f in out.query.having), (
+        out.query.having
+    )
+    assert "HAVING COUNT(*)" in compile_query(out.query, catalog, context=CONTEXT).sql
+
+
+def test_order_by_unprojected_measure_emits_aggregate(catalog: dict) -> None:
+    """Ordering by a measure NOT in the SELECT must emit its aggregate
+    (``SUM(...)``), never the raw column — a GROUP BY query rejects the
+    bare column as NOT_AN_AGGREGATE."""
+    out = parse_sql_statement(
+        "SELECT region FROM orders GROUP BY region ORDER BY SUM(revenue) DESC",
+        catalog=catalog,
+    )
+    sql = compile_query(out.query, catalog, context=CONTEXT).sql
+    assert "ORDER BY SUM(" in sql, sql
+
+
+def test_compare_with_measure_alias_compiles_consistently(catalog: dict) -> None:
+    """COMPARE-mode CTEs project canonical column names; a SELECT alias
+    must not leave the outer ``current.<measure>`` refs dangling."""
+    out = parse_sql_statement(
+        "SELECT /*+ COMPARE prior_period */ region, SUM(revenue) AS rev FROM orders "
+        "WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY region",
+        catalog=catalog,
+    )
+    sql = compile_query(out.query, catalog, context=CONTEXT).sql
+    # Outer references the canonical measure column; the CTE projects it.
+    assert "current.revenue" in sql
+    assert "SUM(o.amount) AS revenue" in sql
+    # The user alias is NOT applied to the CTE column (would dangle).
+    assert "AS rev " not in sql and not sql.endswith("AS rev")

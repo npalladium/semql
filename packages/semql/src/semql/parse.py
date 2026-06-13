@@ -79,6 +79,23 @@ _AGG_FUNCS = frozenset(
     {"SUM", "COUNT", "AVG", "MIN", "MAX", "COUNT_DISTINCT", "MEDIAN", "PERCENTILE"}
 )
 
+# Logical negation of a filter op, for unwrapping a wrapping ``NOT``.
+# ``contains`` (LIKE) has no negated counterpart in the FilterOp set, so
+# it's intentionally absent — a negated LIKE is left as-is rather than
+# silently inverted to the wrong op.
+_NEGATE_OP: dict[str, str] = {
+    "eq": "neq",
+    "neq": "eq",
+    "gt": "lte",
+    "gte": "lt",
+    "lt": "gte",
+    "lte": "gt",
+    "in": "not_in",
+    "not_in": "in",
+    "is_null": "not_null",
+    "not_null": "is_null",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -171,6 +188,14 @@ def _values_from_sql(node: exp.Expression | list[object] | None) -> list[object]
 
 def _literal_value(node: exp.Expression) -> str | int | float | bool | None:
     """Best-effort scalar conversion from a sqlglot literal."""
+    if isinstance(node, exp.Boolean):
+        # ``WHERE is_paid = true`` — sqlglot models the keyword as a
+        # Boolean node carrying a Python bool, not a Literal. Without this
+        # it stringifies to ``'TRUE'`` and a bool dimension filter rejects
+        # the non-bool value.
+        return bool(node.this)
+    if isinstance(node, exp.Null):
+        return None
     if isinstance(node, exp.Literal):
         v: Any = node.this
         if node.is_string:
@@ -195,16 +220,12 @@ def _agg_func_name(func: exp.Expression) -> str | None:
     """Return the uppercase function name if ``func`` is an aggregate."""
     if isinstance(func, exp.Anonymous):
         return func.name.upper() if func.name else None
-    if isinstance(func, exp.Count):
-        return "COUNT"
-    if isinstance(func, exp.Sum):
-        return "SUM"
-    if isinstance(func, exp.Avg):
-        return "AVG"
-    if isinstance(func, exp.Min):
-        return "MIN"
-    if isinstance(func, exp.Max):
-        return "MAX"
+    if isinstance(func, exp.AggFunc):
+        # Covers every dedicated aggregate node — Sum, Count, Avg, Min,
+        # Max, Median, Stddev, … — not just a hand-listed few. The SQL
+        # function is only a *marker* that the column is a measure; the
+        # catalog measure's ``agg`` decides the rendered aggregate.
+        return func.sql_name().upper()
     return None
 
 
@@ -266,10 +287,21 @@ def _collect_aggregates(expr: exp.Expression) -> list[exp.AggFunc | exp.Anonymou
     that subquery, not the projection being classified."""
     out: list[Any] = []
     for node in expr.walk():
-        if isinstance(node, (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max, exp.Anonymous)):
-            name = _agg_func_name(node)
-            if name in _AGG_FUNCS and not _inside_subquery(node, expr):
-                out.append(node)
+        # ``cast`` works around sqlglot's typing: the ``AggFunc`` base
+        # isn't seen as ``exp.Expression`` by mypy though concrete nodes are.
+        n = cast(exp.Expression, node)
+        if isinstance(node, exp.AggFunc) and not _inside_subquery(n, expr):
+            # Any dedicated aggregate node is a measure marker.
+            out.append(node)
+        elif (
+            isinstance(node, exp.Anonymous)
+            and _agg_func_name(node) in _AGG_FUNCS
+            and not _inside_subquery(n, expr)
+        ):
+            # Functions sqlglot doesn't model (e.g. PERCENTILE) arrive as
+            # Anonymous — gate those on the known-aggregate name set so a
+            # scalar function isn't mistaken for a measure.
+            out.append(node)
     return out
 
 
@@ -539,7 +571,7 @@ def parse_sql_statement(
 
     having_node = ast.args.get("having")
     if having_node is not None:
-        having = _parse_having(having_node, ctx, resolved_refs)
+        having = _parse_having(having_node, ctx, resolved_refs, errors)
 
     order_node = ast.args.get("order")
     if order_node is not None:
@@ -686,12 +718,22 @@ def _classify_predicate(
                 time_dim, tree, flat, _classify_predicate(c, ctx, resolved)
             )
         return time_dim, flat, tree
-    # Plain comparison.
+    # ``NOT (...)`` — sqlglot wraps ``NOT IN`` and ``IS NOT NULL`` as an
+    # ``exp.Not`` around the inner comparison (the ``not`` flag is NOT set
+    # on the In/Is node itself). Unwrap and negate, or the predicate is
+    # silently dropped — see ``_NEGATE_OP``.
+    negate = False
     op_node = pred
+    if isinstance(op_node, exp.Not):
+        op_node = op_node.this
+        negate = True
+        if isinstance(op_node, exp.Paren):
+            op_node = op_node.this
+    # Plain comparison.
     if isinstance(
         op_node, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In, exp.Like, exp.Is)
     ):
-        return _comparison_to_filter(op_node, ctx, resolved)
+        return _comparison_to_filter(op_node, ctx, resolved, negate=negate)
     return None, [], None
 
 
@@ -699,8 +741,13 @@ def _comparison_to_filter(
     op_node: exp.Expression,
     ctx: ResolveCtx,
     resolved: dict[str, str],
+    *,
+    negate: bool = False,
 ) -> tuple[TimeWindow | None, list[Filter], BoolExpr | None]:
-    """Convert a comparison node to a Filter (or zero filters)."""
+    """Convert a comparison node to a Filter (or zero filters).
+
+    ``negate`` flips the op (``in`` → ``not_in``, ``is_null`` →
+    ``not_null``, etc.) when the node came from a wrapping ``NOT``."""
     if isinstance(op_node, exp.Is):
         op_str, values = _unpack_is(op_node)
     else:
@@ -722,14 +769,26 @@ def _comparison_to_filter(
     # HAVING ``SUM(revenue) > 1000`` — the LHS is an aggregate wrapping
     # the measure column. Unwrap it so the filter targets the measure;
     # otherwise the predicate has no column name and is dropped.
-    if isinstance(col_node, (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max, exp.Anonymous)):
+    agg_wrapper: exp.AggFunc | exp.Anonymous | None = None
+    if isinstance(col_node, (exp.AggFunc, exp.Anonymous)):
+        agg_wrapper = col_node
         col_node = col_node.this
-    dim = ctx.resolve(col_node)
+    dim = ctx.resolve(col_node) if col_node is not None else None
+    if dim is None and isinstance(agg_wrapper, exp.Count):
+        # HAVING ``COUNT(*) > N`` — the inner is ``*``, not a column, so
+        # it resolves to the cube's row-count measure, exactly like a
+        # ``SELECT COUNT(*)`` projection. Without this the predicate is
+        # silently dropped.
+        dim = _count_measure_ref(ctx.catalog, ctx)
     if dim is None:
         return None, [], None
     resolved[dim.rsplit(".", 1)[-1]] = dim
     if op_str is None:
         return None, [], None
+    if negate:
+        # A wrapping ``NOT`` flips the op. ``contains`` has no negated
+        # form (no ``not_contains`` in FilterOp), so it's left unchanged.
+        op_str = _NEGATE_OP.get(op_str, op_str)
     return (
         None,
         [
@@ -842,10 +901,20 @@ def _parse_having(
     having_node: exp.Having,
     ctx: ResolveCtx,
     resolved: dict[str, str],
+    errors: list[str],
 ) -> list[Filter]:
     out: list[Filter] = []
     pred = having_node.this
-    if isinstance(pred, (exp.And, exp.Or)):
+    if isinstance(pred, exp.Or) or pred.find(exp.Or) is not None:
+        # ``having`` is an implicit-AND ``list[Filter]`` — it has no OR
+        # representation (unlike WHERE, which gets a BoolExpr tree). Refuse
+        # rather than silently flatten ``a OR b`` into ``a AND b``.
+        errors.append(
+            "HAVING does not support OR — it is an implicit-AND list of "
+            "measure filters. Split the query or move the condition to WHERE."
+        )
+        return out
+    if isinstance(pred, exp.And):
         for c in _bool_children(pred):
             _, fs, _ = _classify_predicate(c, ctx, resolved)
             out.extend(fs)
@@ -878,11 +947,14 @@ def _parse_order(
             if ref is not None:
                 resolved[ref.rsplit(".", 1)[-1]] = ref
                 out.append((ref, direction))
-        elif isinstance(col, (exp.Anonymous, exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)):
+        elif isinstance(col, (exp.AggFunc, exp.Anonymous)):
             # ORDER BY SUM(amount) DESC — strip the aggregate wrapper
             # and resolve the inner column to its measure ref.
             inner = getattr(col, "this", None)
             ref = ctx.resolve(inner) if inner is not None else None
+            if ref is None and isinstance(col, exp.Count):
+                # ORDER BY COUNT(*) — inner is ``*``; use the row-count measure.
+                ref = _count_measure_ref(ctx.catalog, ctx)
             if ref is not None:
                 resolved[ref.rsplit(".", 1)[-1]] = ref
                 out.append((ref, direction))

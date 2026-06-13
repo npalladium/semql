@@ -1,4 +1,7 @@
 # serializer version: 1
+# name: test_sql_fixture_compiles_to_snapshot[SELECT /*+ COMPARE prior_period */ region, SUM(revenue) AS rev FROM orders WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY region]
+  'WITH current AS (SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p0)s AND o.created_at < %(p1)s GROUP BY region), prior AS (SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p2)s AND o.created_at < %(p3)s GROUP BY region) SELECT COALESCE(current.region, prior.region) AS region, current.revenue AS revenue_current, prior.revenue AS revenue_prior, COALESCE(current.revenue, 0) - COALESCE(prior.revenue, 0) AS revenue_delta, CASE WHEN prior.revenue > 0 THEN CAST((current.revenue - prior.revenue) * 100.0 AS DOUBLE PRECISION) / prior.revenue ELSE NULL END AS revenue_pct_change FROM current FULL OUTER JOIN prior ON current.region = prior.region'
+# ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT COUNT(*) FROM orders]
   'SELECT COUNT(*) AS count FROM prod.orders AS o WHERE o.deleted_at IS NULL'
 # ---
@@ -8,17 +11,68 @@
 # name: test_sql_fixture_compiles_to_snapshot[SELECT c.tier, COUNT(*) AS n FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.status = 'paid' GROUP BY c.tier]
   'SELECT c.tier AS tier, COUNT(*) AS n FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id WHERE o.deleted_at IS NULL AND o.status = %(p0)s GROUP BY tier'
 # ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT c.tier, SUM(o.revenue) AS rev FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.tier = 'gold' GROUP BY c.tier ORDER BY rev DESC]
+  'SELECT c.tier AS tier, SUM(o.amount) AS rev FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id WHERE o.deleted_at IS NULL AND c.tier = %(p0)s GROUP BY tier ORDER BY rev DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT c.tier, p.category, SUM(o.revenue) AS rev FROM orders o JOIN customers c ON o.customer_id = c.id JOIN products p ON o.product_id = p.id GROUP BY c.tier, p.category ORDER BY rev DESC]
+  'SELECT c.tier AS tier, p.category AS category, SUM(o.amount) AS rev FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id INNER JOIN prod.products AS p ON o.product_id = p.id WHERE o.deleted_at IS NULL GROUP BY tier, category ORDER BY rev DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT c.tier, p.category, sh.carrier, SUM(o.revenue) AS rev FROM orders o JOIN customers c ON o.customer_id = c.id JOIN products p ON o.product_id = p.id JOIN shipments sh ON o.id = sh.order_id GROUP BY c.tier, p.category, sh.carrier]
+  'SELECT c.tier AS tier, p.category AS category, sh.carrier AS carrier, SUM(o.amount) AS rev FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id INNER JOIN prod.products AS p ON o.product_id = p.id INNER JOIN prod.shipments AS sh ON o.id = sh.order_id WHERE o.deleted_at IS NULL GROUP BY tier, category, carrier'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT p.category, AVG(o.avg_amount) AS a FROM orders o JOIN products p ON o.product_id = p.id GROUP BY p.category]
+  'SELECT p.category AS category, AVG(o.amount) AS a FROM prod.orders AS o INNER JOIN prod.products AS p ON o.product_id = p.id WHERE o.deleted_at IS NULL GROUP BY category'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region AS r, SUM(revenue) AS rev FROM orders GROUP BY region]
+  'SELECT o.region AS r, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region FROM orders GROUP BY region ORDER BY COUNT(*) DESC]
+  'SELECT DISTINCT o.region AS region FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY COUNT(*) DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region FROM orders GROUP BY region ORDER BY MEDIAN(median_amount) DESC]
+  'SELECT DISTINCT o.region AS region FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY o.amount) DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region FROM orders GROUP BY region ORDER BY SUM(revenue) DESC]
+  'SELECT DISTINCT o.region AS region FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY SUM(o.amount) DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, AVG(avg_amount) AS avg_amt FROM orders GROUP BY region]
+  'SELECT o.region AS region, AVG(o.amount) AS avg_amt FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, COUNT(*) AS n FROM orders GROUP BY region HAVING COUNT(*) >= 10]
+  'SELECT o.region AS region, COUNT(*) AS n FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region HAVING COUNT(*) >= %(p0)s'
+# ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, COUNT(*) AS n FROM orders GROUP BY region ORDER BY n DESC]
   'SELECT o.region AS region, COUNT(*) AS n FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY n DESC NULLS LAST'
 # ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, COUNT(unique_customers) AS uniq FROM orders GROUP BY region]
+  'SELECT o.region AS region, COUNT(DISTINCT o.customer_id) AS uniq FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, MEDIAN(median_amount) AS med FROM orders GROUP BY region]
+  'SELECT o.region AS region, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY o.amount) AS med FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, MIN(min_amount), MAX(max_amount) FROM orders GROUP BY region]
+  'SELECT o.region AS region, MIN(o.amount) AS min_amount, MAX(o.amount) AS max_amount FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev FROM orders GROUP BY region HAVING SUM(revenue) > 1000]
   'SELECT o.region AS region, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region HAVING SUM(o.amount) > %(p0)s'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev FROM orders GROUP BY region ORDER BY rev DESC LIMIT 5]
+  'SELECT o.region AS region, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY rev DESC NULLS LAST LIMIT 5'
 # ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev FROM orders GROUP BY region ORDER BY rev DESC]
   'SELECT o.region AS region, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY rev DESC NULLS LAST'
 # ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev FROM orders GROUP BY region]
   'SELECT o.region AS region, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev, COUNT(*) AS n FROM orders GROUP BY region HAVING SUM(revenue) > 1000 AND COUNT(*) > 5]
+  'SELECT o.region AS region, SUM(o.amount) AS rev, COUNT(*) AS n FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region HAVING SUM(o.amount) > %(p0)s AND COUNT(*) > %(p1)s'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev, COUNT(*) AS n, AVG(avg_amount) AS a FROM orders GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS rev, COUNT(*) AS n, AVG(o.amount) AS a FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) AS rev, MIN(min_amount) AS lo FROM orders GROUP BY region ORDER BY rev DESC, lo ASC]
+  'SELECT o.region AS region, SUM(o.amount) AS rev, MIN(o.amount) AS lo FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region ORDER BY rev DESC NULLS LAST, lo ASC'
 # ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders GROUP BY region LIMIT 10 OFFSET 20]
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region LIMIT 10 OFFSET 20'
@@ -35,8 +89,56 @@
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders GROUP BY region]
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
 # ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE NOT (status = 'paid') GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status <> %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE NOT amount > 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount <= %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE amount < 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount < %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE amount <= 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount <= %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE amount > 10 AND amount < 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount > %(p0)s AND o.amount < %(p1)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE amount > 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount > %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE amount >= 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.amount >= %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' AND status = 'paid' GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status = %(p0)s AND o.created_at >= %(p1)s AND o.created_at < %(p2)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.created_at >= %(p0)s AND o.created_at < %(p1)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE is_paid = true GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.is_paid = %(p0)s GROUP BY region'
+# ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE region IN ('EMEA', 'APAC') GROUP BY region]
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.region IN (%(p0)s, %(p1)s) GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE region LIKE 'EM%' GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.region ILIKE %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE region NOT IN ('EMEA', 'APAC') GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND NOT o.region IN (%(p0)s, %(p1)s) GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status != 'paid' GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status <> %(p0)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status = 'paid' AND (region = 'EMEA' OR region = 'APAC') GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status = %(p0)s AND (o.region = %(p1)s OR o.region = %(p2)s) GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status = 'paid' AND amount > 100 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status = %(p0)s AND o.amount > %(p1)s GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status = 'paid' AND region = 'EMEA' AND amount > 5 GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status = %(p0)s AND o.region = %(p1)s AND o.amount > %(p2)s GROUP BY region'
 # ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status = 'paid' GROUP BY region]
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status = %(p0)s GROUP BY region'
@@ -44,6 +146,27 @@
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status = 'paid' OR region = 'EMEA' GROUP BY region]
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND (o.status = %(p0)s OR o.region = %(p1)s) GROUP BY region'
 # ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status IS NOT NULL GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND NOT o.status IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, SUM(revenue) FROM orders WHERE status IS NULL GROUP BY region]
+  'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status IS NULL GROUP BY region'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, status FROM orders]
+  'SELECT DISTINCT o.region AS region, o.status AS status FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region, status'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT region, status, SUM(revenue) AS rev FROM orders GROUP BY region, status ORDER BY rev DESC, region ASC]
+  'SELECT o.region AS region, o.status AS status, SUM(o.amount) AS rev FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region, status ORDER BY rev DESC NULLS LAST, region ASC'
+# ---
 # name: test_sql_fixture_compiles_to_snapshot[SELECT region, status, SUM(revenue) FROM orders GROUP BY region, status]
   'SELECT o.region AS region, o.status AS status, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region, status'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT rg.name, COUNT(*) AS n FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions rg ON c.region_id = rg.id WHERE o.status = 'paid' GROUP BY rg.name]
+  'SELECT rg.name AS name, COUNT(*) AS n FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id INNER JOIN prod.regions AS rg ON c.region_id = rg.id WHERE o.deleted_at IS NULL AND o.status = %(p0)s GROUP BY name'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT rg.name, SUM(o.revenue) AS rev FROM orders o JOIN customers c ON o.customer_id = c.id JOIN regions rg ON c.region_id = rg.id GROUP BY rg.name ORDER BY rev DESC]
+  'SELECT rg.name AS name, SUM(o.amount) AS rev FROM prod.orders AS o INNER JOIN prod.customers AS c ON o.customer_id = c.id INNER JOIN prod.regions AS rg ON c.region_id = rg.id WHERE o.deleted_at IS NULL GROUP BY name ORDER BY rev DESC NULLS LAST'
+# ---
+# name: test_sql_fixture_compiles_to_snapshot[SELECT sh.carrier, SUM(o.revenue) AS rev FROM orders o JOIN shipments sh ON o.id = sh.order_id GROUP BY sh.carrier ORDER BY rev DESC]
+  'SELECT sh.carrier AS carrier, SUM(o.amount) AS rev FROM prod.orders AS o INNER JOIN prod.shipments AS sh ON o.id = sh.order_id WHERE o.deleted_at IS NULL GROUP BY carrier ORDER BY rev DESC NULLS LAST'
 # ---

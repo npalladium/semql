@@ -1909,19 +1909,25 @@ class _CompileEnv:
             )
         return agg
 
-    def build_inner(self, time_range: tuple[str, str]) -> exp.Select:
+    def build_inner(self, time_range: tuple[str, str], *, apply_aliases: bool = True) -> exp.Select:
         """Build the inner aggregating Select.
 
         Filter values bind via ``self.bind`` so they dedupe across the
         current / prior compare-mode CTEs; only the per-CTE time-window
         binds differ.
 
+        ``apply_aliases`` projects output columns under the user's SELECT
+        alias (``SUM(amount) AS rev``). Compare mode passes ``False``: its
+        CTEs must project the *canonical* column names because the outer
+        FULL OUTER JOIN references them as ``<measure>_current`` etc. —
+        aliasing the CTE column would leave the outer refs dangling.
+
         Orchestrates four named stages so each emission concern is a
         named method a reader can navigate to: FROM clause →
         projection → WHERE predicates → GROUP BY."""
         sel = exp.Select()
         sel = self._from_clause_stage(sel)
-        sel = self._projection_stage(sel)
+        sel = self._projection_stage(sel, apply_aliases=apply_aliases)
         sel = self._predicate_stage(sel, time_range)
         sel = self._group_by_stage(sel)
         return sel
@@ -2006,11 +2012,14 @@ class _CompileEnv:
                 out.extend(self.physical_sources_matched.get(cube.name, ()))
         return tuple(out)
 
-    def _projection_stage(self, sel: exp.Select) -> exp.Select:
+    def _projection_stage(self, sel: exp.Select, *, apply_aliases: bool = True) -> exp.Select:
         """Emit the SELECT list. Source: ``self.plan.project.columns`` —
         one ``ColumnRef`` per output column, carrying the resolved
         field object (``Measure`` / ``Dimension`` / ``TimeDimension``)
         and the alias.
+
+        ``apply_aliases=False`` (compare mode) projects canonical column
+        names, ignoring the user's SELECT alias — see ``build_inner``.
 
         The legacy projection-derived slots on the env survive for
         callers (e.g. ``_apply_mask_metadata``) but emission here
@@ -2031,7 +2040,7 @@ class _CompileEnv:
         measure_count = 0
         for col in self.plan.project.columns:
             col_name = col.alias
-            out_name = self.alias_map.get(col_name, col_name)
+            out_name = self.alias_map.get(col_name, col_name) if apply_aliases else col_name
             if col.kind == "dimension":
                 assert col.field is not None and isinstance(col.field, Dimension)
                 expr = self._masked_field_expr(col.field, self.parse(col.field.sql), col_name)
@@ -2327,8 +2336,11 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
     current_range = env.plan.compare.current_range
     prior_range = env.plan.compare.prior_range
 
-    current_inner = env.build_inner(current_range)
-    prior_inner = env.build_inner(prior_range)
+    # CTEs project canonical column names — the outer query references them
+    # as ``<measure>_current`` / ``<measure>_prior`` / …, so a user SELECT
+    # alias on the inner column would leave those outer refs dangling.
+    current_inner = env.build_inner(current_range, apply_aliases=False)
+    prior_inner = env.build_inner(prior_range, apply_aliases=False)
 
     outer = exp.Select()
     outer = outer.with_("current", current_inner)
@@ -2673,13 +2685,21 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
             order_target = exp.column(ref)
         else:
             try:
-                _, fld = _resolve_field(ref, env.catalog)
+                owner_cube, fld = _resolve_field(ref, env.catalog)
             except CompileError as exc:
                 raise CompileError(
                     f"ORDER BY {ref!r}: must reference an output column or "
                     f"a known cube.field. ({exc})"
                 ) from exc
-            order_target = env.parse(fld.sql)
+            if isinstance(fld, Measure):
+                # Ordering by an *unprojected* measure: emit its aggregate
+                # (``SUM(o.amount)``), never the raw inner column. A GROUP BY
+                # query rejects a bare column in ORDER BY with a
+                # NOT_AN_AGGREGATE-class error — the same failure the
+                # projected-measure branch above guards against.
+                order_target = env.build_measure_expr(owner_cube, fld)
+            else:
+                order_target = env.parse(fld.sql)
         select_node = select_node.order_by(
             exp.Ordered(this=order_target, desc=(direction == "desc"))
         )
