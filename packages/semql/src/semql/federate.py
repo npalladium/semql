@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import TYPE_CHECKING, Literal
 
+from semql.cnf import to_cnf as core_to_cnf
 from semql.compile import ColumnMeta, CompiledQuery, compile_query
 from semql.errors import FederationError
 from semql.introspect import resolve_query
@@ -877,36 +878,43 @@ _CnfClause = list[_CnfLiteral]
 _Cnf = list[_CnfClause]
 
 
-def _negate_tree(node: BoolExpr | Filter) -> BoolExpr | Filter:
-    if isinstance(node, Filter):
-        return BoolExpr(op="not", children=[node])
-    if node.op == "not":
-        return node.children[0]
-    new_op: str = "and" if node.op == "or" else "or"
-    return BoolExpr(
-        op=new_op,  # type: ignore[arg-type]
-        children=[_negate_tree(c) for c in node.children],
-    )
+def _literal_to_tuple(lit: BoolExpr | Filter) -> _CnfLiteral:
+    """Map a core-CNF literal to federation's ``(negated, Filter)`` form.
+
+    The core engine emits a literal as either a bare ``Filter`` or a
+    ``BoolExpr(op="not", children=[Filter])`` — the only two literal
+    shapes :func:`semql.cnf.to_cnf` produces."""
+    if isinstance(lit, Filter):
+        return (False, lit)
+    inner = lit.children[0]
+    if lit.op != "not" or not isinstance(inner, Filter):  # pragma: no cover - guard
+        raise FederationError(
+            f"unexpected CNF literal shape: {lit!r}",
+            reason="cnf_internal",
+        )
+    return (True, inner)
+
+
+def _clause_node_to_clause(node: BoolExpr | Filter) -> _CnfClause:
+    """Flatten one top-level AND child (a literal or an OR of literals)
+    into a list of ``(negated, Filter)`` literals."""
+    if isinstance(node, BoolExpr) and node.op == "or":
+        return [_literal_to_tuple(c) for c in node.children]
+    return [_literal_to_tuple(node)]
 
 
 def _to_cnf(node: BoolExpr | Filter) -> _Cnf:
-    if isinstance(node, Filter):
-        return [[(False, node)]]
-    if node.op == "not":
-        inner = node.children[0]
-        if isinstance(inner, Filter):
-            return [[(True, inner)]]
-        return _to_cnf(_negate_tree(inner))
-    if node.op == "and":
-        out: _Cnf = []
-        for child in node.children:
-            out.extend(_to_cnf(child))
-        return out
-    child_cnfs = [_to_cnf(c) for c in node.children]
-    result = child_cnfs[0]
-    for nxt in child_cnfs[1:]:
-        result = [lc + rc for lc in result for rc in nxt]
-    return result
+    """Normalise ``node`` to CNF via the shared :func:`semql.cnf.to_cnf`
+    engine, then flatten its ``AND(OR(...), ...)`` tree into the
+    ``(negated, Filter)`` clause list the router and emitters consume.
+
+    Delegating to the core engine drops a duplicate CNF implementation and
+    gives federation its dedup + idempotence (``a OR a`` → ``a``) for free.
+    """
+    normalised = core_to_cnf(node)
+    if isinstance(normalised, BoolExpr) and normalised.op == "and":
+        return [_clause_node_to_clause(child) for child in normalised.children]
+    return [_clause_node_to_clause(normalised)]
 
 
 def _clause_to_boolexpr(clause: _CnfClause) -> BoolExpr | Filter:
