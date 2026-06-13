@@ -75,7 +75,10 @@ def test_clickhouse_trunc_uses_toStartOf_family() -> None:
     expr = exp.column("ts", table="x")
     assert render(s.trunc("hour", expr), Dialect.CLICKHOUSE) == "toStartOfHour(x.ts)"
     assert render(s.trunc("day", expr), Dialect.CLICKHOUSE) == "toStartOfDay(x.ts)"
-    assert render(s.trunc("week", expr), Dialect.CLICKHOUSE) == "toStartOfWeek(x.ts)"
+    # Default week_start=monday pins the explicit mode arg (1 = Monday),
+    # keeping ClickHouse consistent with the Monday-native date_trunc on
+    # the SQL backends. A bare ``toStartOfWeek(t)`` would default to Sunday.
+    assert render(s.trunc("week", expr), Dialect.CLICKHOUSE) == "toStartOfWeek(x.ts, 1)"
     assert render(s.trunc("month", expr), Dialect.CLICKHOUSE) == "toStartOfMonth(x.ts)"
 
 

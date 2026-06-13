@@ -20,7 +20,7 @@ from semql.backend import (
     SqlResolver,
 )
 from semql.compile import compile_query
-from semql.model import Dialect
+from semql.model import Dialect, WeekStartLiteral
 from sqlglot import exp
 
 
@@ -54,12 +54,16 @@ class RecordingDialect:
         return self.inner.placeholder(name, dim_type)
 
     def trunc(
-        self, granularity: str, e: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        e: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         # Stringify the expression for the recorded call so assertions stay
         # readable. The inner dialect still drives the actual node shape.
         self.trunc_calls.append((granularity, e.sql(dialect="postgres")))
-        return self.inner.trunc(granularity, e, timezone)
+        return self.inner.trunc(granularity, e, timezone, week_start)
 
     def emit_contains(
         self,
@@ -193,7 +197,11 @@ class _FakeSnowflakeDialect:
         return exp.Placeholder(this=name)
 
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         return exp.Anonymous(
             this="DATE_TRUNC",

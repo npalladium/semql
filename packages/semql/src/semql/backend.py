@@ -37,7 +37,7 @@ from sqlglot import exp
 from semql.dialect import dialect_for as sqlglot_dialect_for
 from semql.dialect import placeholder_for
 from semql.introspect import build_meta_values
-from semql.model import Cube, DerivedTable, Dialect, PhysicalTable
+from semql.model import Cube, DerivedTable, Dialect, PhysicalTable, WeekStartLiteral
 
 ParamBinder = Callable[[Any, str], exp.Placeholder]
 """Bind ``(value, dim_type)`` and return an ``exp.Placeholder`` node for it."""
@@ -61,7 +61,11 @@ class DialectStrategy(Protocol):
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder: ...
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression: ...
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
         """Continuous percentile of ``expr`` at quantile ``q`` (0..1).
@@ -105,6 +109,23 @@ _CH_TRUNC: dict[str, str] = {
     "quarter": "toStartOfQuarter",
     "year": "toStartOfYear",
 }
+
+
+def _sunday_from_monday_week(
+    monday_trunc: Callable[[exp.Expression], exp.Expression], expr: exp.Expression
+) -> exp.Expression:
+    """Shift a Monday-native week truncation to a Sunday-start week.
+
+    ``date_trunc('week', …)`` (and ``exp.TimestampTrunc`` over ``WEEK``)
+    is Monday-native on every SQL backend we target. To start the week on
+    Sunday, shift the input forward one day, truncate, then shift the
+    result back one day: a Sunday lands on the following Monday's week
+    (→ itself once shifted back), and a Saturday on the same Monday-week
+    (→ the prior Sunday). ``monday_trunc`` builds the dialect's native
+    Monday week-trunc node for a given expression."""
+    one_day = exp.Interval(this=exp.Literal.number(1), unit=exp.Var(this="DAY"))
+    shifted = exp.Paren(this=exp.Add(this=expr, expression=one_day.copy()))
+    return exp.Sub(this=monday_trunc(shifted), expression=one_day.copy())
 
 
 def _ident(name: str, dialect: str = "postgres") -> exp.Identifier:
@@ -197,7 +218,11 @@ class _StdSqlDialect:
         return placeholder_for(name, dim_type, self.dialect)
 
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         # ``AT TIME ZONE`` is the sqlglot-canonical shift; the renderer
         # transpiles it per dialect — ``AT TIME ZONE`` on Postgres/DuckDB,
@@ -208,6 +233,12 @@ class _StdSqlDialect:
             if timezone is None
             else exp.AtTimeZone(this=expr, zone=exp.Literal.string(timezone))
         )
+
+        def _dt(e: exp.Expression) -> exp.Expression:
+            return exp.Anonymous(this="date_trunc", expressions=[exp.Literal.string("week"), e])
+
+        if granularity == "week" and week_start == "sunday":
+            return _sunday_from_monday_week(_dt, target)
         return exp.Anonymous(
             this="date_trunc",
             expressions=[exp.Literal.string(granularity), target],
@@ -414,16 +445,28 @@ class _TranspilingSqlDialect(_StdSqlDialect):
     and is a separable follow-up — it raises ``NotImplementedError``."""
 
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         target = (
             expr
             if timezone is None
             else exp.AtTimeZone(this=expr, zone=exp.Literal.string(timezone))
         )
-        # exp.TimestampTrunc is sqlglot's canonical truncation node; the
-        # renderer rewrites it to each dialect's native spelling on emit.
-        return exp.TimestampTrunc(this=target, unit=exp.Var(this=granularity.upper()))
+
+        def _tt(e: exp.Expression) -> exp.Expression:
+            # exp.TimestampTrunc is sqlglot's canonical truncation node; the
+            # renderer rewrites it to each dialect's native spelling on emit.
+            return exp.TimestampTrunc(this=e, unit=exp.Var(this=granularity.upper()))
+
+        if granularity == "week" and week_start == "sunday":
+            return _sunday_from_monday_week(
+                lambda e: exp.TimestampTrunc(this=e, unit=exp.Var(this="WEEK")), target
+            )
+        return _tt(target)
 
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
         # The quantile is the *only* argument to PercentileCont; the column
@@ -516,7 +559,11 @@ class ClickHouseDialect:
         return placeholder_for(name, dim_type, Dialect.CLICKHOUSE)
 
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         # ``exp.Anonymous`` keeps sqlglot from transpiling
         # ``toStartOfHour(...)`` into the canonical ``dateTrunc('HOUR', ...)``
@@ -524,6 +571,12 @@ class ClickHouseDialect:
         # ClickHouse's ``toStartOf*`` family takes an optional timezone as
         # its second argument.
         args: list[exp.Expression] = [expr]
+        if granularity == "week":
+            # ``toStartOfWeek(t, mode[, tz])`` — mode 1 = Monday-first,
+            # 0 = Sunday-first. Pass it explicitly so the boundary matches
+            # the other dialects (a bare ``toStartOfWeek`` defaults to
+            # Sunday, out of step with the Monday-native ``date_trunc``).
+            args.append(exp.Literal.number(1 if week_start == "monday" else 0))
         if timezone is not None:
             args.append(exp.Literal.string(timezone))
         return exp.Anonymous(this=_CH_TRUNC[granularity], expressions=args)
@@ -597,7 +650,11 @@ class MetaDialect:
         return placeholder_for(name, dim_type, Dialect.META)
 
     def trunc(
-        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+        self,
+        granularity: str,
+        expr: exp.Expression,
+        timezone: str | None = None,
+        week_start: WeekStartLiteral = "monday",
     ) -> exp.Expression:
         # META cubes are caller-constructed VALUES tables; a timezone is
         # rarely meaningful here, but honour it via the same ``AT TIME
@@ -608,6 +665,13 @@ class MetaDialect:
             if timezone is None
             else exp.AtTimeZone(this=expr, zone=exp.Literal.string(timezone))
         )
+        if granularity == "week" and week_start == "sunday":
+            return _sunday_from_monday_week(
+                lambda e: exp.Anonymous(
+                    this="date_trunc", expressions=[exp.Literal.string("week"), e]
+                ),
+                target,
+            )
         return exp.Anonymous(
             this="date_trunc",
             expressions=[exp.Literal.string(granularity), target],

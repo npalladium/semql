@@ -129,6 +129,10 @@ StorageType = Literal[
     "bool",
 ]
 GranularityLiteral = Literal["second", "minute", "hour", "day", "week", "month", "quarter", "year"]
+# Which weekday a ``week`` bucket starts on. ``monday`` (ISO default) keeps
+# every dialect consistent; ``sunday`` shifts the boundary. See
+# ``Cube.week_start`` and ``DialectStrategy.trunc``.
+WeekStartLiteral = Literal["monday", "sunday"]
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]
 
@@ -811,6 +815,12 @@ class Cube(BaseModel):
     # ClickHouse). ``None`` truncates in the column's own zone (UTC for a
     # timestamptz), the prior behaviour.
     timezone: str | None = None
+    # Which weekday a ``week`` truncation bucket starts on. ``monday`` (the
+    # ISO-8601 default) is consistent across every dialect; ``sunday`` shifts
+    # the boundary — emitted as a ±1-day shift around the Monday-native
+    # ``date_trunc('week', …)`` on SQL backends, or ``toStartOfWeek``'s mode
+    # argument on ClickHouse. Only ``week`` grain is affected.
+    week_start: WeekStartLiteral = "monday"
     # Shorthand for a plain-table source: ``Cube(table="schema.t", ...)``
     # is equivalent to ``Cube(source=PhysicalTable(table="schema.t"), ...)``.
     # Exactly one of ``table`` / ``source`` must be specified; mixing a
@@ -1674,6 +1684,7 @@ __all__ = [
     "FormatLiteral",
     "GlossaryEntry",
     "GranularityLiteral",
+    "WeekStartLiteral",
     "Join",
     "Lookup",
     "LookupEnricher",

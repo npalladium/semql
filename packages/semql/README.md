@@ -88,7 +88,9 @@ resolves it (along with `{schema}`-style context placeholders and
   `type="date"` time dimension drops sub-day grain and timezone shifts;
   per-cube `timezone` makes
   `date_trunc` tenant-correct and transpiles per dialect (`AT TIME
-  ZONE`, `CONVERT_TIMEZONE`, ClickHouse's native arg, …).
+  ZONE`, `CONVERT_TIMEZONE`, ClickHouse's native arg, …); per-cube
+  `week_start` (`monday` default, or `sunday`) sets the `week` bucket
+  boundary consistently across dialects.
 - **Explicit raw SQL** — every hand-written fragment (`Measure.sql`,
   `Join.on`, `Cube.base_predicate`, …) is wrapped in a `RawSQL` marker
   at validation: when raw SQL is used, the model says so.

@@ -2051,6 +2051,7 @@ class _CompileEnv:
                         self.plan.aggregate.time.cube.timezone
                         if col.field.type != "date"
                         else None,
+                        week_start=self.plan.aggregate.time.cube.week_start,
                     ),
                     col_name,
                 )
@@ -2233,7 +2234,14 @@ class _CompileEnv:
                         if isinstance(td, TimeDimension) and td.type == "date"
                         else aggregate.time.cube.timezone
                     )
-                    sel = sel.group_by(self.strategy.trunc(granularity, self.parse(td.sql), tz))
+                    sel = sel.group_by(
+                        self.strategy.trunc(
+                            granularity,
+                            self.parse(td.sql),
+                            tz,
+                            week_start=aggregate.time.cube.week_start,
+                        )
+                    )
         return sel
 
     def emit(self) -> CompiledQuery:
