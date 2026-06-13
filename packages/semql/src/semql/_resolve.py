@@ -14,6 +14,7 @@ without raising.
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +38,11 @@ _QUALIFIED_RE = re.compile(r"^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$", re.IGNOR
 
 
 def split(qualified: str) -> tuple[str, str]:
+    """Parse a ``"cube.field"`` qualified reference.
+
+    >>> split("orders.revenue")
+    ('orders', 'revenue')
+    """
     m = _QUALIFIED_RE.match(qualified)
     if not m:
         raise ResolveError(f"Field reference must be 'cube.field', got: {qualified!r}")
@@ -50,6 +56,11 @@ def resolve_field(
     cube_name, field_name = split(qualified)
     if cube_name not in catalog:
         hint = closest_match(cube_name, catalog.keys())
+        # B8 — surface a richer alternatives list. The LLM repair loop
+        # consumes this directly; we drop the 0.6 difflib cutoff for the
+        # list version so any plausible token is offered, and let the
+        # caller choose.
+        alternatives = difflib.get_close_matches(cube_name, list(catalog), n=3, cutoff=0.4)
         known = ", ".join(sorted(catalog))
         suffix = f" Did you mean {hint!r}?" if hint else ""
         raise UnknownIdentifierError(
@@ -57,6 +68,7 @@ def resolve_field(
             kind="cube",
             name=cube_name,
             hint=hint,
+            valid_alternatives=alternatives,
         )
     cube = catalog[cube_name]
     for m in cube.measures:
@@ -72,6 +84,7 @@ def resolve_field(
         if seg.name == field_name:
             return cube, seg
     hint = closest_match(field_name, cube.field_names())
+    alternatives = difflib.get_close_matches(field_name, list(cube.field_names()), n=3, cutoff=0.4)
     known = ", ".join(sorted(cube.field_names()))
     suffix = f" Did you mean {hint!r}?" if hint else ""
     raise UnknownIdentifierError(
@@ -80,6 +93,7 @@ def resolve_field(
         name=field_name,
         cube=cube_name,
         hint=hint,
+        valid_alternatives=alternatives,
     )
 
 

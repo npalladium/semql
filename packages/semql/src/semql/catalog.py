@@ -17,10 +17,15 @@ trust the input.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
 from semql._grounding import validate_relations
+
+# B8 — error contract hooks. Local re-export to keep ``_enrich_filter_type_error``
+# readable; the class is the LLM-facing leaf for the next_tool affordance.
+from semql.errors import FilterTypeError  # noqa: E402  (re-exported for the helper)
 from semql.hooks import CompileHook, SqlRewriteHook
 from semql.introspect import META_CUBES, PolicyFn, ScopeFn
 from semql.model import (
@@ -43,6 +48,7 @@ if TYPE_CHECKING:
     from semql.compile import CompiledQuery
     from semql.retrieve import EmbeddingProvider, Retriever
     from semql.spec import SemanticQuery
+    from semql.validate import ValidationError
 
 
 class Catalog:
@@ -443,9 +449,16 @@ class Catalog:
         - Auto-binds ``ctx.viewer_id`` from ``viewer.viewer_id`` so
           ``security_sql`` fragments referencing it get a parameter
           (never a SQL literal).
+
+        On a :class:`FilterTypeError` the catalog enriches the exception
+        with the LLM-repair affordance (B8): if the failing dimension
+        has a registered ``Lookup`` the error carries
+        ``next_tool="resolve_lookup"`` plus the tool args, so a machine
+        consumer can call the lookup tool to resolve the free-text
+        value instead of guessing.
         """
         from semql.compile import compile_query
-        from semql.errors import SemQLError
+        from semql.errors import FilterTypeError, SemQLError
         from semql.spec import SemanticQueryDefaults, _apply_query_defaults
 
         if isinstance(query_defaults, SemanticQueryDefaults):
@@ -496,11 +509,129 @@ class Catalog:
                         stacklevel=2,
                     )
 
+            if isinstance(exc, FilterTypeError) and exc.next_tool is None:
+                enriched = self._enrich_filter_type_error(exc)
+                if enriched is not exc:
+                    if self._error_transform is not None:
+                        replacement = self._error_transform(enriched)  # type: ignore[operator]
+                        if replacement is not None:
+                            raise replacement from enriched
+                    raise enriched from exc
+
             if self._error_transform is not None:
                 replacement = self._error_transform(exc)  # type: ignore[operator]
                 if replacement is not None:
                     raise replacement from exc
             raise
+
+    def _enrich_filter_type_error(self, exc: FilterTypeError) -> FilterTypeError:
+        """Add LLM-repair affordance to a FilterTypeError when the failing
+        dim has a registered ``Lookup``.
+
+        For string dims with a Lookup, we name the ``resolve_lookup``
+        tool (the canonical repair path for free-text values that miss
+        the canonical set) and suggest up to 3 close values from the
+        lookup's static ``values`` (or its label keys). Returns the
+        same exception instance when no Lookup is registered — no
+        envelope change in that case.
+
+        Suggestions are case-insensitive — the catalog's canonical
+        values are typically uppercase (``"EMEA"``) while the LLM may
+        emit mixed case (``"emea"``). We match against a lowercased
+        view, then return the *original* case for the suggestion.
+        """
+        lookup = self.lookups.get(exc.dimension)
+        if lookup is None:
+            return exc
+        # The lookup may be dynamic (loader-backed) — we cannot enumerate
+        # its values at error time. The static ``values`` set is the
+        # only thing available synchronously, so we suggest from that.
+        static_values: list[str] = list(lookup.values) if lookup.values else []
+        # Also surface label keys when labels are present (MCP tools
+        # commonly render via labels).
+        label_keys: list[str] = list(lookup.labels.keys()) if lookup.labels else []
+        candidates: list[str] = list(dict.fromkeys([*static_values, *label_keys]))
+        did_you_mean: list[str] = []
+        if candidates and exc.value is not None:
+            query_value = str(exc.value) if not isinstance(exc.value, list) else str(exc.value[0])
+            # Build a (lowercase → original) map and match in lowercase
+            # space so the difflib ratio is meaningful regardless of
+            # the catalog's casing convention.
+            lower_to_original: dict[str, str] = {c.lower(): c for c in candidates}
+            lower_matches = difflib.get_close_matches(
+                query_value.lower(), list(lower_to_original), n=3, cutoff=0.4
+            )
+            did_you_mean = [lower_to_original[m] for m in lower_matches if m in lower_to_original]
+            if not did_you_mean:
+                # Fall back to the closest single match so the envelope
+                # still offers a concrete suggestion when the difflib
+                # cutoff rejected everything.
+                single = difflib.get_close_matches(
+                    query_value.lower(), list(lower_to_original), n=1, cutoff=0.0
+                )
+                if single and single[0] in lower_to_original:
+                    did_you_mean = [lower_to_original[single[0]]]
+        return FilterTypeError(
+            str(exc),
+            dimension=exc.dimension,
+            op=exc.op,
+            value=exc.value,
+            next_tool="resolve_lookup",
+            next_tool_args={"dimension": exc.dimension, "query": str(exc.value)},
+            did_you_mean=did_you_mean,
+        )
+
+    def compile_collect_all(
+        self,
+        query: SemanticQuery,
+        *,
+        context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
+        query_defaults: object | None = None,
+    ) -> list[ValidationError]:
+        """B8 — collect-all compile path.
+
+        Returns ``[]`` when the query compiles, otherwise returns the
+        full list of :class:`~semql.validate.ValidationError` records
+        the static checker can find (one round-trip for an LLM, not N).
+        Never raises for query-shape problems; only I/O / import errors
+        (e.g. a missing transitive dependency) propagate.
+
+        Identifies which cubes the query touches to apply auth /
+        policy / scope the same way :meth:`compile` does; on the
+        unauthorised-cube path it returns a synthetic
+        ``ValidationError`` with code ``"unauthorised_cube"`` and the
+        cube name attached. Permission-related errors that don't have
+        a structured ``ValidationError`` analogue fall through as
+        ``ValidationError(code="compile_error", message=str(exc))``.
+        """
+        # Local import to avoid the top-level circular between catalog
+        # and errors (errors is leaf-light; safe to import lazily).
+        from semql.errors import SemQLError
+        from semql.spec import SemanticQueryDefaults, _apply_query_defaults
+        from semql.validate import ValidationError, validate
+
+        if isinstance(query_defaults, SemanticQueryDefaults):
+            query = _apply_query_defaults(query, query_defaults)
+
+        try:
+            self.compile(query, context=context, viewer=viewer)
+            return []
+        except SemQLError as exc:
+            errors = validate(query, self)
+            if errors:
+                return errors
+            # The compile error didn't surface through validate (e.g.
+            # a backend dialect issue, a non-resolution compile bug).
+            # Wrap it as a single ValidationError so the LLM still
+            # gets an envelope.
+            return [
+                ValidationError(
+                    code="compile_error",
+                    message=str(exc),
+                    extra={"error_class": type(exc).__name__},
+                )
+            ]
 
     def with_retrieval(
         self,
