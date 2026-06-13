@@ -129,7 +129,7 @@ def test_render_dimension_lists_type() -> None:
 def test_render_time_dimension_lists_granularities() -> None:
     rendered = render_catalog_block({"orders": _orders()})
     assert "`orders.created_at`" in rendered
-    assert "`granularities=hour|day|week|month`" in rendered
+    assert "`granularities=hour|day|week|month|quarter|year`" in rendered
 
 
 def test_render_join_includes_relationship() -> None:

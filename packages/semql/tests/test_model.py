@@ -169,7 +169,7 @@ def test_dimension_defaults() -> None:
 def test_time_dimension_defaults() -> None:
     td = TimeDimension(name="td", sql="x")
     assert td.type == "time"
-    assert td.granularities == ("hour", "day", "week", "month")
+    assert td.granularities == ("hour", "day", "week", "month", "quarter", "year")
     assert td.description == ""
     assert td.display_name is None
     assert td.metadata == {}

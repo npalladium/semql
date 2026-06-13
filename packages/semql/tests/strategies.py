@@ -34,6 +34,7 @@ from semql import (
     TimeDimension,
     TimeWindow,
 )
+from semql.instant import parse_instant
 from sqlglot.dialects.postgres import Postgres
 
 # ---------------------------------------------------------------------------
@@ -401,7 +402,10 @@ def random_query(draw: st.DrawFn, catalog: Catalog, features: frozenset[str]) ->
 
     if "time_dim" in features and any(c.time_dimensions for c in cubes):
         tc = next(c for c in cubes if c.time_dimensions)
-        lo, hi = draw(temporal_edges), draw(temporal_edges)
+        # Order the pair by instant: TimeWindow refuses a reversed range
+        # whose endpoints are both valid ISO-8601 (B9), and temporal_edges
+        # are all well-formed.
+        lo, hi = sorted((draw(temporal_edges), draw(temporal_edges)), key=parse_instant)
         kw["time_dimension"] = TimeWindow(
             dimension=f"{tc.name}.{tc.time_dimensions[0].name}",
             range=(lo, hi),

@@ -60,7 +60,9 @@ class DialectStrategy(Protocol):
     dialect: Dialect
 
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder: ...
-    def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression: ...
+    def trunc(
+        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression: ...
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
         """Continuous percentile of ``expr`` at quantile ``q`` (0..1).
 
@@ -98,6 +100,8 @@ _CH_TRUNC: dict[str, str] = {
     "day": "toStartOfDay",
     "week": "toStartOfWeek",
     "month": "toStartOfMonth",
+    "quarter": "toStartOfQuarter",
+    "year": "toStartOfYear",
 }
 
 
@@ -182,10 +186,21 @@ class _StdSqlDialect:
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         return placeholder_for(name, dim_type, self.dialect)
 
-    def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression:
+    def trunc(
+        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression:
+        # ``AT TIME ZONE`` is the sqlglot-canonical shift; the renderer
+        # transpiles it per dialect — ``AT TIME ZONE`` on Postgres/DuckDB,
+        # ``TIMESTAMP(DATETIME(...))`` on BigQuery, ``CONVERT_TIMEZONE`` on
+        # Snowflake — so this one branch covers every ``_StdSqlDialect``.
+        target = (
+            expr
+            if timezone is None
+            else exp.AtTimeZone(this=expr, zone=exp.Literal.string(timezone))
+        )
         return exp.Anonymous(
             this="date_trunc",
-            expressions=[exp.Literal.string(granularity), expr],
+            expressions=[exp.Literal.string(granularity), target],
         )
 
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
@@ -373,11 +388,18 @@ class ClickHouseDialect:
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         return placeholder_for(name, dim_type, Dialect.CLICKHOUSE)
 
-    def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression:
+    def trunc(
+        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression:
         # ``exp.Anonymous`` keeps sqlglot from transpiling
         # ``toStartOfHour(...)`` into the canonical ``dateTrunc('HOUR', ...)``
         # form. The emitted SQL preserves the ClickHouse-idiomatic name.
-        return exp.Anonymous(this=_CH_TRUNC[granularity], expressions=[expr])
+        # ClickHouse's ``toStartOf*`` family takes an optional timezone as
+        # its second argument.
+        args: list[exp.Expression] = [expr]
+        if timezone is not None:
+            args.append(exp.Literal.string(timezone))
+        return exp.Anonymous(this=_CH_TRUNC[granularity], expressions=args)
 
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:
         # ClickHouse's ``quantile(q)(expr)`` is the curried form — the
@@ -447,10 +469,21 @@ class MetaDialect:
     def placeholder(self, name: str, dim_type: str) -> exp.Placeholder:
         return placeholder_for(name, dim_type, Dialect.META)
 
-    def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression:
+    def trunc(
+        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression:
+        # META cubes are caller-constructed VALUES tables; a timezone is
+        # rarely meaningful here, but honour it via the same ``AT TIME
+        # ZONE`` shift the Postgres convention uses so the Protocol stays
+        # uniform.
+        target = (
+            expr
+            if timezone is None
+            else exp.AtTimeZone(this=expr, zone=exp.Literal.string(timezone))
+        )
         return exp.Anonymous(
             this="date_trunc",
-            expressions=[exp.Literal.string(granularity), expr],
+            expressions=[exp.Literal.string(granularity), target],
         )
 
     def emit_percentile(self, q: float, expr: exp.Expression) -> exp.Expression:

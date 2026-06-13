@@ -96,7 +96,11 @@ AggLiteral = Literal[
     "p90",
     "p95",
 ]
-DimTypeLiteral = Literal["string", "number", "time", "bool", "uuid"]
+# ``time`` is a timestamp (instant, possibly zoned); ``date`` is a
+# calendar date with no time-of-day or zone. The split lets the compiler
+# refuse sub-day truncation on a date and skip the timezone shift a
+# zoned timestamp would get (B9).
+DimTypeLiteral = Literal["string", "number", "time", "date", "bool", "uuid"]
 DimCategoryLiteral = Literal["identity", "status", "pii", "metadata"]
 # Resolved storage type carried on ``ColumnMeta`` so callers (visualisers,
 # tool-schema renderers, downstream tooling) can reason about output
@@ -109,10 +113,11 @@ StorageType = Literal[
     "float",
     "number",
     "time",
+    "date",
     "uuid",
     "bool",
 ]
-GranularityLiteral = Literal["hour", "day", "week", "month"]
+GranularityLiteral = Literal["hour", "day", "week", "month", "quarter", "year"]
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]
 
@@ -387,8 +392,37 @@ class TimeDimension(BaseField):
     `granularity` truncation when a query asks for it (hourly/daily/etc.
     rollups). Otherwise they're just dimensions of type `time`."""
 
-    type: Literal["time"] = "time"
-    granularities: tuple[GranularityLiteral, ...] = ("hour", "day", "week", "month")
+    # ``time`` = timestamp (sub-day grains allowed); ``date`` = calendar
+    # date (no hour grain, no timezone shift — see B9 / DimTypeLiteral).
+    type: Literal["time", "date"] = "time"
+    granularities: tuple[GranularityLiteral, ...] = (
+        "hour",
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _date_has_no_sub_day_grain(cls, data: object) -> object:
+        """A ``date`` time-dimension cannot be truncated below a day.
+
+        When the caller doesn't pin ``granularities``, default a date to
+        the day-and-coarser set (the class default carries ``hour``, which
+        is meaningless for a date). When they pin one explicitly, refuse
+        ``hour`` rather than silently dropping it.
+        """
+        if isinstance(data, dict) and data.get("type") == "date":
+            if "granularities" not in data:
+                data = {**data, "granularities": ("day", "week", "month", "quarter", "year")}
+            elif "hour" in tuple(data["granularities"]):
+                raise ValueError(
+                    "a date TimeDimension cannot have 'hour' granularity: a "
+                    "calendar date has no time-of-day to truncate."
+                )
+        return data
 
 
 class Segment(BaseField):
@@ -695,6 +729,15 @@ class PartitionedScan(BaseModel):
 class Cube(BaseModel):
     name: str
     dialect: Dialect
+    # IANA timezone (e.g. "America/New_York") the cube's timestamps are
+    # truncated in. When set, time-dimension granularity buckets are
+    # computed after converting the column to this zone — the compiler
+    # emits the dialect's timezone-shift form (``AT TIME ZONE`` on
+    # Postgres/DuckDB, ``TIMESTAMP(DATETIME(...))`` on BigQuery,
+    # ``CONVERT_TIMEZONE`` on Snowflake, the native 2nd arg on
+    # ClickHouse). ``None`` truncates in the column's own zone (UTC for a
+    # timestamptz), the prior behaviour.
+    timezone: str | None = None
     # Shorthand for a plain-table source: ``Cube(table="schema.t", ...)``
     # is equivalent to ``Cube(source=PhysicalTable(table="schema.t"), ...)``.
     # Exactly one of ``table`` / ``source`` must be specified; mixing a

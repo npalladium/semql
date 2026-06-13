@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # the whole spec tree. Re-exported here for callers that imported
 # it from ``semql.spec`` historically.
 from semql._grounding import validate_keywords, validate_questions
+from semql.instant import parse_instant
 
 if TYPE_CHECKING:
     # The cycle here is real: ``rewrite.py`` needs ``Filter`` /
@@ -54,7 +55,7 @@ class TimeWindow(BaseModel):
             "Qualified time-dimension name (e.g. 'orders.created_at') the window restricts."
         ),
     )
-    granularity: Literal["hour", "day", "week", "month"] | None = Field(
+    granularity: Literal["hour", "day", "week", "month", "quarter", "year"] | None = Field(
         default=None,
         description="Bucket size for time GROUP BY; required when fill_nulls_with is set.",
     )
@@ -75,6 +76,30 @@ class TimeWindow(BaseModel):
             "Constant returned for buckets with no rows; requires granularity, no non-time dims."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_range_order(self) -> TimeWindow:
+        """Refuse a reversed range when both endpoints are real instants.
+
+        Half-open ``[start, end)`` with ``start == end`` is an empty but
+        legal window (D7); ``start > end`` is almost always an authoring
+        slip, so it is refused — but only when both endpoints parse as
+        ISO-8601. Non-instant endpoints are left untouched: SemQL binds
+        range values as parameters (the injection-safety model), so a
+        malformed instant is the database's concern, not a construction
+        error.
+        """
+        try:
+            start, end = parse_instant(self.range[0]), parse_instant(self.range[1])
+        except ValueError:
+            return self
+        if start > end:
+            raise ValueError(
+                f"TimeWindow.range is reversed: start {self.range[0]!r} is after "
+                f"end {self.range[1]!r}. The range is half-open [start, end); use "
+                "start <= end (equal endpoints denote an empty window)."
+            )
+        return self
 
 
 class Filter(BaseModel):
@@ -464,7 +489,7 @@ class SemanticQueryDefaults(BaseModel):
     model_config = ConfigDict(frozen=True)
     limit: int | None = None
     time_window: TimeWindow | None = None
-    granularity: Literal["hour", "day", "week", "month"] | None = None
+    granularity: Literal["hour", "day", "week", "month", "quarter", "year"] | None = None
 
 
 def _apply_query_defaults(

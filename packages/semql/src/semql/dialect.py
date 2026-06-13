@@ -37,6 +37,7 @@ _CH_DIM_TYPE_TO_CH_TYPE: dict[str, str] = {
     "string": "String",
     "number": "Float64",
     "time": "DateTime",
+    "date": "Date",
     "bool": "UInt8",
     "uuid": "String",
 }

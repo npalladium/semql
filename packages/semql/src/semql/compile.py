@@ -1974,7 +1974,15 @@ class _CompileEnv:
                 assert granularity is not None
                 expr = self._masked_field_expr(
                     col.field,
-                    self.strategy.trunc(granularity, self.parse(col.field.sql)),
+                    self.strategy.trunc(
+                        granularity,
+                        self.parse(col.field.sql),
+                        # A date has no zone to shift into; only timestamps
+                        # get the cube's timezone applied (B9).
+                        self.plan.aggregate.time.cube.timezone
+                        if col.field.type != "date"
+                        else None,
+                    ),
                     col_name,
                 )
             elif col.kind == "measure":
@@ -2149,7 +2157,14 @@ class _CompileEnv:
                     None,
                 )
                 if td is not None:
-                    sel = sel.group_by(self.strategy.trunc(granularity, self.parse(td.sql)))
+                    # A date has no zone to shift into; only timestamps get
+                    # the cube's timezone applied (B9).
+                    tz = (
+                        None
+                        if isinstance(td, TimeDimension) and td.type == "date"
+                        else aggregate.time.cube.timezone
+                    )
+                    sel = sel.group_by(self.strategy.trunc(granularity, self.parse(td.sql), tz))
         return sel
 
     def emit(self) -> CompiledQuery:

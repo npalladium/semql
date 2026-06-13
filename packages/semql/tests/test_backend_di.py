@@ -53,11 +53,13 @@ class RecordingDialect:
         self.placeholder_calls.append((name, dim_type))
         return self.inner.placeholder(name, dim_type)
 
-    def trunc(self, granularity: str, e: exp.Expression) -> exp.Expression:
+    def trunc(
+        self, granularity: str, e: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression:
         # Stringify the expression for the recorded call so assertions stay
         # readable. The inner dialect still drives the actual node shape.
         self.trunc_calls.append((granularity, e.sql(dialect="postgres")))
-        return self.inner.trunc(granularity, e)
+        return self.inner.trunc(granularity, e, timezone)
 
     def emit_contains(
         self,
@@ -190,7 +192,9 @@ class _FakeSnowflakeDialect:
         # generator already emits ``:name`` for un-kinded Placeholders).
         return exp.Placeholder(this=name)
 
-    def trunc(self, granularity: str, expr: exp.Expression) -> exp.Expression:
+    def trunc(
+        self, granularity: str, expr: exp.Expression, timezone: str | None = None
+    ) -> exp.Expression:
         return exp.Anonymous(
             this="DATE_TRUNC",
             expressions=[exp.Literal.string(granularity.upper()), expr],
