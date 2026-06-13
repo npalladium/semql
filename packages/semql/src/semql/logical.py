@@ -29,6 +29,7 @@ rollup's physical table, leaving the original catalog untouched.
 
 from __future__ import annotations
 
+import heapq
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -497,12 +498,14 @@ def build_join_graph(
         if c is root:
             continue
         try:
-            path = find_join_path(
-                root.name,
-                c.name,
-                catalog,
-                bidirectional=c.name in left_set,
-            )
+            # Always bidirectional: the join graph is undirected for
+            # reachability, and the weighted Dijkstra penalises fan-out
+            # rather than relying on declaration direction. This lets a
+            # child-cube measure resolve against a parent-cube dimension
+            # even when only the parent declares the join. ``forbid_transit``
+            # still bars routing a target *through* a LEFT-joined cube — the
+            # chasm-trap protection the spine pattern depends on.
+            path = find_join_path(root.name, c.name, catalog, forbid_transit=frozenset(left_set))
         except JoinPathError:
             # When ``left_joins`` re-rooted the FROM clause off ``touched[0]``,
             # a non-left target that the *un*-re-rooted root could have reached
@@ -514,7 +517,7 @@ def build_join_graph(
             if (
                 rerooted
                 and c.name not in left_set
-                and _old_root_reached(touched[0].name, c.name, catalog, c.name in left_set)
+                and _old_root_reached(touched[0].name, c.name, catalog, frozenset(left_set))
             ):
                 raise CompileError(
                     f"Cannot place cube {c.name!r} in this query: ``left_joins`` "
@@ -537,16 +540,42 @@ def build_join_graph(
 
 
 def _old_root_reached(
-    old_root: str, target: str, catalog: dict[str, Cube], bidirectional: bool
+    old_root: str, target: str, catalog: dict[str, Cube], forbid_transit: frozenset[str]
 ) -> bool:
     """Whether the un-re-rooted root (``touched[0]``) could reach ``target``
-    under the same bidirectionality the live walk used. Distinguishes a
-    target stranded by the ``left_joins`` re-root from a genuine no-path."""
+    under the same transit rules the live walk used. Distinguishes a target
+    stranded by the ``left_joins`` re-root from a genuine no-path."""
     try:
-        find_join_path(old_root, target, catalog, bidirectional=bidirectional)
+        find_join_path(old_root, target, catalog, forbid_transit=forbid_transit)
     except JoinPathError:
         return False
     return True
+
+
+# Dijkstra edge weight for a join traversal that fans out the source rows
+# (moves toward the "many" side). A SUM/COUNT across such an edge
+# over-counts, so the planner prefers fan-out-free routes by an order of
+# magnitude — the ktx M2 cost model (docs/specs/ktx-ports.md C6).
+_FAN_OUT_EDGE_WEIGHT = 10
+_SAFE_EDGE_WEIGHT = 1
+
+
+def _edge_weight(relationship: str, *, forward: bool) -> int:
+    """Cost of traversing one join edge in a given direction.
+
+    ``relationship`` is declared from the declaring cube to ``Join.to``:
+    ``many_to_one`` means the declarer is the "many" side; ``one_to_many``
+    means ``Join.to`` is. An edge fans out — and so costs
+    ``_FAN_OUT_EDGE_WEIGHT`` — when the traversal moves *toward* the many
+    side:
+
+    - forward (declarer → to): fans out iff ``one_to_many``;
+    - reverse (to → declarer): fans out iff ``many_to_one``.
+
+    ``one_to_one`` never fans out. This is the single fan-out model shared
+    with ``_check_fan_out`` and the cost planner."""
+    fans_out = (relationship == "one_to_many") if forward else (relationship == "many_to_one")
+    return _FAN_OUT_EDGE_WEIGHT if fans_out else _SAFE_EDGE_WEIGHT
 
 
 def find_join_path(
@@ -554,34 +583,62 @@ def find_join_path(
     target: str,
     catalog: dict[str, Cube],
     *,
-    bidirectional: bool = False,
+    bidirectional: bool = True,
+    forbid_transit: frozenset[str] = frozenset(),
 ) -> list[tuple[str, ModelJoin]]:
+    """Weighted shortest join path from ``root`` to ``target`` (Dijkstra).
+
+    The join graph is undirected for *reachability* — a catalog join is
+    declared on one cube but resolves a query from either side, so a
+    measure on the "many" child aggregated by a dimension on the "one"
+    parent finds its path even though only the parent declares the join
+    (``bidirectional=True``, the default). Edges are *weighted* by fan-out
+    (:func:`_edge_weight`), so when several paths connect the cubes the
+    planner picks the one that doesn't multiply rows.
+
+    ``forbid_transit`` names cubes a path may *end* at but must not pass
+    *through* — the LEFT-joined cubes. A non-left target reachable only by
+    transiting a left-joined cube would emit NULL dimensions for unmatched
+    spine rows (the chasm trap); forbidding transit makes that path
+    disappear so the caller refuses rather than emit it. The ``root`` is a
+    starting point, never a transit, so it is always free to expand.
+
+    Returns the path as ``[(next_cube, join), ...]`` from ``root`` to
+    ``target``; raises :class:`JoinPathError` if no path exists."""
     if root == target:
         return []
-    visited: set[str] = {root}
-    queue: list[tuple[str, list[tuple[str, ModelJoin]]]] = [(root, [])]
-    while queue:
-        current, path = queue.pop(0)
-        for j in catalog[current].joins:
-            if j.to in visited:
-                continue
-            new_path = path + [(j.to, j)]
-            if j.to == target:
-                return new_path
-            visited.add(j.to)
-            queue.append((j.to, new_path))
-        if bidirectional:
-            for other_name, other_cube in catalog.items():
-                if other_name in visited:
-                    continue
-                for j in other_cube.joins:
-                    if j.to != current:
-                        continue
-                    new_path = path + [(other_name, j)]
-                    if other_name == target:
-                        return new_path
-                    visited.add(other_name)
-                    queue.append((other_name, new_path))
+    # Build the weighted adjacency once: forward edges from every declared
+    # join, plus reverse edges when traversal is allowed both ways.
+    adj: dict[str, list[tuple[str, ModelJoin, int]]] = {}
+    for name, cube in catalog.items():
+        for j in cube.joins:
+            adj.setdefault(name, []).append((j.to, j, _edge_weight(j.relationship, forward=True)))
+            if bidirectional:
+                adj.setdefault(j.to, []).append(
+                    (name, j, _edge_weight(j.relationship, forward=False))
+                )
+    # Dijkstra. The monotonic ``order`` counter is the tie-breaker so the
+    # heap never compares the ``path`` payload (ModelJoin isn't orderable)
+    # and the result is deterministic for equal-cost frontiers.
+    best: dict[str, int] = {root: 0}
+    order = 0
+    pq: list[tuple[int, int, str, list[tuple[str, ModelJoin]]]] = [(0, order, root, [])]
+    while pq:
+        dist, _, current, path = heapq.heappop(pq)
+        if current == target:
+            return path
+        if dist > best.get(current, dist):
+            continue
+        # A LEFT-joined cube may be an endpoint but not a through-node: don't
+        # expand its neighbours (unless it's the root we started from).
+        if current in forbid_transit and current != root:
+            continue
+        for neighbour, join, weight in adj.get(current, ()):
+            new_dist = dist + weight
+            if new_dist < best.get(neighbour, new_dist + 1):
+                best[neighbour] = new_dist
+                order += 1
+                heapq.heappush(pq, (new_dist, order, neighbour, path + [(neighbour, join)]))
     raise JoinPathError(
         f"No join path from cube {root!r} to {target!r}. "
         "Declare a Join in the catalog or restructure the query.",

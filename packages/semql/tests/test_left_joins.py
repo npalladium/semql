@@ -2,9 +2,10 @@
 
 The canonical absent-row pattern: identify entities (spine) whose
 fact records are missing for a window. The catalog declares the FK
-on the fact side; ``left_joins=["fact_cube"]`` lets the BFS walk
-bidirectionally so the spine→facts edge resolves, and the standard
-``Filter(op="is_null")`` then expresses the anti-join.
+on the fact side; the weighted bidirectional Dijkstra resolves the
+spine→facts edge in either direction, and ``left_joins=["fact_cube"]``
+makes that edge a LEFT JOIN so unmatched spine rows survive — the
+standard ``Filter(op="is_null")`` then expresses the anti-join.
 """
 
 from __future__ import annotations
@@ -107,15 +108,19 @@ def test_left_joins_works_alongside_measures() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Without left_joins, the spine→facts path is unreachable
+# Without left_joins, the spine→facts edge still resolves (INNER), but the
+# anti-join semantics (keep unmatched spine rows) require left_joins.
 # ---------------------------------------------------------------------------
 
 
-def test_spine_to_facts_without_left_joins_fails() -> None:
-    """The catalog has a forward edge ``user_punch_log → identity``
-    (FK on the fact side). Without ``left_joins``, BFS from
-    ``identity`` to ``user_punch_log`` finds no forward path and
-    raises."""
+def test_spine_to_facts_without_left_joins_resolves_as_inner_join() -> None:
+    """The catalog declares the FK on the fact side
+    (``user_punch_log → identity``). The old forward-only BFS couldn't
+    walk ``identity → user_punch_log`` and refused; the weighted
+    bidirectional Dijkstra now resolves it via the reverse edge, so the
+    query compiles — as an **INNER** JOIN. (The anti-join's LEFT JOIN
+    still requires ``left_joins``; INNER keeps only identities that have a
+    matching punch row.)"""
     q = SemanticQuery(
         dimensions=["identity.name"],
         filters=[
@@ -126,8 +131,10 @@ def test_spine_to_facts_without_left_joins_fails() -> None:
             )
         ],
     )
-    with pytest.raises(CompileError, match=r"(?i)no join path"):
-        _cat().compile(q)
+    out = _cat().compile(q)
+    assert "user_punch_log" in out.sql
+    assert "INNER JOIN" in out.sql.upper()
+    assert "LEFT JOIN" not in out.sql.upper()
 
 
 # ---------------------------------------------------------------------------
