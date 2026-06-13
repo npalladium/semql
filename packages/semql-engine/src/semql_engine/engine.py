@@ -211,6 +211,20 @@ class Engine:
       Each read and write hands out an isolated copy, so a caller that
       mutates a returned result can't corrupt later hits.
 
+      **The cache key is viewer-blind.** It is the *compiled plan*, not
+      the identity that produced it. This is safe for the scoping the
+      compiler applies, because every viewer-dependent decision lands in
+      the plan: schema-tenancy puts the tenant in the SQL, discriminator
+      tenancy and ``{ctx.X}`` / ``{ctx.viewer_id}`` predicates bind it as
+      a parameter — both are part of the key, so two viewers who *should*
+      see different rows compile to different keys and never collide.
+      The hazard is scoping the engine can't see: if you apply row
+      filtering *outside* the compiled plan (post-filter the rows, or
+      reuse one Engine across trust boundaries), identical plans will
+      share a slot across viewers. Pass ``cache_namespace`` (e.g. the
+      viewer id or tenant) to :meth:`run` to partition the cache along
+      that boundary, or give each trust boundary its own Engine.
+
     - ``cache_ttl``: optional time-to-live in seconds (must be > 0). An
       entry older than its TTL is treated as a miss and re-executed —
       useful for "cache for N seconds, then re-check the source". With
@@ -270,20 +284,23 @@ class Engine:
         reset — they're a cumulative view, useful for /metrics."""
         self._cache.clear()
 
-    def _cache_key(self, plan: FederatedPlan) -> tuple[Any, ...]:
+    def _cache_key(self, plan: FederatedPlan, namespace: str | None) -> tuple[Any, ...]:
         """Build a hashable key from the plan's emitted shape.
 
         Includes merge SQL + params, per-fragment SQL + params, and the
         output column list. Excludes column metadata (which is
-        presentation-layer) and any rendering-only fields."""
+        presentation-layer) and any rendering-only fields. ``namespace``
+        — the caller's optional partition key (viewer / tenant) — leads
+        the tuple so distinct namespaces never share a slot."""
         return (
+            namespace,
             plan.merge.sql,
             _freeze_param(plan.merge.params),
             tuple((f.dialect.value, f.sql, _freeze_param(f.params)) for f in plan.fragments),
             tuple(plan.columns),
         )
 
-    def run(self, plan: FederatedPlan) -> ExecutionResult:
+    def run(self, plan: FederatedPlan, *, cache_namespace: str | None = None) -> ExecutionResult:
         """Execute a :class:`FederatedPlan` end-to-end.
 
         For each fragment, runs the SQL via the matching adapter and
@@ -305,7 +322,9 @@ class Engine:
         cache". The two counters are independent and useful for
         /metrics emission."""
         cache_enabled = self._cache_size > 0
-        cache_key: tuple[Any, ...] | None = self._cache_key(plan) if cache_enabled else None
+        cache_key: tuple[Any, ...] | None = (
+            self._cache_key(plan, cache_namespace) if cache_enabled else None
+        )
         if cache_enabled and cache_key is not None:
             entry = self._cache.get(cache_key)
             if entry is not None:

@@ -150,7 +150,7 @@ def test_cache_key_hashable_with_list_valued_params() -> None:
     plan.fragments[0].params["ids"] = [1, 2, 3]
     plan.merge.params["tags"] = ["a", "b"]
     # The bug raised TypeError here, before the query ever ran.
-    assert isinstance(hash(engine._cache_key(plan)), int)
+    assert isinstance(hash(engine._cache_key(plan, None)), int)
 
 
 def test_cache_list_param_round_trips_to_a_hit() -> None:
@@ -176,7 +176,31 @@ def test_cache_distinguishes_different_list_params() -> None:
     plan_a.fragments[0].params["ids"] = [1, 2, 3]
     plan_b = _plan()
     plan_b.fragments[0].params["ids"] = [1, 2, 4]
-    assert engine._cache_key(plan_a) != engine._cache_key(plan_b)
+    assert engine._cache_key(plan_a, None) != engine._cache_key(plan_b, None)
+
+
+def test_cache_namespace_partitions_identical_plans() -> None:
+    """The same plan under different cache_namespaces must not share a
+    slot — the caller's defensive per-viewer/tenant partition key."""
+    engine = Engine(cache_size=8)
+    plan = _plan()
+    assert engine._cache_key(plan, "viewer-a") != engine._cache_key(plan, "viewer-b")
+
+
+def test_cache_namespace_isolates_runs_end_to_end() -> None:
+    """Two runs of the same plan under different namespaces both miss
+    (each populates its own slot); a repeat under the first namespace
+    hits."""
+    plan = _plan()
+    adapter = _FixedAdapter(plan.fragments[0].columns)
+    engine = Engine(cache_size=8)
+    engine.register(Dialect.POSTGRES, adapter)
+
+    engine.run(plan, cache_namespace="tenant-1")  # miss
+    engine.run(plan, cache_namespace="tenant-2")  # miss (different namespace)
+    engine.run(plan, cache_namespace="tenant-1")  # hit
+    assert engine.cache_misses == 2
+    assert engine.cache_hits == 1
 
 
 # ---------------------------------------------------------------------------
