@@ -22,7 +22,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from semql.catalog import Catalog
-from semql.model import Lookup, LookupEnricher, ResolutionContext
+from semql.model import Lookup, LookupEnricher, MultiFieldEnricher, ResolutionContext
 
 # ---------------------------------------------------------------------------
 # Materialization — turn a Lookup into a concrete (values, labels) tuple
@@ -136,24 +136,54 @@ def enrich_result(
     lookup: Lookup,
     ctx: ResolutionContext,
 ) -> list[dict[str, object]]:
-    """Add a ``<dim_name>__label`` column to each row via the lookup's enricher.
+    """Attach reference fields to each row via the lookup's enricher.
 
-    If the lookup loader doesn't implement :class:`~semql.model.LookupEnricher`,
-    rows are returned unchanged. Missing IDs (not in the enricher's mapping)
-    get the raw ID echoed as the label. Rows where the dimension value is
-    ``None`` are skipped (their label key is absent from the result).
+    Two enricher shapes, checked in this order:
+
+    - :class:`~semql.model.MultiFieldEnricher` (``enrich_fields``) attaches
+      *several* columns per id — one ``<dim_name>__<field>`` column per
+      resolved field (e.g. ``region_id__name``, ``region_id__manager``).
+      An id absent from the mapping adds no columns for that row; a field
+      absent for a present id is simply omitted.
+    - :class:`~semql.model.LookupEnricher` (``enrich``) attaches a single
+      ``<dim_name>__label`` column. Missing ids echo the raw id as the
+      label.
+
+    A loader implementing neither (or no loader at all) leaves rows
+    unchanged. Rows whose dimension value is ``None`` are always skipped.
+    When a loader implements both protocols the multi-field path wins.
     """
-    if lookup.loader is None or not isinstance(lookup.loader, LookupEnricher):
+    loader = lookup.loader
+    if loader is None:
         return rows
     ids = list({str(r[dim_name]) for r in rows if r.get(dim_name) is not None})
-    mapping = lookup.loader.enrich(ids, ctx)
-    label_col = f"{dim_name}__label"
-    for row in rows:
-        raw = row.get(dim_name)
-        if raw is None:
-            continue
-        raw_str = str(raw)
-        row[label_col] = mapping.get(raw_str, raw_str)
+    if not ids:
+        return rows
+
+    if isinstance(loader, MultiFieldEnricher):
+        field_map = loader.enrich_fields(ids, ctx)
+        for row in rows:
+            raw = row.get(dim_name)
+            if raw is None:
+                continue
+            fields = field_map.get(str(raw))
+            if not fields:
+                continue
+            for field_name, value in fields.items():
+                row[f"{dim_name}__{field_name}"] = value
+        return rows
+
+    if isinstance(loader, LookupEnricher):
+        mapping = loader.enrich(ids, ctx)
+        label_col = f"{dim_name}__label"
+        for row in rows:
+            raw = row.get(dim_name)
+            if raw is None:
+                continue
+            raw_str = str(raw)
+            row[label_col] = mapping.get(raw_str, raw_str)
+        return rows
+
     return rows
 
 

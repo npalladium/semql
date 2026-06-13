@@ -1468,6 +1468,32 @@ class LookupEnricher(_Protocol):
     ) -> dict[str, str]: ...
 
 
+@runtime_checkable
+class MultiFieldEnricher(_Protocol):
+    """Like :class:`LookupEnricher`, but resolves *several* fields per id.
+
+    Where ``LookupEnricher`` attaches a single ``<dim>__label`` column,
+    a multi-field enricher attaches one column per resolved field —
+    e.g. a ``region_id`` enriches to ``region_id__name``,
+    ``region_id__manager``, ``region_id__currency``. The defensive
+    label guarantee generalises to "the row carries the whole reference
+    record the catalog author wanted shown, not just one label".
+
+    ``enrich_fields`` returns ``{id: {field_name: value}}``. An id absent
+    from the mapping adds no columns for that row (never raises for
+    unknown ids); a field absent for a present id is simply omitted.
+
+    A loader may implement this *instead of* or *in addition to*
+    ``LookupEnricher``; :func:`semql.lookups.enrich_result` prefers the
+    multi-field path when both are present."""
+
+    def enrich_fields(
+        self,
+        ids: list[str],
+        ctx: ResolutionContext,
+    ) -> dict[str, dict[str, str]]: ...
+
+
 class Lookup(_HashableModel):
     """A finite set of valid values for a string dimension.
 
@@ -1883,6 +1909,7 @@ __all__ = [
     "Lookup",
     "LookupEnricher",
     "LookupLoader",
+    "MultiFieldEnricher",
     "LookupValues",
     "Measure",
     "Metadata",

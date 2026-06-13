@@ -538,3 +538,104 @@ def test_enrich_result_only_calls_enricher_with_unique_non_null_ids() -> None:
     enrich_result(rows, "customer_id", lk, ResolutionContext())
     assert len(seen) == 1
     assert set(seen[0]) == {"u1", "u2"}  # no duplicates, no None
+
+
+# ---------------------------------------------------------------------------
+# MultiFieldEnricher — several reference fields per id
+# ---------------------------------------------------------------------------
+
+
+def test_class_implementing_enrich_fields_satisfies_multi_field_protocol() -> None:
+    """A class with enrich_fields() satisfies the runtime-checkable Protocol."""
+    from semql.model import MultiFieldEnricher
+
+    class MultiEnricher:
+        def __call__(self, ctx: object) -> list[str]:
+            return ["x"]
+
+        def enrich_fields(self, ids: list[str], ctx: object) -> dict[str, dict[str, str]]:
+            return {i: {"name": i} for i in ids}
+
+    assert isinstance(MultiEnricher(), MultiFieldEnricher)
+
+
+def test_enrich_result_adds_one_column_per_field() -> None:
+    """A MultiFieldEnricher attaches a ``<dim>__<field>`` column per field."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    class RegionEnricher:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return ["r1", "r2"]
+
+        def enrich_fields(
+            self, ids: list[str], ctx: ResolutionContext
+        ) -> dict[str, dict[str, str]]:
+            data = {
+                "r1": {"name": "EMEA", "manager": "Alice", "currency": "EUR"},
+                "r2": {"name": "APAC", "manager": "Bob", "currency": "JPY"},
+            }
+            return {i: data[i] for i in ids if i in data}
+
+    lk = Lookup(dimension="orders.region_id", loader=RegionEnricher())
+    rows: list[dict[str, object]] = [
+        {"region_id": "r1", "revenue": 100},
+        {"region_id": "r2", "revenue": 200},
+    ]
+    out = enrich_result(rows, "region_id", lk, ResolutionContext())
+    assert out[0]["region_id__name"] == "EMEA"
+    assert out[0]["region_id__manager"] == "Alice"
+    assert out[0]["region_id__currency"] == "EUR"
+    assert out[1]["region_id__name"] == "APAC"
+    # The single-label column is NOT added on the multi-field path.
+    assert "region_id__label" not in out[0]
+
+
+def test_enrich_result_multi_field_omits_unknown_ids_and_missing_fields() -> None:
+    """An unknown id adds no columns; a field absent for a known id is omitted."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    class PartialEnricher:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return []
+
+        def enrich_fields(
+            self, ids: list[str], ctx: ResolutionContext
+        ) -> dict[str, dict[str, str]]:
+            # r1 known (only "name"); r9 unknown.
+            return {"r1": {"name": "EMEA"}} if "r1" in ids else {}
+
+    lk = Lookup(dimension="orders.region_id", loader=PartialEnricher())
+    rows: list[dict[str, object]] = [
+        {"region_id": "r1"},
+        {"region_id": "r9"},
+    ]
+    out = enrich_result(rows, "region_id", lk, ResolutionContext())
+    assert out[0]["region_id__name"] == "EMEA"
+    assert "region_id__manager" not in out[0]  # field absent → omitted
+    assert "region_id__name" not in out[1]  # unknown id → no columns
+
+
+def test_enrich_result_prefers_multi_field_when_both_protocols_present() -> None:
+    """A loader implementing both enrich and enrich_fields uses multi-field."""
+    from semql.lookups import enrich_result
+    from semql.model import Lookup, ResolutionContext
+
+    class BothEnricher:
+        def __call__(self, ctx: ResolutionContext) -> list[str]:
+            return []
+
+        def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
+            return {i: f"label:{i}" for i in ids}
+
+        def enrich_fields(
+            self, ids: list[str], ctx: ResolutionContext
+        ) -> dict[str, dict[str, str]]:
+            return {i: {"name": f"name:{i}"} for i in ids}
+
+    lk = Lookup(dimension="orders.region_id", loader=BothEnricher())
+    rows: list[dict[str, object]] = [{"region_id": "r1"}]
+    out = enrich_result(rows, "region_id", lk, ResolutionContext())
+    assert out[0]["region_id__name"] == "name:r1"
+    assert "region_id__label" not in out[0]
