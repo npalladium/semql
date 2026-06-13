@@ -1,6 +1,6 @@
 # SemQL
 
-Semantic data layer with SQL generation, authorisation, and a typed
+Semantic Query Layer with SQL generation, authorisation, and a typed
 LLM prompt pipeline.
 
 ## What it does
@@ -28,17 +28,25 @@ ClickHouse / DuckDB / BigQuery / Snowflake.
 
 | Package | Description |
 |---|---|
-| `semql` | Core: catalog, compiler, auth, prompt fragments, introspection |
-| `semql-mcp` | MCP server wrapping a catalog |
+| `semql` | Core: catalog, compiler, federation planner |
+| `semql-auth` | Credential→identity adapters (bearer/JWKS/mTLS → `AuthContext`) |
+| `semql-engine` | In-process executor for federated plans (DuckDB merge) |
 | `semql-erd` | Graphviz ER-diagram generator for catalogs |
+| `semql-introspect` | Bootstrap a catalog from a live database's schema |
+| `semql-mcp` | MCP server wrapping a catalog |
+| `semql-prompt` | LLM-facing planner/router/presenter/drilldown prompt fragments |
 | `semql-validate-db` | Pre-deploy drift check against a live database |
 
 ## Install
 
 ```sh
 pip install semql
-pip install semql-mcp           # + MCP server
+pip install semql-auth          # + credential→identity adapters
+pip install semql-engine        # + in-process federated executor
 pip install semql-erd           # + ER diagrams
+pip install semql-introspect    # + catalog bootstrap from a live DB
+pip install semql-mcp           # + MCP server
+pip install semql-prompt        # + LLM prompt fragments
 pip install semql-validate-db   # + drift checker
 ```
 

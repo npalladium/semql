@@ -44,7 +44,17 @@ jobs:
         run: uv run mypy packages
 
       - name: pyright
-        run: uv run pyright packages/semql/src packages/semql-mcp/src packages/semql-erd/src scripts
+        run: >
+          uv run pyright
+          packages/semql/src
+          packages/semql-auth/src
+          packages/semql-engine/src
+          packages/semql-erd/src
+          packages/semql-introspect/src
+          packages/semql-mcp/src
+          packages/semql-prompt/src
+          packages/semql-validate-db/src
+          scripts
 
       - name: pytest
         run: uv run pytest packages
@@ -76,7 +86,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [semql, semql-mcp, semql-erd, semql-validate-db]
+        package:
+          - semql
+          - semql-auth
+          - semql-engine
+          - semql-erd
+          - semql-introspect
+          - semql-mcp
+          - semql-prompt
+          - semql-validate-db
     steps:
       - uses: actions/checkout@v4
 
