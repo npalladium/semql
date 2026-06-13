@@ -24,9 +24,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from semql._grounding import (
     validate_keywords as _grounding_validate_keywords,
@@ -138,6 +138,42 @@ TenancyMode = Literal["schema", "discriminator", "none"]
 Metadata = dict[str, str]
 
 
+class RawSQL(str):
+    """An author-supplied raw-SQL fragment — the explicit escape hatch (B2).
+
+    SemQL's principle is "when raw SQL is used, SemQL says so." Every
+    field that carries hand-written SQL — ``BaseField.sql``,
+    ``Measure.filter``, ``Cube.base_predicate`` / ``security_sql``,
+    ``Join.on``, ``DerivedTable`` / ``NamedCTE`` bodies,
+    ``ScopePredicate.sql``, ``mask_value`` — is marked ``RawSQL`` so the
+    trust boundary is visible at runtime (``isinstance(value, RawSQL)``)
+    and in the model's JSON schema, rather than being implied by silence.
+
+    It is a ``str`` subclass, so it parses, ``{alias}``-substitutes and
+    serialises exactly like the string it wraps. Plain strings assigned
+    to these fields are coerced on construction, so existing catalogs
+    need no change.
+
+    >>> isinstance(RawSQL("{o}.amount"), str)
+    True
+    >>> RawSQL("{o}.amount") == "{o}.amount"
+    True
+    """
+
+    __slots__ = ()
+
+
+def _as_raw_sql(value: str) -> RawSQL:
+    return value if type(value) is RawSQL else RawSQL(value)
+
+
+# Field annotation for raw-SQL entry points. To the type-checker it is a
+# plain ``str`` (so ``sql="{o}.x"`` still type-checks at every call site);
+# at runtime the validator coerces the value to :class:`RawSQL` so the
+# marker is real and inspectable.
+_Raw = Annotated[str, AfterValidator(_as_raw_sql)]
+
+
 def _freeze(value: object) -> object:
     """Recursively turn a field value into a hashable, order-normalised key.
 
@@ -204,7 +240,7 @@ class BaseField(_HashableModel):
 
     model_config = ConfigDict(frozen=True)
     name: str
-    sql: str
+    sql: _Raw
     description: str = ""
     display_name: str | None = None
     metadata: Metadata = Field(default_factory=dict)
@@ -282,7 +318,7 @@ class Measure(BaseField):
     # three round-trips. sqlglot renders FILTER natively on PG / CH /
     # DuckDB / BigQuery and transpiles to ``COUNT(IFF(...))`` on
     # Snowflake.
-    filter: str | None = None
+    filter: _Raw | None = None
     # For ``agg='ratio'`` only: the names of two other measures on the
     # *same cube* whose aggregates compose the ratio. The compiler emits
     # ``<num_agg> / NULLIF(<den_agg>, 0)``; the ``sql`` field is ignored
@@ -298,7 +334,7 @@ class Measure(BaseField):
     # constructor enforces ``mask_roles ⊆ required_roles`` — you
     # can't mask a role that can't even see the field.
     mask_roles: list[str] = Field(default_factory=list)
-    mask_value: str | None = None
+    mask_value: _Raw | None = None
 
     @model_validator(mode="after")
     def _check_ratio_consistency(self) -> Measure:
@@ -347,7 +383,7 @@ class Dimension(BaseField):
     foreign_key: str | None = None
     # A1 — Field-level masking. Same shape as Measure.mask_*.
     mask_roles: list[str] = Field(default_factory=list)
-    mask_value: str | None = None
+    mask_value: _Raw | None = None
     # I7 — Input aliases. An LLM might emit ``territory`` /
     # ``zone`` / ``area`` when the catalog names the dimension
     # ``region``. The resolver accepts any alias as a synonym for
@@ -533,7 +569,7 @@ class Join(_HashableModel):
     model_config = ConfigDict(frozen=True)
     to: str
     relationship: Literal["one_to_one", "one_to_many", "many_to_one"]
-    on: str
+    on: _Raw
     metadata: Metadata = Field(default_factory=dict)
 
 
@@ -566,7 +602,7 @@ class NamedCTE(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     name: str
-    sql: str
+    sql: _Raw
 
 
 class DerivedTable(_HashableModel):
@@ -595,7 +631,7 @@ class DerivedTable(_HashableModel):
     not just the outer SELECT."""
 
     model_config = ConfigDict(frozen=True)
-    sql: str
+    sql: _Raw
     with_ctes: list[NamedCTE] = []
 
     @model_validator(mode="after")
@@ -749,7 +785,7 @@ class Cube(BaseModel):
     # then exposes as dimensions / measures. See :class:`DerivedTable`.
     source: CubeSource | None = None
     alias: str
-    base_predicate: str | None = None
+    base_predicate: _Raw | None = None
     measures: list[Measure] = []
     dimensions: list[Dimension] = []
     time_dimensions: list[TimeDimension] = []
@@ -781,7 +817,7 @@ class Cube(BaseModel):
     # ``{alias}`` placeholders (resolved to the cube's alias) and
     # ``{ctx.X}`` placeholders (bound from the compile-time
     # ``context`` dict, never inlined as a SQL literal).
-    security_sql: str | None = None
+    security_sql: _Raw | None = None
     # Names the dimension on *this* cube that uniquely identifies a row.
     # Used by the Catalog to auto-derive ``many_to_one`` Joins from
     # other cubes' ``Dimension.foreign_key`` declarations.
@@ -1167,7 +1203,7 @@ class ScopePredicate(_HashableModel):
     """
 
     model_config = ConfigDict(frozen=True)
-    sql: str
+    sql: _Raw
     ctx_keys: list[str] = Field(default_factory=list)
 
 
