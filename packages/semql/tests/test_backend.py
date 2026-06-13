@@ -174,6 +174,24 @@ def test_postgres_emit_source_quotes_reserved_word_table_name() -> None:
     assert out == '"using" AS u'
 
 
+def test_emit_source_quotes_dialect_specific_reserved_table_name() -> None:
+    """Keyword sets are dialect-specific: ``sample`` is a ClickHouse
+    keyword (TABLE SAMPLE) but an ordinary word in Postgres. The table
+    name must be tested against the *cube's own* dialect, or it slips
+    through unquoted and the emitted SQL won't parse under ClickHouse."""
+    cube = Cube(
+        name="evt",
+        dialect=Dialect.CLICKHOUSE,
+        table="sample",
+        alias="s",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+    )
+    out = render(
+        ClickHouseDialect().emit_source(cube, {"evt": cube}, lambda x: x), Dialect.CLICKHOUSE
+    )
+    assert '"sample"' in out or "`sample`" in out
+
+
 def test_meta_emit_source_materialises_values_literal() -> None:
     """META cubes don't have a backing table; their source is a VALUES
     subquery the strategy builds from the catalog snapshot."""

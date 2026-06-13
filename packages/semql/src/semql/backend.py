@@ -105,10 +105,15 @@ _CH_TRUNC: dict[str, str] = {
 }
 
 
-def _ident(name: str) -> exp.Identifier:
+def _ident(name: str, dialect: str = "postgres") -> exp.Identifier:
     """Return an Identifier for ``name``, quoted if the dialect tokenizer
-    would treat it as a keyword (e.g. USING, SELECT, TABLE)."""
-    toks = sqlglot.tokenize(name, dialect="postgres")
+    would treat it as a keyword (e.g. USING, SELECT, TABLE).
+
+    ``dialect`` must be the *emitting* dialect: keyword sets are
+    dialect-specific (``sample`` is a ClickHouse keyword but an ordinary
+    word in Postgres), so a table name has to be tested against the same
+    dialect it will be emitted under or it slips through unquoted."""
+    toks = sqlglot.tokenize(name, dialect=dialect)
     needs_quote = not toks or toks[0].token_type not in (_TT.VAR, _TT.IDENTIFIER)
     return exp.to_identifier(name, quoted=needs_quote)
 
@@ -135,13 +140,16 @@ def _aliased_table(cube: Cube, src: PhysicalTable, resolve_sql: SqlResolver) -> 
     """Build a ``Table`` AST node for ``cube`` with its alias attached."""
     resolved = resolve_sql(src.table)
     # Build the Table node manually rather than via exp.to_table() so that
-    # reserved-word table names (e.g. ``using``) are properly quoted instead
-    # of being emitted as bare keywords.
+    # reserved-word table names (e.g. ``using``, ClickHouse ``sample``) are
+    # properly quoted instead of being emitted as bare keywords. Test the
+    # name against the cube's *own* dialect — keyword sets differ per
+    # dialect, so a Postgres-only check would miss ClickHouse/BigQuery words.
+    dialect = sqlglot_dialect_for(cube.dialect)
     parts = resolved.split(".", 1)
     if len(parts) == 2:
-        tbl = exp.Table(this=_ident(parts[1]), db=_ident(parts[0]))
+        tbl = exp.Table(this=_ident(parts[1], dialect), db=_ident(parts[0], dialect))
     else:
-        tbl = exp.Table(this=_ident(parts[0]))
+        tbl = exp.Table(this=_ident(parts[0], dialect))
     tbl.set("alias", exp.TableAlias(this=exp.to_identifier(cube.alias)))
     return tbl
 
