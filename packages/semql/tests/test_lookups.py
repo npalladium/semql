@@ -639,3 +639,153 @@ def test_enrich_result_prefers_multi_field_when_both_protocols_present() -> None
     out = enrich_result(rows, "region_id", lk, ResolutionContext())
     assert out[0]["region_id__name"] == "name:r1"
     assert "region_id__label" not in out[0]
+
+
+# ---------------------------------------------------------------------------
+# sql_enricher — declarative "SELECT from reference table" enricher
+# ---------------------------------------------------------------------------
+
+
+def test_sql_enricher_builds_parameterized_in_query() -> None:
+    """enrich_fields issues SELECT ... WHERE key IN (?, ?) with the ids bound
+    as params (never interpolated) and maps fields to <dim>__<field>."""
+    from semql.lookups import enrich_result, sql_enricher
+    from semql.model import Lookup, ResolutionContext
+
+    calls: list[tuple[str, list[object]]] = []
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        calls.append((sql, params))
+        return [
+            {"id": "r1", "name": "EMEA", "manager": "Alice"},
+            {"id": "r2", "name": "APAC", "manager": "Bob"},
+        ]
+
+    lk = Lookup(
+        dimension="orders.region_id",
+        loader=sql_enricher(table="regions", key="id", fields=["name", "manager"], execute=execute),
+    )
+    rows: list[dict[str, object]] = [{"region_id": "r1"}, {"region_id": "r2"}]
+    out = enrich_result(rows, "region_id", lk, ResolutionContext())
+
+    sql, params = calls[-1]
+    assert "FROM regions" in sql
+    assert "WHERE id IN (?, ?)" in sql
+    assert {str(p) for p in params} == {"r1", "r2"}  # ids bound, not literal
+    assert out[0]["region_id__name"] == "EMEA"
+    assert out[0]["region_id__manager"] == "Alice"
+    assert out[1]["region_id__name"] == "APAC"
+
+
+def test_sql_enricher_substitutes_table_template_from_ctx() -> None:
+    """A {placeholder} in `table` is filled from ctx.context (multi-tenant)."""
+    from semql.lookups import sql_enricher
+    from semql.model import ResolutionContext
+
+    seen: list[str] = []
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        seen.append(sql)
+        return []
+
+    enr = sql_enricher(table="{schema}.regions", key="id", fields=["name"], execute=execute)
+    enr.enrich_fields(["r1"], ResolutionContext(context={"schema": "acme"}))
+    assert "FROM acme.regions" in seen[-1]
+
+
+def test_sql_enricher_format_paramstyle() -> None:
+    """paramstyle='format' uses %s placeholders (psycopg/mysql)."""
+    from semql.lookups import sql_enricher
+    from semql.model import ResolutionContext
+
+    seen: list[str] = []
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        seen.append(sql)
+        return []
+
+    enr = sql_enricher(
+        table="regions", key="id", fields=["name"], execute=execute, paramstyle="format"
+    )
+    enr.enrich_fields(["r1", "r2"], ResolutionContext())
+    assert "IN (%s, %s)" in seen[-1]
+
+
+def test_sql_enricher_call_returns_plan_time_values() -> None:
+    """The loader __call__ returns {id: label} for the planner block."""
+    from semql.lookups import sql_enricher
+    from semql.model import ResolutionContext
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        assert "WHERE" not in sql  # plan-time SELECT is unfiltered
+        return [{"id": "r1", "name": "EMEA"}, {"id": "r2", "name": "APAC"}]
+
+    enr = sql_enricher(table="regions", key="id", fields=["name"], execute=execute)
+    assert enr(ResolutionContext()) == {"r1": "EMEA", "r2": "APAC"}
+
+
+# ---------------------------------------------------------------------------
+# enrich_all — apply every catalog lookup in one call
+# ---------------------------------------------------------------------------
+
+
+def test_enrich_all_applies_matching_lookups() -> None:
+    """enrich_all walks catalog.lookups and enriches columns present in rows."""
+    from semql import Catalog, Cube, Dialect, Dimension, Measure
+    from semql.lookups import enrich_all, sql_enricher
+    from semql.model import Lookup, ResolutionContext
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        return [{"id": "r1", "name": "EMEA"}]
+
+    cube = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+        dimensions=[Dimension(name="region_id", sql="{o}.region_id", type="string")],
+    )
+    catalog = Catalog(
+        [cube],
+        lookups=[
+            Lookup(
+                dimension="orders.region_id",
+                loader=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
+            )
+        ],
+    )
+    rows: list[dict[str, object]] = [{"region_id": "r1", "revenue": 100}]
+    out = enrich_all(rows, catalog, ResolutionContext())
+    assert out[0]["region_id__name"] == "EMEA"
+
+
+def test_enrich_all_skips_lookups_not_in_result() -> None:
+    """A lookup whose dimension column isn't in the rows is a no-op."""
+    from semql import Catalog, Cube, Dialect, Dimension, Measure
+    from semql.lookups import enrich_all, sql_enricher
+    from semql.model import Lookup, ResolutionContext
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        raise AssertionError("should not be called — column absent")
+
+    cube = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+        dimensions=[Dimension(name="region_id", sql="{o}.region_id", type="string")],
+    )
+    catalog = Catalog(
+        [cube],
+        lookups=[
+            Lookup(
+                dimension="orders.region_id",
+                loader=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
+            )
+        ],
+    )
+    rows: list[dict[str, object]] = [{"revenue": 100}]  # no region_id column
+    out = enrich_all(rows, catalog, ResolutionContext())
+    assert out == rows
