@@ -44,10 +44,15 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
-# Module handle for tests that monkey-patch ``semql.logical.to_logical_plan``
-# (the local ``to_logical_plan`` name is bound at import time and wouldn't
-# see the patch — see the _CompileEnv.__init__ lowering call site).
-from semql import logical as _logical_mod
+# Module handle for tests that monkey-patch
+# ``semql.logical.to_logical_plan`` (the local ``to_logical_plan``
+# name is bound at import time and wouldn't see the patch — see
+# the _CompileEnv.__init__ lowering call site). Using
+# ``import semql.logical as _logical_mod`` rather than
+# ``from semql.logical import to_logical_plan`` keeps compile.py
+# at the same module-level granularity as the rest of the
+# import graph (no top-level package import).
+import semql.logical as _logical_mod
 from semql._resolve import (
     _ResolvedFields,
     walk_query_fields,

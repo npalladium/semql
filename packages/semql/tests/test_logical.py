@@ -308,7 +308,12 @@ def test_compile_query_lowers_via_logical_plan(
         call_count["n"] += 1
         return real_to_logical_plan(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("semql.logical.to_logical_plan", counting)
+    # Patch at the binding site (semql.compile) — the test was
+    # patching semql.logical.to_logical_plan originally, but the
+    # top-level import in compile.py binds the function name at
+    # module load, so the source-of-truth monkey-patch site is
+    # semql.compile._logical_mod.to_logical_plan.
+    monkeypatch.setattr("semql.compile._logical_mod.to_logical_plan", counting)
     compiled = compile_query(query, catalog)
 
     assert call_count["n"] >= 1, "compile_query must call to_logical_plan"
