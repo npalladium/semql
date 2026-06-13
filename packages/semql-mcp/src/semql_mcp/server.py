@@ -55,6 +55,7 @@ CLI-launched process, or pass ``server.mcp`` to a custom transport.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, Literal
@@ -78,6 +79,26 @@ Callers provide their own database driver (psycopg, clickhouse-connect,
 DuckDB, ...) and adapt its row shape to a list of dicts. The MCP
 server never imports a database driver itself."""
 
+ViewerProvider = Callable[[], "AuthContext | None"]
+"""``() -> AuthContext | None`` — the trusted, per-request identity source.
+
+This is the fix for the multi-tenant auth hole (A6). On a networked
+transport (http / sse / streamable-http) the *client* cannot be trusted
+to assert who it is, so tool parameters like ``viewer_id`` / ``roles`` are
+not an authorization boundary. The deployer wires a ``viewer_provider``
+that derives the verified identity from the transport's authenticated
+request context (a validated bearer token, an mTLS client cert, a session)
+and the server threads its result into every ``catalog.compile(viewer=...)``
+call — so ``required_roles`` cube/field visibility and ``security_sql``
+row-level scoping are actually enforced.
+
+The provider is invoked inside each tool call, so it sees the current
+request's context. Return ``None`` for an unauthenticated request. When a
+provider is configured it is authoritative: client-asserted ``viewer_id`` /
+``roles`` are ignored. With no provider (the stdio single-tenant default)
+the server falls back to the client-asserted values, which is the only
+mode where trusting them is safe."""
+
 
 class MCPServer:
     """An MCP server exposing a SemQL ``Catalog`` to MCP clients.
@@ -91,19 +112,40 @@ class MCPServer:
         catalog: Catalog,
         *,
         executor: Executor | None = None,
+        viewer_provider: ViewerProvider | None = None,
         name: str = "semql",
     ) -> None:
         self.catalog = catalog
         self.executor = executor
+        self.viewer_provider = viewer_provider
         self.mcp = FastMCP(name=name)
         self._register_tools()
         self._register_per_cube_tools()
         self._register_lookup_tools()
         self._register_saved_query_tools()
 
+    def _resolve_viewer(
+        self,
+        client_viewer_id: str | None = None,
+        client_roles: list[str] | None = None,
+    ) -> AuthContext | None:
+        """Resolve the authoritative viewer for a tool call.
+
+        A configured ``viewer_provider`` wins outright — client-asserted
+        ``viewer_id`` / ``roles`` are ignored, because on a networked
+        transport the client can't be trusted to name itself. With no
+        provider (stdio single-tenant), fall back to the client-asserted
+        values; that's the only context where trusting them is safe."""
+        if self.viewer_provider is not None:
+            return self.viewer_provider()
+        if client_viewer_id is not None:
+            return AuthContext(viewer_id=client_viewer_id, roles=list(client_roles or []))
+        return None
+
     def _register_tools(self) -> None:
         catalog = self.catalog
         executor = self.executor
+        resolve_viewer = self._resolve_viewer
 
         @self.mcp.tool(
             name="query_semantic",
@@ -119,7 +161,7 @@ class MCPServer:
             context: dict[str, str] | None = None,
         ) -> dict[str, Any]:
             try:
-                compiled = catalog.compile(spec, context=context)
+                compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
             except Exception as exc:
                 return _error_payload(exc)
             return {
@@ -156,7 +198,7 @@ class MCPServer:
             context: dict[str, str] | None = None,
         ) -> str:
             try:
-                compiled = catalog.compile(spec, context=context)
+                compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
             except Exception as exc:
                 return f"-- compile failed: {exc}"
             return compiled.sql
@@ -196,7 +238,7 @@ class MCPServer:
                 context: dict[str, str] | None = None,
             ) -> dict[str, Any]:
                 try:
-                    compiled = catalog.compile(spec, context=context)
+                    compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
                 except Exception as exc:
                     return _error_payload(exc)
                 try:
@@ -222,6 +264,7 @@ class MCPServer:
         Skipped on empty-lookup catalogs so a server with no resolvable
         dimensions doesn't advertise misleading tools."""
         catalog = self.catalog
+        resolve_viewer = self._resolve_viewer
         if not catalog.lookups:
             return
 
@@ -237,7 +280,7 @@ class MCPServer:
             max_candidates=5,  # noqa: ANN001
         ):
             try:
-                ctx = _build_resolution_ctx(viewer_id, roles, context)
+                ctx = _build_resolution_ctx(resolve_viewer(viewer_id, roles), context)
                 values = resolve_lookup(
                     catalog,
                     dimension,
@@ -277,7 +320,7 @@ class MCPServer:
         ):
             try:
                 lookup = catalog.lookups[dimension]
-                ctx = _build_resolution_ctx(viewer_id, roles, context)
+                ctx = _build_resolution_ctx(resolve_viewer(viewer_id, roles), context)
                 materialized = materialize_lookup(lookup, ctx)
             except Exception as exc:
                 return _error_payload(exc)
@@ -323,7 +366,7 @@ class MCPServer:
             return
 
         for sq in catalog.saved_queries.values():
-            self.mcp.add_tool(_make_saved_query_tool(sq, catalog, executor))
+            self.mcp.add_tool(_make_saved_query_tool(sq, catalog, executor, self._resolve_viewer))
 
     def _register_per_cube_tools(self) -> None:
         """For each exposed, non-META cube, register a ``query_<cube>``
@@ -337,32 +380,47 @@ class MCPServer:
         catalog = self.catalog
         executor = self.executor
         for cube in iter_cubes(catalog, only_exposed=True):
-            self.mcp.add_tool(_make_query_cube_tool(cube, catalog, executor))
+            self.mcp.add_tool(_make_query_cube_tool(cube, catalog, executor, self._resolve_viewer))
 
     def run(self, transport: Transport = "stdio", **kwargs: Any) -> None:  # noqa: ANN401
         """Launch the server on ``transport``.
 
         Defaults to stdio so a parent process can spawn the server and
         speak JSON-RPC over its stdin/stdout. Forwards remaining kwargs
-        to FastMCP."""
+        to FastMCP.
+
+        On a networked transport with no ``viewer_provider`` configured,
+        warns once: every request compiles with no viewer, so
+        ``required_roles`` and ``security_sql`` scoping are not enforced
+        and any client can read every cube. Safe only behind a trusted
+        single-tenant boundary."""
+        if transport != "stdio" and self.viewer_provider is None:
+            warnings.warn(
+                f"MCPServer.run(transport={transport!r}) with no "
+                "viewer_provider: requests compile with no viewer, so "
+                "required_roles / security_sql are NOT enforced and any "
+                "client can read every cube. Pass viewer_provider= to "
+                "derive the identity from the transport's authenticated "
+                "request context.",
+                stacklevel=2,
+            )
         self.mcp.run(transport=transport, **kwargs)
 
 
 def _build_resolution_ctx(
-    viewer_id: str | None,
-    roles: list[str] | None,
+    viewer: AuthContext | None,
     context: dict[str, str] | None,
 ) -> ResolutionContext | None:
-    """Assemble a :class:`ResolutionContext` from the MCP tool inputs.
+    """Assemble a :class:`ResolutionContext` from the resolved viewer and
+    compile-time context.
 
-    Returns ``None`` when none of ``viewer_id``, ``roles``, ``context``
-    are set — so static lookups don't allocate an empty envelope, and
-    dynamic loaders see the explicit "no context" signal."""
-    if viewer_id is None and not roles and not context:
+    ``viewer`` has already been run through ``MCPServer._resolve_viewer``,
+    so it reflects the trusted provider when one is configured. Returns
+    ``None`` when neither a viewer nor a context is present — so static
+    lookups don't allocate an empty envelope, and dynamic loaders see the
+    explicit "no context" signal."""
+    if viewer is None and not context:
         return None
-    viewer = (
-        AuthContext(viewer_id=viewer_id, roles=list(roles or [])) if viewer_id is not None else None
-    )
     return ResolutionContext(viewer=viewer, context=dict(context or {}))
 
 
@@ -385,6 +443,7 @@ def _make_query_cube_tool(
     cube: Cube,
     catalog: Catalog,
     executor: Executor | None,
+    resolve_viewer: ViewerProvider,
 ) -> Callable[..., dict[str, Any]]:
     """Build a per-cube ``query_<cube>`` tool function.
 
@@ -450,7 +509,7 @@ def _make_query_cube_tool(
         except Exception as exc:
             return _error_payload(exc)
         try:
-            compiled = catalog.compile(spec, context=context)
+            compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
         except Exception as exc:
             return _error_payload(exc)
         envelope: dict[str, Any] = {
@@ -495,6 +554,7 @@ def _make_saved_query_tool(
     sq: Any,  # noqa: ANN401 — semql.SavedQuery (imported below at runtime)
     catalog: Catalog,
     executor: Executor | None,
+    resolve_viewer: ViewerProvider,
 ) -> Callable[..., dict[str, Any]]:
     """Build a zero-arg ``saved_<name>`` tool that compiles + executes
     a pre-baked SemanticQuery.
@@ -510,7 +570,7 @@ def _make_saved_query_tool(
         context=None,  # noqa: ANN001
     ):
         try:
-            compiled = catalog.compile(sq.query, context=context)
+            compiled = catalog.compile(sq.query, context=context, viewer=resolve_viewer())
         except Exception as exc:
             return _error_payload(exc)
         envelope: dict[str, Any] = {
@@ -563,4 +623,4 @@ def _prefix_time_window(tw: TimeWindow | None, cube_name: str) -> TimeWindow | N
     )
 
 
-__all__ = ["Executor", "MCPServer"]
+__all__ = ["Executor", "MCPServer", "ViewerProvider"]
