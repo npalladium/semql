@@ -21,3 +21,15 @@ docs/api/
 *-token.txt.enc
 secrets.enc.yaml
 secrets.yaml
+# sops config (age recipients + creation rules) — kept local, never in
+# the repo / release source archives.
+.sops.yaml
+
+
+# Random
+scratch/
+.scratch/
+session-*.md
+junit.xml
+
+*.txt
