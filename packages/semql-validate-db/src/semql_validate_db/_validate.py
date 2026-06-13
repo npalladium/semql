@@ -33,7 +33,6 @@ DbValidationCode = Literal[
     "missing_column",
     "base_predicate_invalid",
     "join_predicate_invalid",
-    "required_filter_dimension_missing",
 ]
 
 
@@ -130,31 +129,6 @@ def _from_clause(cube: Cube, lookup: dict[str, str]) -> str:
         return f"({body}) AS {cube.alias}"
     body = _resolve_placeholders(src.table, lookup)
     return f"{body} AS {cube.alias}"
-
-
-def _validate_required_filters(cube: Cube) -> list[DbValidationError]:
-    """Static check: every ``required_filters`` entry must name a real
-    dimension on the cube.
-
-    This is technically catalog-internal (no DB query needed), but
-    pre-deploy is the right surface for it — surfacing here means a CI
-    gate catches the typo even when the static-validation pass missed."""
-    dim_names = {d.name for d in cube.dimensions}
-    out: list[DbValidationError] = []
-    for req in cube.required_filters:
-        if req not in dim_names:
-            out.append(
-                DbValidationError(
-                    code="required_filter_dimension_missing",
-                    cube=cube.name,
-                    field=req,
-                    message=(
-                        f"Cube {cube.name!r} declares required_filters=[{req!r}] "
-                        f"but has no dimension by that name. Known: {sorted(dim_names)}."
-                    ),
-                )
-            )
-    return out
 
 
 def _validate_cube(
@@ -314,7 +288,6 @@ def validate_against_db(
     # ``iter_cubes`` skips META reflection cubes by default — they
     # live in-memory and aren't real database tables.
     for cube in iter_cubes(catalog):
-        errors.extend(_validate_required_filters(cube))
         errors.extend(_validate_cube(cube, connection, ctx))
     for source, join, target in iter_joins(catalog):
         errors.extend(_validate_join(source, join, target, connection, ctx))

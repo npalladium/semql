@@ -122,12 +122,53 @@ def test_frozen_models_reject_field_mutation(instance: object) -> None:
         instance.name = "renamed"  # type: ignore[attr-defined]
 
 
-def test_cube_is_not_frozen() -> None:
-    """Cube is intentionally mutable so callers can build it up
-    incrementally. Pin that decision so a future refactor surfaces."""
+def test_cube_is_frozen() -> None:
+    """Cube is a frozen catalog value type like every other (AGENTS.md):
+    it must not be able to drift out of sync with the catalog that
+    validated it. Mutation raises; build a fresh one (or model_copy)."""
     cube = Cube(name="c", dialect=Dialect.POSTGRES, table="t", alias="a")
-    cube.description = "set later"
-    assert cube.description == "set later"
+    with pytest.raises(ValidationError):
+        cube.description = "set later"
+
+
+def test_required_filters_must_name_real_field() -> None:
+    """A required_filters typo is caught at construction, not as a
+    misleading 'requires a filter on regn' at every query."""
+    with pytest.raises(ValidationError, match="required_filters"):
+        Cube(
+            name="c",
+            dialect=Dialect.POSTGRES,
+            table="t",
+            alias="a",
+            dimensions=[Dimension(name="region", sql="{a}.region", type="string")],
+            required_filters=["regn"],
+        )
+
+
+def test_required_filters_accepts_dimension_and_time_dimension() -> None:
+    cube = Cube(
+        name="c",
+        dialect=Dialect.POSTGRES,
+        table="t",
+        alias="a",
+        dimensions=[Dimension(name="region", sql="{a}.region", type="string")],
+        time_dimensions=[TimeDimension(name="created_at", sql="{a}.created_at")],
+        required_filters=["region", "created_at"],
+    )
+    assert cube.required_filters == ["region", "created_at"]
+
+
+def test_cube_keywords_deduped_and_frozen() -> None:
+    """Keyword normalisation/dedupe still happens — now in a
+    mode='before' validator since the instance is frozen."""
+    cube = Cube(
+        name="c",
+        dialect=Dialect.POSTGRES,
+        table="t",
+        alias="a",
+        keywords=["Sales", "sales", "revenue"],
+    )
+    assert cube.keywords == ["sales", "revenue"]
 
 
 # ---------------------------------------------------------------------------

@@ -147,16 +147,18 @@ class Filter(BaseModel):
                     raise ValueError(
                         f"Filter on bool dimension {self.dimension!r} got non-bool value {v!r}."
                     )
-            elif dim_type == "time":
+            elif dim_type in ("time", "date"):
                 if not isinstance(v, str):
                     raise ValueError(
-                        f"Filter on time dimension {self.dimension!r} got non-string value {v!r}."
+                        f"Filter on {dim_type} dimension {self.dimension!r} got "
+                        f"non-string value {v!r}."
                     )
                 try:
                     datetime.fromisoformat(v)
                 except ValueError:
                     raise ValueError(
-                        f"Filter on time dimension {self.dimension!r} got non-ISO-8601 value {v!r}."
+                        f"Filter on {dim_type} dimension {self.dimension!r} got "
+                        f"non-ISO-8601 value {v!r}."
                     ) from None
             elif dim_type == "uuid":
                 if not isinstance(v, str):

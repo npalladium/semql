@@ -66,8 +66,10 @@ gives the full picture instead of bailing on the first failure.
 - `base_predicate_invalid` — `cube.base_predicate` doesn't execute.
 - `join_predicate_invalid` — a `Join.on` predicate references columns
   that aren't there, or compares incompatible types.
-- `required_filter_dimension_missing` — static catalog check; the
-  named `required_filters` entry has no matching `Dimension`.
+
+(A `required_filters` entry that names no real dimension is now rejected
+at catalog construction — it can't reach this pre-deploy stage, so
+there's no DB-level check for it.)
 
 ## What it doesn't catch
 

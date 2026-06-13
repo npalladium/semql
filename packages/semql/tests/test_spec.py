@@ -146,6 +146,23 @@ def test_time_rejects_non_string_value() -> None:
         f.validate_for_type("time")
 
 
+def test_date_accepts_iso_8601() -> None:
+    Filter(dimension="x", op="gt", values=["2026-01-01"]).validate_for_type("date")
+    Filter(dimension="x", op="gt", values=["2026-01-01T00:00:00"]).validate_for_type("date")
+
+
+def test_date_rejects_non_iso_string() -> None:
+    f = Filter(dimension="x", op="gt", values=["last tuesday"])
+    with pytest.raises(ValueError, match="non-ISO-8601"):
+        f.validate_for_type("date")
+
+
+def test_date_rejects_non_string_value() -> None:
+    f = Filter(dimension="x", op="gt", values=[20260101])
+    with pytest.raises(ValueError, match="non-string"):
+        f.validate_for_type("date")
+
+
 def test_string_accepts_string() -> None:
     Filter(dimension="x", op="eq", values=["us"]).validate_for_type("string")
 

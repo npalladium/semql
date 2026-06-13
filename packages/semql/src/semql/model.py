@@ -775,6 +775,10 @@ class PartitionedScan(BaseModel):
 
 
 class Cube(BaseModel):
+    # Frozen like every other catalog value type (AGENTS.md): a cube must
+    # not be able to drift out of sync with the catalog that validated it.
+    model_config = ConfigDict(frozen=True)
+
     name: str
     dialect: Dialect
     # IANA timezone (e.g. "America/New_York") the cube's timestamps are
@@ -1048,6 +1052,24 @@ class Cube(BaseModel):
                 )
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_keywords(cls, data: Any) -> Any:  # noqa: ANN401 — pydantic before-validator raw input
+        """Normalise + dedupe ``keywords`` before model construction.
+
+        Done here (not in an after-validator) because Cube is frozen, so
+        ``self.keywords`` can't be reassigned post-construction."""
+        if not isinstance(data, dict):
+            return data
+        fields = cast("dict[str, Any]", data)
+        if not fields.get("keywords"):
+            return fields
+        name = str(fields.get("name", ""))
+        return {
+            **fields,
+            "keywords": _grounding_validate_keywords("Cube", name, fields["keywords"]),
+        }
+
     @model_validator(mode="after")
     def _check_grounding(self) -> Cube:
         """Length caps + dedupe on the grounding fields. Refuses
@@ -1056,9 +1078,9 @@ class Cube(BaseModel):
         happens at Catalog construction — Cube doesn't know its
         siblings)."""
         _grounding_validate_questions("Cube", self.name, self.questions)
-        # Normalised + deduped keywords replace the input list. Cube
-        # isn't frozen, so direct assignment is fine.
-        self.keywords = _grounding_validate_keywords("Cube", self.name, self.keywords)
+        # Keyword normalisation/dedupe happens in a ``mode="before"``
+        # validator (``_normalise_keywords``) because Cube is frozen and
+        # an after-validator can't reassign ``self.keywords``.
         _grounding_validate_relations("Cube", self.name, self.relations)
         if self.stability != "deprecated" and self.replacement is not None:
             raise ValueError(
@@ -1066,6 +1088,22 @@ class Cube(BaseModel):
                 f"when ``stability='deprecated'`` (got stability="
                 f"{self.stability!r})."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_required_filters_exist(self) -> Cube:
+        """Each ``required_filters`` entry must name a real dimension or
+        time-dimension on this cube. A typo (``["regn"]``) otherwise
+        constructs cleanly and makes the cube permanently un-queryable
+        with a misleading per-query 'requires a filter on regn' error."""
+        field_names = {d.name for d in self.dimensions} | {td.name for td in self.time_dimensions}
+        for req in self.required_filters:
+            if req not in field_names:
+                raise ValueError(
+                    f"Cube {self.name!r}: required_filters entry {req!r} does not "
+                    f"name a dimension or time_dimension on the cube "
+                    f"(known: {sorted(field_names)})."
+                )
         return self
 
     @model_validator(mode="after")

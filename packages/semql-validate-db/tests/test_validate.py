@@ -165,18 +165,19 @@ def test_join_predicate_invalid(conn: duckdb.DuckDBPyConnection) -> None:
     ), findings
 
 
-def test_required_filter_dimension_missing(conn: duckdb.DuckDBPyConnection) -> None:
-    """A required_filters entry that doesn't match any dimension is
-    a static catalog defect — surface it at pre-deploy time even
-    when the table itself is fine."""
-    conn.execute("CREATE TABLE orders (amount DOUBLE, region TEXT, created_at TIMESTAMP)")
+def test_required_filter_dimension_missing_is_rejected_at_construction() -> None:
+    """A required_filters entry that names no real dimension is now a
+    *construction-time* defect (Cube validation, enforced catalog-wide
+    via CatalogSpec revalidation) — caught before a catalog ever reaches
+    the pre-deploy DB validator, so semql-validate-db no longer needs a
+    redundant static check for it."""
+    from pydantic import ValidationError
+
+    # model_copy bypasses Cube validation, but assembling it into a
+    # Catalog revalidates and rejects the typo.
     cube = _orders_cube().model_copy(update={"required_filters": ["tenant_id"], "joins": []})
-    catalog = Catalog([cube])
-    findings = validate_against_db(catalog, connection=conn)
-    rf = [f for f in findings if f.code == "required_filter_dimension_missing"]
-    assert len(rf) == 1
-    assert rf[0].cube == "orders"
-    assert rf[0].field == "tenant_id"
+    with pytest.raises(ValidationError, match="required_filters"):
+        Catalog([cube])
 
 
 # ---------------------------------------------------------------------------
