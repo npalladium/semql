@@ -50,7 +50,7 @@ class EngineError(RuntimeError):
 
 
 OnExecuteHook = Callable[..., Any]
-"""P7 observability hook fired after every ``Engine.run``.
+"""Observability hook fired after every ``Engine.run``.
 
 Signature: ``(plan, elapsed_ms, *, cache_hit) -> Any``. The hook
 is best-effort: if it raises, the engine still returns the result.
@@ -169,7 +169,7 @@ class Engine:
     call :meth:`run`. The engine isn't tied to a specific catalog;
     register adapters once and execute many plans.
 
-    Optional P7 features:
+    Optional features:
 
     - ``cache_size``: a positive int enables an LRU result cache. The
       cache key is the plan's emitted shape (merge SQL + params + per-
@@ -264,7 +264,7 @@ class Engine:
         mismatches between adapter output and the fragment's declared
         columns.
 
-        If the engine has a cache (P7) and the plan's emitted shape
+        If the engine has a cache and the plan's emitted shape
         matches a prior run, the cached result is returned without
         touching the adapter or DuckDB. The on_execute hook fires
         either way.

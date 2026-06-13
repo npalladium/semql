@@ -209,7 +209,7 @@ def validate(
             )
         )
 
-    # S7 lifecycle hints. ``deprecated`` is a hard refusal (the
+    # Lifecycle hints. ``deprecated`` is a hard refusal (the
     # compiler raises) so ``validate`` surfaces it as an error too —
     # mirrors ``compile`` for the planner-feedback loop. ``beta`` is a
     # soft advisory: included in the result so a UI can warn the user

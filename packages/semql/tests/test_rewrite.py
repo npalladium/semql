@@ -1,4 +1,4 @@
-"""Tests for the conversational-rewrite vocabulary (S5).
+"""Tests for the conversational-rewrite vocabulary.
 
 Five closed-enum ops — AddFilter / RemoveFilter / ChangeTimeWindow
 / ChangeGranularity / Drilldown — each a pure transformer over a

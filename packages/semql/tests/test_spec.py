@@ -252,7 +252,7 @@ def test_compare_window_rejects_unknown_mode() -> None:
 
 
 # ---------------------------------------------------------------------------
-# JSON Schema descriptions (S7-R3) — every property the LLM tool-calling
+# JSON Schema descriptions — every property the LLM tool-calling
 # layer surfaces must carry a useful description, or the model has to guess
 # what each field means.
 # ---------------------------------------------------------------------------

@@ -85,7 +85,7 @@ class ColumnRef:
 
     @property
     def provenance(self) -> Provenance:
-        """How much this output column can be trusted (C3), derived from
+        """How much this output column can be trusted, derived from
         :attr:`kind`: a catalog measure is ``VERIFIED``, a derived/inline
         measure is ``COMPOSED``, a raw dimension or time bucket is
         ``DIMENSION``."""
@@ -228,11 +228,11 @@ class LogicalPlan:
     compare: CompareSplit | None = None
     # Carry-through query state that the emitter still reads from the
     # source ``SemanticQuery`` rather than walking the plan: post-agg
-    # ``having`` predicates, named ``segments``, and I14 output
+    # ``having`` predicates, named ``segments``, and output
     # ``aliases``.  Held here (tuples for immutability) so the plan is
     # a *lossless* representation of the query — ``compile_plan`` can
     # reconstruct the query faithfully instead of silently dropping
-    # them (architecture review A1).  Not rendered in ``__repr__`` to
+    # them.  Not rendered in ``__repr__`` to
     # keep the plan-snapshot contract stable.
     having: tuple[Filter, ...] = ()
     segments: tuple[str, ...] = ()
@@ -457,10 +457,10 @@ def output_column_collisions(
     projected dimensions + measures.
 
     The collision set is computed on *resolved field names* — not the
-    query's ref locals — so referencing a dimension by an I7 input-alias
+    query's ref locals — so referencing a dimension by an input-alias
     (``orders.territory`` for the ``region`` dimension) can't defeat the
     prefix. This is the single basis shared by the plan's projection and
-    the emitter (review B1: the convention used to exist twice)."""
+    the emitter; the convention used to exist twice."""
     counts = Counter([*dim_field_names, *measure_field_names])
     return {n for n, c in counts.items() if c > 1}
 

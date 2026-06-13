@@ -14,7 +14,7 @@ Backwards compatibility:
 - ``CompileError`` still subclasses ``ResolveError``, preserving the
   visualisation layer's ``except ResolveError:`` pattern.
 
-B8 — uniform error contract:
+Uniform error contract:
 - Every leaf exposes :meth:`to_payload` returning a ``dict`` shaped
   ``{"code", "message", ...}`` with the leaf's structured attrs. The
   shape is JSON-safe (lists, dicts, strings, bools, ints, None) so MCP

@@ -405,7 +405,7 @@ def test_merge_plan_is_a_dataclass_with_sql_and_params() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Raw-row mode (P3) — lifts non-distributive aggs and having
+# Raw-row mode — lifts non-distributive aggs and having
 # ---------------------------------------------------------------------------
 
 

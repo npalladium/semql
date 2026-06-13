@@ -23,10 +23,10 @@ def parse_instant(value: str) -> datetime:
     ``"2024-01-01T00:00:00"`` and ``"2024-01-01T05:00:00+05:00"`` all
     denote the same moment and must compare equal — lexical string
     comparison gets this wrong the instant two endpoints carry different
-    UTC offsets or differing precision (the A2 routing bug). Naive
+    UTC offsets or differing precision (the routing bug). Naive
     timestamps are read as UTC so a naive endpoint stays comparable with
     an offset-bearing one; per-cube timezone semantics are tracked
-    separately (architecture review B9). Raises ``ValueError`` naming the
+    separately. Raises ``ValueError`` naming the
     offending value if it is not valid ISO-8601.
 
     >>> parse_instant("2024-01-01")

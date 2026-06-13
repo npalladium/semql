@@ -6,7 +6,7 @@ provides convenience methods that wrap the lower-level
 ``compile_query`` function. Prompt rendering lives in the separate
 ``semql-prompt`` package (``semql_prompt.planner_prompt(catalog, ...)``).
 
-B5 — CatalogSpec / CatalogRuntime split:
+CatalogSpec / CatalogRuntime split:
 - :class:`CatalogSpec` is a frozen Pydantic value type holding the
   serialisable catalog data (cubes, views, lookups, saved queries,
   glossary, relations, hook names). Round-trips through
@@ -64,7 +64,7 @@ _T = TypeVar("_T", bound=BaseField)
 
 
 class CatalogSpec(BaseModel):
-    """B5 — the serialisable half of a Catalog.
+    """The serialisable half of a Catalog.
 
     A :class:`CatalogSpec` carries every field that survives a process
     boundary: cubes, views, lookups, saved queries, glossary, the
@@ -143,7 +143,7 @@ class CatalogSpec(BaseModel):
         the errors or pair with a runtime anyway.
 
         Each error is a dict shaped ``{"code", "message", ...}``
-        (the B8 envelope shape). Codes are stable identifiers:
+        (the error-envelope shape). Codes are stable identifiers:
 
         - ``duplicate_cube_name``
         - ``unknown_primary_key_dimension``
@@ -472,7 +472,7 @@ class CatalogSpec(BaseModel):
 
 @dataclass(frozen=True)
 class CatalogRuntime:
-    """B5 — the callable half of a Catalog.
+    """The callable half of a Catalog.
 
     The runtime holds the callables that can't cross a process
     boundary: the visibility policy, the scope-function registry,
@@ -498,7 +498,7 @@ class Catalog:
     """A validated collection of cubes plus the convenience surface
     (``compile``, ``as_dict``, ``with_retrieval``) downstream code wants.
 
-    B5: a :class:`Catalog` pairs a :class:`CatalogSpec` (data) with
+    A :class:`Catalog` pairs a :class:`CatalogSpec` (data) with
     a :class:`CatalogRuntime` (callables). The legacy ``__init__``
     signature still works — internally it builds the spec and runtime
     from the validated state. Use :meth:`from_spec` to construct
@@ -506,11 +506,11 @@ class Catalog:
     a collect-all build.
     """
 
-    #: B5 — public so callers can introspect the serialised shape
+    #: public so callers can introspect the serialised shape
     #: without going through model_dump. Populated in ``__init__``.
     spec: CatalogSpec
 
-    #: B5 — the callable half. Not serialisable.
+    #: the callable half. Not serialisable.
     runtime: CatalogRuntime
 
     @classmethod
@@ -809,7 +809,7 @@ class Catalog:
             seen_saved_names.add(sq.name)
         self.saved_queries: dict[str, SavedQuery] = {sq.name: sq for sq in saved_query_list}
 
-        # S7 — replacement pointers must name a real cube. Cube doesn't
+        # Replacement pointers must name a real cube. Cube doesn't
         # know its siblings at construction time; check here.
         for c in merged:
             if c.replacement is not None and c.replacement not in self._by_name:
@@ -826,7 +826,7 @@ class Catalog:
                     f"queries: {sorted(self.saved_queries)}."
                 )
 
-        # S7 — catalog-wide glossary + cross-cube relations narrative.
+        # Catalog-wide glossary + cross-cube relations narrative.
         # Terms and aliases share one namespace (the retriever indexes
         # aliases as separate documents pointing at the same canonical
         # entry, so a token that's both a term and an alias would be
@@ -862,7 +862,7 @@ class Catalog:
                 )
         self._error_transform: object | None = error_transform
 
-        # B5 — build the spec + runtime pair now that validation has
+        # build the spec + runtime pair now that validation has
         # passed. The spec carries only the user-supplied cubes
         # (META reflection cubes are appended on read by the
         # ``_by_name`` materialisation, not stored in the spec).
@@ -979,7 +979,7 @@ class Catalog:
           (never a SQL literal).
 
         On a :class:`FilterTypeError` the catalog enriches the exception
-        with the LLM-repair affordance (B8): if the failing dimension
+        with the LLM-repair affordance: if the failing dimension
         has a registered ``Lookup`` the error carries
         ``next_tool="resolve_lookup"`` plus the tool args, so a machine
         consumer can call the lookup tool to resolve the free-text
@@ -1120,7 +1120,7 @@ class Catalog:
         viewer: AuthContext | None = None,
         query_defaults: object | None = None,
     ) -> list[ValidationError]:
-        """B8 — collect-all compile path.
+        """Collect-all compile path.
 
         Returns ``[]`` when the query compiles, otherwise returns the
         full list of :class:`~semql.validate.ValidationError` records
@@ -1168,7 +1168,7 @@ class Catalog:
         """Build a :class:`semql.retrieve.Retriever` indexed over this
         catalog's cubes + glossary aliases.
 
-        Selection policy mirrors the S7 PRD:
+        Selection policy mirrors the grounding PRD:
         - No ``embedder`` → :class:`SQLiteBM25Retriever` (lexical only).
         - With ``embedder`` → :class:`HybridRetriever` (BM25 + cosine via RRF).
         - ``mmr=True`` wraps the result in :class:`MMRWrapper` (needs vectors).

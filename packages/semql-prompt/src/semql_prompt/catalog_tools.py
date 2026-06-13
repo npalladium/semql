@@ -47,7 +47,7 @@ def planner_prompt(
 
     When ``viewer`` is provided, the catalog block shrinks to the cubes
     the viewer is allowed to see. ``ctx`` is the resolution context for
-    dimension-value lookups. Retrieval mode (S7) narrows the block to the
+    dimension-value lookups. Retrieval mode narrows the block to the
     top-``top_k`` cubes when ``user_query`` + ``retriever`` are set and the
     catalog exceeds ``retrieval_threshold`` questions."""
     segments = build_planner_prompt_segments(

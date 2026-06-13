@@ -152,14 +152,14 @@ class ColumnMeta:
     display_unit: str | None = None
     format: FormatLiteral | None = None
     storage_type: StorageType | None = None
-    # A1 — True when the column's SQL was substituted by a mask
+    # True when the column's SQL was substituted by a mask
     # constant (NULL or ``mask_value``) rather than the real field
     # expression. Downstream renderers (chart, table) use this to
     # suppress cell rendering or show a lock icon.
     masked: bool = False
 
     def model_dump(self) -> dict[str, Any]:
-        """JSON-safe dict view of this ColumnMeta (I9 round-trip helper)."""
+        """JSON-safe dict view of this ColumnMeta (round-trip helper)."""
         return {
             "name": self.name,
             "kind": self.kind,
@@ -217,7 +217,7 @@ class CompiledQuery:
     physical_sources_hit: tuple[str, ...] = ()
 
     def model_dump(self) -> dict[str, Any]:
-        """JSON-safe dict view of this CompiledQuery (I9 round-trip helper).
+        """JSON-safe dict view of this CompiledQuery (round-trip helper).
 
         Stable across versions for the same query + catalog. The shape
         matches Pydantic's ``BaseModel.model_dump`` so callers writing
@@ -240,7 +240,7 @@ class CompiledQuery:
     def model_validate(cls, data: dict[str, Any]) -> CompiledQuery:
         """Reconstruct a CompiledQuery from a ``model_dump()`` payload.
 
-        Pairs with :meth:`model_dump` for I9 — the round-trip is
+        Pairs with :meth:`model_dump` — the round-trip is
         byte-stable: ``CompiledQuery.model_validate(cq.model_dump())``
         equals ``cq`` field-for-field.
         """
@@ -377,7 +377,7 @@ def _apply_mask_metadata(
     column_meta: list[ColumnMeta],
     env: _CompileEnv,
 ) -> list[ColumnMeta]:
-    """A1 — flip ``ColumnMeta.masked`` for every field the viewer has
+    """Flip ``ColumnMeta.masked`` for every field the viewer has
     a mask role on. Returns a new list; ``ColumnMeta`` is frozen, so
     we rebuild each masked entry.
     """
@@ -744,7 +744,7 @@ def _compile_where_tree(
 # sqlglot's own per-dialect ``RESERVED_KEYWORDS`` are inconsistent — empty
 # for Postgres/ClickHouse, only partial for DuckDB — so a fragment like
 # ``{t}.order`` emits unquoted, invalid SQL under Postgres. We quote against
-# this curated set ourselves (C7, ktx-ports M1). Source: ANSI SQL:2016
+# this curated set ourselves. Source: ANSI SQL:2016
 # reserved words plus the common dialect keywords that collide with real
 # column names. Quoting a reserved word is safe in every supported dialect;
 # ordinary identifiers (``region``, ``amount``) are left untouched.
@@ -936,7 +936,7 @@ def _quote_reserved_identifiers(node: exp.Expression) -> exp.Expression:
 
 @functools.lru_cache(maxsize=256)
 def _parse_fragment_cached(sql: str, dialect: str) -> exp.Expression:
-    """Parse + reserved-word-quote a fragment once per ``(sql, dialect)`` (C9).
+    """Parse + reserved-word-quote a fragment once per ``(sql, dialect)``.
 
     The same ``expr`` strings recur many times across a compilation; this
     memoises the parse. ``lru_cache`` does not cache exceptions, so a bad
@@ -958,10 +958,10 @@ def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
     """Parse a catalog SQL fragment into a sqlglot AST node.
 
     Used for dim/measure/time-dimension expressions, ``Join.on``, and
-    ``base_predicate``. Reserved-word identifiers are force-quoted (C7) so
+    ``base_predicate``. Reserved-word identifiers are force-quoted so
     a column named after a keyword emits valid SQL.
 
-    Returns an independent ``.copy()`` of the cached parse (C9): callers
+    Returns an independent ``.copy()`` of the cached parse: callers
     reparent the node into a larger expression and the reserved-word pass
     mutates it, so each caller needs its own tree."""
     return _parse_fragment_cached(sql, dialect).copy()
@@ -1083,7 +1083,7 @@ def _check_field_visibility(
     catalog: dict[str, Cube],
     viewer: AuthContext | None,
 ) -> None:
-    """A1 — Field hide gate. Refuse queries that touch a field the
+    """Field hide gate. Refuse queries that touch a field the
     viewer's roles don't intersect with ``field.required_roles``.
 
     The error message is indistinguishable from "field doesn't exist"
@@ -1255,7 +1255,7 @@ def _check_alias_uniqueness(touched: list[Cube]) -> None:
 # the cube the measure lives on. ``min`` / ``max`` / ``count_distinct``
 # are invariant under row duplication and stay safe; ``avg`` / ``ratio`` /
 # quantiles are distorted only by *uneven* duplication and are left to the
-# join-graph rework (W3) rather than refused with this coarser check.
+# join-graph rework rather than refused with this coarser check.
 _FAN_OUT_SENSITIVE_AGGS: frozenset[str] = frozenset({"sum", "count"})
 
 
@@ -1354,7 +1354,7 @@ class _CompileEnv:
         # the rollup / partition *plan* transforms are the caller's job
         # — the env does not re-run ``to_logical_plan`` and does not
         # re-pick a rollup (which would re-derive a fresh, untransformed
-        # plan and discard the caller's work — the original A1 bug).
+        # plan and discard the caller's work — the original bug).
         # ``q`` must still be a faithful description of the plan (the
         # resolution caches + pre-flight checks read it); ``compile_plan``
         # reconstructs it from the plan to guarantee that.
@@ -1540,7 +1540,7 @@ class _CompileEnv:
         # appears more than once across dims + measures so each output
         # column is unique. Shared with the plan's projection via
         # ``output_column_collisions`` / ``output_alias`` so the two can't
-        # disagree (review B1: the convention used to exist twice).
+        # disagree; the convention used to exist twice.
         self._collisions: set[str] = output_column_collisions(
             [d.name for _, d in self.dim_fields],
             [m.name for _, m in self.measure_fields],
@@ -1549,7 +1549,7 @@ class _CompileEnv:
         self.measure_col_names: list[str] = [
             self._col_name(c, m.name) for c, m in self.measure_fields
         ]
-        # I14 placeholder — populated after the time-block below,
+        # Alias placeholder — populated after the time-block below,
         # once ``self.time_col_name`` is set.
         self.alias_map: dict[str, str] = {}
 
@@ -1570,7 +1570,7 @@ class _CompileEnv:
             assert granularity is not None
             self.time_col_name = f"{self.time_dim.name}_{granularity}"
 
-        # I14 — Output column aliases. Validate every alias (resolves
+        # Output column aliases. Validate every alias (resolves
         # to a declared field; key doesn't collide with an existing
         # output column). Build a ``col_name -> alias_key`` map so
         # projection / order / having can substitute the alias key
@@ -1604,13 +1604,13 @@ class _CompileEnv:
                 # already in the query, replace its column name with
                 # the alias key. If the target is a measure / dim
                 # NOT in the query, we'd need to add it — out of
-                # scope for I14 (keep the contract simple: aliases
+                # scope (keep the contract simple: aliases
                 # only re-label already-selected fields).
                 if original_col not in existing_cols:
                     raise CompileError(
                         f"aliases[{alias_key!r}] = {alias_ref!r}: target "
-                        "field is not selected in this query. I14 "
-                        "aliases re-label existing outputs only."
+                        "field is not selected in this query. Aliases "
+                        "re-label existing outputs only."
                     )
                 self.alias_map[original_col] = alias_key
                 existing_cols.add(alias_key)
@@ -1623,7 +1623,7 @@ class _CompileEnv:
         return output_alias(cube.name, field_name, self._collisions)
 
     def field_is_masked(self, field: Measure | Dimension | TimeDimension) -> bool:
-        """A1 mask gate — viewer has any role in ``field.mask_roles``.
+        """Mask gate — viewer has any role in ``field.mask_roles``.
 
         The field-hide gate (a different error path) already filters
         fields whose ``required_roles`` the viewer doesn't intersect.
@@ -1648,7 +1648,7 @@ class _CompileEnv:
         default_expr: exp.Expression,
         col_name: str,
     ) -> exp.Expression:
-        """A1 mask substitution — return the field's SQL or a constant.
+        """Mask substitution — return the field's SQL or a constant.
 
         ``None`` mask value → ``CAST(NULL AS <inferred_type>)``.
         String mask value → literal SQL (caller is responsible for
@@ -1868,7 +1868,7 @@ class _CompileEnv:
         scope) wrap each source via ``wrap_for_tenancy``.
 
         The root + join targets are read from
-        ``self.plan.scans`` / ``self.plan.joins`` (LOGb — the plan
+        ``self.plan.scans`` / ``self.plan.joins`` (the plan
         is the single source of truth).  The legacy
         derived-cube / derived-edge slots on the env survive for
         any helpers that still reach past the plan; emission here
@@ -1978,7 +1978,7 @@ class _CompileEnv:
                         granularity,
                         self.parse(col.field.sql),
                         # A date has no zone to shift into; only timestamps
-                        # get the cube's timezone applied (B9).
+                        # get the cube's timezone applied.
                         self.plan.aggregate.time.cube.timezone
                         if col.field.type != "date"
                         else None,
@@ -2076,7 +2076,7 @@ class _CompileEnv:
         Keyed by the leaf's qualified ``dimension``, not object identity:
         the resolved field depends only on which ``cube.field`` the leaf
         names, so a leaf an IR transform *copied* (federation split-point,
-        CNF routing) resolves the same as the original (review B6)."""
+        CNF routing) resolves the same as the original."""
         for f, _cube, fld in self.filter_resolutions:
             if f.dimension == leaf.dimension:
                 return fld
@@ -2158,7 +2158,7 @@ class _CompileEnv:
                 )
                 if td is not None:
                     # A date has no zone to shift into; only timestamps get
-                    # the cube's timezone applied (B9).
+                    # the cube's timezone applied.
                     tz = (
                         None
                         if isinstance(td, TimeDimension) and td.type == "date"
@@ -2244,8 +2244,8 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
 
     # Ranges come from the plan's CompareSplit — the single place the
     # prior-range math runs (``to_logical_plan``). The emitter trusts the
-    # plan rather than recomputing from ``q.compare`` (review B1: the math
-    # used to be computed twice and the plan node was write-only).
+    # plan rather than recomputing from ``q.compare``: the math
+    # used to be computed twice and the plan node was write-only.
     assert env.plan.compare is not None
     current_range = env.plan.compare.current_range
     prior_range = env.plan.compare.prior_range
@@ -2432,7 +2432,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     if env.has_time_breakdown and time_col_name is not None:
         columns.append(time_col_name)
     columns.extend(measure_col_names)
-    # I14: substitute alias keys for original column names in the
+    # Substitute alias keys for original column names in the
     # output column list. order_by / having also use the alias key
     # because the user wrote it that way — the SQL was already
     # rendered with the alias key in projection.
@@ -2461,7 +2461,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
         columns.append(ir.name)
         measure_alias_map[ir.name] = node
 
-    # I14: HAVING may reference an alias key (e.g. ``net``) instead
+    # HAVING may reference an alias key (e.g. ``net``) instead
     # of the underlying measure name. Build a reverse map so we can
     # substitute the canonical measure name before lookup.
     alias_to_measure: dict[str, str] = {}
@@ -2478,7 +2478,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
                 "``compare=CompareWindow(...)``."
             )
         lookup_name = hf.dimension
-        # I14: alias key → underlying measure name.
+        # Alias key → underlying measure name.
         if lookup_name in alias_to_measure:
             lookup_name = alias_to_measure[lookup_name]
         if lookup_name not in measure_alias_map and "." in lookup_name:
@@ -2569,7 +2569,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
                 "references are only valid when the query sets "
                 "``compare=CompareWindow(...)``."
             )
-        # I14: alias key — already in the columns list, so the
+        # Alias key — already in the columns list, so the
         # ``ref in columns`` branch below matches.
         if ref in measure_alias_map or ref in columns:
             order_target: exp.Expression = exp.column(ref)
@@ -2677,7 +2677,7 @@ def compile_plan(
 ) -> CompiledQuery:
     """Compile a :class:`LogicalPlan` directly to a :class:`CompiledQuery`.
 
-    LOGb entry point — the plan is the single source of truth for
+    Plan-driven entry point — the plan is the single source of truth for
     emission.  Used by:
 
     - The federation split-point
@@ -2710,8 +2710,8 @@ def compile_plan(
     #
     # Every field that flows query -> plan must be reconstructed here,
     # because ``_CompileEnv`` re-plans this query: anything not copied
-    # back is silently dropped from the emitted SQL (architecture
-    # review A1).  Measures / dimensions come from the ``Aggregate``
+    # back is silently dropped from the emitted SQL.  Measures /
+    # dimensions come from the ``Aggregate``
     # node verbatim (``group_by`` / ``measures`` are ``list(q.*)``);
     # an ungrouped row-listing has no aggregate, so its dimensions are
     # read off the projection instead.

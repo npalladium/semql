@@ -1,4 +1,4 @@
-"""I2 — Catalog-level static linting.
+"""Catalog-level static linting.
 
 Walks a catalog and surfaces structural smells before they hit a
 real query. Each rule is a pure function over the catalog. The

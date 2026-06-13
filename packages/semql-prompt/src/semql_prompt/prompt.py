@@ -287,7 +287,7 @@ def render_catalog_block(
 
 
 # ---------------------------------------------------------------------------
-# Cacheable two-segment rendering (P6)
+# Cacheable two-segment rendering
 # ---------------------------------------------------------------------------
 
 
@@ -556,7 +556,7 @@ def render_tool_description(cube: Cube) -> str:
     ]
     if td_names:
         parts.append(f"Time dimensions: {', '.join(td_names)}.")
-    # S7 — surface up to ~6 canonical phrasings + a short relations
+    # Surface up to ~6 canonical phrasings + a short relations
     # excerpt so external agents picking by tool description see what
     # this cube actually answers. Truncating relations keeps the tool
     # description compact (some MCP clients have schema-size limits).
@@ -746,7 +746,7 @@ def _render_cube(
     if cube.required_filters:
         reqs = ", ".join(f"`{cube.name}.{r}`" for r in cube.required_filters)
         out.append(f"**Required filters:** {reqs} — compile fails without them.")
-    # S7 — cube-internal relations narrative sits between the header
+    # Cube-internal relations narrative sits between the header
     # area and the field tables. Cross-cube narrative lives in the
     # catalog-level Domain Context block.
     if cube.relations:
@@ -781,7 +781,7 @@ def _render_cube(
         for d in cube.dimensions:
             desc = f" — {d.description}" if d.description else ""
             human = _human(d.display_name)
-            # I10 — surface the cross-cube coercion opt-in so the planner
+            # Surface the cross-cube coercion opt-in so the planner
             # knows this key may join a differently-typed key.
             coerce = f" `coerce_to={d.coerce_to}`" if d.coerce_to is not None else ""
             out.append(f"  - `{cube.name}.{d.name}` `type={d.type}`{coerce}{human}{desc}")
@@ -815,7 +815,7 @@ def _render_cube(
         for j in cube.joins:
             out.append(f"  - → `{j.to}` ({j.relationship})")
 
-    # S7 grounding surfaces. Questions go in their own subsection so
+    # Grounding surfaces. Questions go in their own subsection so
     # the planner sees canonical phrasings without parsing prose.
     # Keywords are a single comma-separated line — tokens, not bullets.
     if cube.questions:

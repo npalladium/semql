@@ -1,4 +1,4 @@
-"""Pluggable retrieval over catalog cubes — S7 grounding surface.
+"""Pluggable retrieval over catalog cubes — grounding surface.
 
 Two Protocols sit at the seam between catalog and search backend:
 
@@ -93,7 +93,7 @@ class _Doc:
 
 
 def _cube_doc_text(cube: Cube) -> str:
-    """Concatenated text per the S7 PRD: description + each question +
+    """Concatenated text: description + each question +
     space-joined keywords. One document per cube."""
     parts: list[str] = []
     if cube.description:
@@ -486,7 +486,7 @@ def build_default_retriever(
     mmr: bool = False,
     mmr_lambda: float = 0.5,
 ) -> Retriever:
-    """Apply the S7 selection policy:
+    """Apply the selection policy:
 
     - No ``embedder`` → ``SQLiteBM25Retriever``.
     - With ``embedder`` → ``HybridRetriever(bm25, cosine)``.

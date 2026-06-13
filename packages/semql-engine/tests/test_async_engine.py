@@ -1,4 +1,4 @@
-"""Tests for AsyncEngine + AsyncAdapter (P2).
+"""Tests for AsyncEngine + AsyncAdapter.
 
 Mirrors test_engine.py but exercises the async surface: per-fragment
 adapters run in parallel via ``asyncio.gather``, the merge step still

@@ -143,7 +143,7 @@ def test_deeply_nested_boolexpr_filter_compiles() -> None:
 
 
 def test_equal_time_window_endpoints_compile() -> None:
-    """Half-open [t, t) is an empty but legal window (D7) — must not crash."""
+    """Half-open [t, t) is an empty but legal window — must not crash."""
     out = _single().compile(
         SemanticQuery(
             measures=["orders.count"],

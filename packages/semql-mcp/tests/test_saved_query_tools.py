@@ -1,4 +1,4 @@
-"""Tests for the auto-registered saved-query MCP tools (S4).
+"""Tests for the auto-registered saved-query MCP tools.
 
 Each :class:`SavedQuery` on the catalog becomes a zero-arg
 ``saved_<name>`` MCP tool. The tool compiles the pre-baked

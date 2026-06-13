@@ -442,7 +442,7 @@ def test_engine_runs_raw_rows_with_cross_partition_or(
 
 
 # ---------------------------------------------------------------------------
-# Raw-row federation (P3) — non-distributive aggs end-to-end
+# Raw-row federation — non-distributive aggs end-to-end
 # ---------------------------------------------------------------------------
 
 

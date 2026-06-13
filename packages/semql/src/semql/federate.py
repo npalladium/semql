@@ -272,7 +272,7 @@ def _parse_bridge(left_cube: Cube, right_cube: Cube, join: Join) -> _Bridge:
 
 def _accepted_types(dim: Dimension) -> set[str]:
     """The set of types a dimension is willing to be compared as: its own
-    declared ``type`` plus any ``coerce_to`` opt-in (I10)."""
+    declared ``type`` plus any ``coerce_to`` opt-in."""
     types: set[str] = {dim.type}
     if dim.coerce_to is not None:
         types.add(dim.coerce_to)
@@ -286,7 +286,7 @@ def _check_bridge_key_types(
     right_dim: str,
 ) -> None:
     """Refuse a cross-backend bridge join whose two keys have
-    incompatible declared types (I10).
+    incompatible declared types.
 
     The merge equates the keys with a bare ``a.k = b.k``; if the types
     differ the underlying engine coerces one side silently, which can

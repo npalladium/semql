@@ -1,4 +1,4 @@
-"""I12: prompt-budget enforcement.
+"""Prompt-budget enforcement.
 
 The four-role prompt pipeline (Router / Generator / Presenter /
 Drilldown) builds catalog fragments that can grow large as the
@@ -65,7 +65,7 @@ def _slice_section(text: str, start_marker: str, end_marker: str | None) -> tupl
     if start == -1:
         return text, ""
     if end_marker is None:
-        # Default: next H2 header.
+        # Default: next section header.
         end = text.find("\n## ", start + len(start_marker))
         if end == -1:
             end = len(text)

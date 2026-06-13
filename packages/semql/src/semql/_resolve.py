@@ -56,7 +56,7 @@ def resolve_field(
     cube_name, field_name = split(qualified)
     if cube_name not in catalog:
         hint = closest_match(cube_name, catalog.keys())
-        # B8 — surface a richer alternatives list. The LLM repair loop
+        # Surface a richer alternatives list. The LLM repair loop
         # consumes this directly; we drop the 0.6 difflib cutoff for the
         # list version so any plausible token is offered, and let the
         # caller choose.
@@ -134,8 +134,8 @@ class _ResolvedFields:
     (the resolver calls `resolve_with_views(leaf.dimension)`), so a *copied*
     leaf — which IR transforms such as the federation split-point produce —
     resolves identically to the original. (Keying by `id(leaf)` instead, as
-    an earlier version did, broke the moment a transform rebuilt a leaf;
-    see review B6.) The filter list mirrors `q.filters` order; the
+    an earlier version did, broke the moment a transform rebuilt a leaf.)
+    The filter list mirrors `q.filters` order; the
     where-leaf dict mirrors a depth-first walk of `q.where`."""
 
     measure_fields: list[tuple[Cube, Measure]]

@@ -1,5 +1,5 @@
 # pyright: reportPrivateImportUsage=false, reportUnusedImport=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportArgumentType=false
-"""I13 — SQL → SemanticQuery parser.
+"""SQL → SemanticQuery parser.
 
 Converts a SQL-like statement (typically emitted by an LLM agent)
 into a :class:`~semql.spec.SemanticQuery`. The output goes through
@@ -193,7 +193,7 @@ def _agg_func_name(func: exp.Expression) -> str | None:
 
 def _inside_subquery(node: exp.Expression, root: exp.Expression) -> bool:
     """True if ``node`` sits inside a nested SELECT/subquery relative to
-    ``root`` (C12).
+    ``root``.
 
     ``Expression.walk()`` descends into subqueries, so an aggregate that
     belongs to a scalar subquery would otherwise be attributed to the outer
@@ -214,7 +214,7 @@ def _inside_subquery(node: exp.Expression, root: exp.Expression) -> bool:
 def _collect_aggregates(expr: exp.Expression) -> list[exp.AggFunc | exp.Anonymous]:
     """Find aggregate-function call nodes at the top level of ``expr``.
 
-    Aggregates nested inside a subquery are excluded (C12) — they belong to
+    Aggregates nested inside a subquery are excluded — they belong to
     that subquery, not the projection being classified."""
     out: list[Any] = []
     for node in expr.walk():
@@ -312,7 +312,7 @@ def parse_sql_statement(
             continue
         if expr.find(exp.Select) is not None:
             # A subquery projection (scalar subquery) is unsupported — its
-            # inner aggregates are NOT outer-query measures (C12). Surface it
+            # inner aggregates are NOT outer-query measures. Surface it
             # rather than silently dropping the projection.
             errors.append(
                 f"Unsupported SELECT projection {expr.sql()!r}: subqueries are not supported."

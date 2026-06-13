@@ -165,7 +165,7 @@ def test_compile_distinct_when_no_measures(catalog: dict[str, Cube]) -> None:
 
 
 def test_compile_join_emits_inner_join(catalog: dict[str, Cube]) -> None:
-    """A default multi-cube join is an INNER JOIN (D9): ``Join.kind`` is
+    """A default multi-cube join is an INNER JOIN: ``Join.kind`` is
     now honoured at emission, and a plain join with no ``left_joins`` is
     stamped ``kind="inner"``. The LEFT-JOIN spine is opt-in via
     ``left_joins`` (see test_left_joins)."""

@@ -64,7 +64,7 @@ class Dialect(StrEnum):
 
 
 class Provenance(StrEnum):
-    """How much a projected output column can be trusted (C3).
+    """How much a projected output column can be trusted.
 
     Lets downstream consumers (MCP tools, the presenter / drilldown prompt
     roles) distinguish a value that came from an approved measure
@@ -77,7 +77,7 @@ class Provenance(StrEnum):
 
 StabilityLiteral = Literal["stable", "beta", "deprecated"]
 """Lifecycle hint for a Cube / SavedQuery. ``deprecated`` is refused by
-the compiler (see S7 PRD); ``beta`` flows through with an annotation."""
+the compiler; ``beta`` flows through with an annotation."""
 
 AggLiteral = Literal[
     "sum",
@@ -99,7 +99,7 @@ AggLiteral = Literal[
 # ``time`` is a timestamp (instant, possibly zoned); ``date`` is a
 # calendar date with no time-of-day or zone. The split lets the compiler
 # refuse sub-day truncation on a date and skip the timezone shift a
-# zoned timestamp would get (B9).
+# zoned timestamp would get.
 DimTypeLiteral = Literal["string", "number", "time", "date", "bool", "uuid"]
 DimCategoryLiteral = Literal["identity", "status", "pii", "metadata"]
 # Resolved storage type carried on ``ColumnMeta`` so callers (visualisers,
@@ -139,7 +139,7 @@ Metadata = dict[str, str]
 
 
 class RawSQL(str):
-    """An author-supplied raw-SQL fragment — the explicit escape hatch (B2).
+    """An author-supplied raw-SQL fragment — the explicit escape hatch.
 
     SemQL's principle is "when raw SQL is used, SemQL says so." Every
     field that carries hand-written SQL — ``BaseField.sql``,
@@ -248,7 +248,7 @@ class BaseField(_HashableModel):
     description: str = ""
     display_name: str | None = None
     metadata: Metadata = Field(default_factory=dict)
-    # A1 — Field-level visibility. ANY-match semantics: a viewer with
+    # Field-level visibility. ANY-match semantics: a viewer with
     # at least one of the listed roles passes; an empty list means
     # the field is open to all viewers who can see the cube. Compiled
     # errors for missing roles are indistinguishable from "field
@@ -259,7 +259,7 @@ class BaseField(_HashableModel):
     def kind(self) -> str:
         """Structural field-type tag, the SemQL equivalent of GraphQL ``__typename``.
 
-        I15: ``"measure"`` / ``"dimension"`` / ``"time"`` / ``"segment"``.
+        ``"measure"`` / ``"dimension"`` / ``"time"`` / ``"segment"``.
         Lets consumers (MCP tool factory, planner, evaluator) branch on
         field type without importing the concrete ``Measure`` /
         ``Dimension`` / ``TimeDimension`` / ``Segment`` subclasses. Pairs
@@ -331,7 +331,7 @@ class Measure(BaseField):
     # filtered sums.
     numerator: str | None = None
     denominator: str | None = None
-    # A1 — Field-level masking. ``mask_roles`` names roles for which
+    # Field-level masking. ``mask_roles`` names roles for which
     # the field compiles but the SQL is substituted by a constant
     # instead of the real expression. ``mask_value``: ``None`` → NULL,
     # a string → a SQL literal (``'REDACTED'``, ``'0'``, etc.). The
@@ -385,18 +385,18 @@ class Dimension(BaseField):
     # FK to the named cube's PK — saving the catalog author the
     # repetition. An explicit Join with the same ``to`` wins.
     foreign_key: str | None = None
-    # A1 — Field-level masking. Same shape as Measure.mask_*.
+    # Field-level masking. Same shape as Measure.mask_*.
     mask_roles: list[str] = Field(default_factory=list)
     mask_value: _Raw | None = None
-    # I7 — Input aliases. An LLM might emit ``territory`` /
+    # Input aliases. An LLM might emit ``territory`` /
     # ``zone`` / ``area`` when the catalog names the dimension
     # ``region``. The resolver accepts any alias as a synonym for
     # the canonical name; the prompt renders the canonical name
     # only (no alias listing — the planner learns the canonical).
-    # The field-hide / mask gates (A1) apply on the canonical
+    # The field-hide / mask gates apply on the canonical
     # field; an alias is a synonym, not a separate auth surface.
     aliases: list[str] = Field(default_factory=list)
-    # I10 — Cross-cube coercion opt-in. A federated bridge join whose two
+    # Cross-cube coercion opt-in. A federated bridge join whose two
     # keys have different ``type`` is refused (FederationError) rather
     # than silently coerced. ``coerce_to`` declares an *additional* type
     # this dimension is willing to be compared as, so a key of one type
@@ -433,7 +433,7 @@ class TimeDimension(BaseField):
     rollups). Otherwise they're just dimensions of type `time`."""
 
     # ``time`` = timestamp (sub-day grains allowed); ``date`` = calendar
-    # date (no hour grain, no timezone shift — see B9 / DimTypeLiteral).
+    # date (no hour grain, no timezone shift — see DimTypeLiteral).
     type: Literal["time", "date"] = "time"
     granularities: tuple[GranularityLiteral, ...] = (
         "hour",
@@ -869,7 +869,7 @@ class Cube(BaseModel):
     # magnitude faster on large fact tables. See :class:`Rollup` for
     # the matching rules and naming convention.
     rollups: list[Rollup] = []
-    # LLM-grounding metadata (S7). Concrete NL questions a user might
+    # LLM-grounding metadata. Concrete NL questions a user might
     # literally ask of this cube — *not* templates, not noun fragments.
     # Spliced into the planner prompt (small catalog) or embedded for
     # top-k retrieval (large catalog). Surface in the MCP per-cube tool
@@ -896,7 +896,7 @@ class Cube(BaseModel):
     # "deprecated"``. Surfaces in the CompileError message. Leave
     # ``None`` when the cube is going away entirely (no replacement).
     replacement: str | None = None
-    # Optional declared row count. I1 cost estimation: when set,
+    # Optional declared row count. Cost estimation: when set,
     # ``estimate_cost`` uses this as the rows-scanned baseline for
     # queries that touch the cube. ``None`` means "unknown" — the
     # estimate is honest about the gap rather than lying with a
@@ -1050,7 +1050,7 @@ class Cube(BaseModel):
 
     @model_validator(mode="after")
     def _check_grounding(self) -> Cube:
-        """Length caps + dedupe on the S7 grounding fields. Refuses
+        """Length caps + dedupe on the grounding fields. Refuses
         ``deprecated`` without a self-consistent replacement field
         (validation that the replacement points at a *real* cube
         happens at Catalog construction — Cube doesn't know its
@@ -1243,7 +1243,7 @@ class AuthContext(_HashableModel):
     viewer_id: str
     roles: list[str] = Field(default_factory=list)
     metadata: Metadata = Field(default_factory=dict)
-    # A2 — typed bag for arbitrary JWT claims / auth attributes. Unlike
+    # Typed bag for arbitrary JWT claims / auth attributes. Unlike
     # ``metadata`` (str→str), ``attrs`` preserves the original types
     # (list, bool, int) so ScopeFns can branch on structured claim values
     # without decoding them from strings first.

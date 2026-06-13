@@ -79,7 +79,7 @@ def _ranges_intersect(
     Endpoints are compared by *instant* (:func:`parse_instant`), not as
     lexical strings: ``"2024-01-01"`` and ``"2024-01-01T00:00:00+00:00"``
     are the same boundary, and an offset-bearing endpoint sorts by the
-    moment it denotes, not its leading digits (the A2 routing bug).
+    moment it denotes, not its leading digits (the routing bug).
 
     Touching ranges (``a_end == b_start``) do NOT intersect — the
     boundary belongs to the source with the matching inclusive

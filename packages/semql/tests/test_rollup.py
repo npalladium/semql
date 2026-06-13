@@ -1,4 +1,4 @@
-"""Tests for pre-aggregation / rollup routing (S3 + DEFERRED §5).
+"""Tests for pre-aggregation / rollup routing (DEFERRED §5).
 
 A ``Rollup`` on a cube declares a materialised table holding rows
 pre-grouped at a given grain (dims + optional time bucket). The

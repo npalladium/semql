@@ -158,8 +158,8 @@ def test_left_joined_cube_in_dimensions_rejected() -> None:
 
 def test_left_joins_idempotent_with_existing_forward_edge() -> None:
     """A plain forward-edge query (no ``left_joins``) compiles cleanly —
-    bidirectional BFS is a superset of forward BFS, never a refusal. With
-    D9 the edge honours ``Join.kind``: an un-listed forward edge is an
+    bidirectional BFS is a superset of forward BFS, never a refusal. The
+    edge honours ``Join.kind``: an un-listed forward edge is an
     INNER JOIN (the LEFT spine is opt-in via ``left_joins``)."""
     catalog = Catalog([_identity_cube(), _punch_log_cube()])
     # The forward edge is user_punch_log → identity, reached from the
@@ -174,12 +174,12 @@ def test_left_joins_idempotent_with_existing_forward_edge() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D9 re-root edge: a cube reachable only *through* a left-joined cube
+# Re-root edge: a cube reachable only *through* a left-joined cube
 # ---------------------------------------------------------------------------
 
 
 def test_left_join_strands_cube_behind_the_fact_refuses_clearly() -> None:
-    """D9 re-roots the FROM clause off the left-joined cube so the fact
+    """Re-roots the FROM clause off the left-joined cube so the fact
     lands on the right (``kind="left"``). In a chain ``orders → customers``
     and ``orders → products``, left-joining ``orders`` roots at a spoke
     (``customers``); ``products`` is then reachable only *through* the

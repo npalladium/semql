@@ -407,7 +407,7 @@ def test_materialize_dynamic_lookup_without_ctx_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# E1: LookupEnricher Protocol + enrich_result helper
+# LookupEnricher Protocol + enrich_result helper
 # ---------------------------------------------------------------------------
 
 

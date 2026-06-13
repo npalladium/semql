@@ -1,4 +1,4 @@
-"""Internal helpers for S7 LLM-grounding metadata validation.
+"""Internal helpers for LLM-grounding metadata validation.
 
 The Cube / SavedQuery / Catalog models all carry ``questions`` /
 ``keywords`` / ``relations`` fields with the same length caps and

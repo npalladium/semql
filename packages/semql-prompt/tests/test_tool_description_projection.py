@@ -1,5 +1,5 @@
 """Tests for ``project_tool_descriptions`` — the cache-friendly
-per-cube MCP tool-description layout (P6 follow-up).
+per-cube MCP tool-description layout.
 
 Mirrors :class:`CatalogPrompt` at the tool-schema layer: the static
 ``invariant`` segment holds descriptions for cubes with no

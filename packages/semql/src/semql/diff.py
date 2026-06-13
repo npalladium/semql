@@ -1,4 +1,4 @@
-"""Schema-aware catalog changelog (I3).
+"""Schema-aware catalog changelog.
 
 ``diff_catalogs(old, new) -> CatalogDiff`` enumerates every cube /
 field / join that was added, removed, or had its schema-affecting
@@ -107,7 +107,7 @@ class CatalogDiff(BaseModel):
     """The result of comparing two catalog snapshots.
 
     Render with ``.to_markdown()`` for a reviewer-friendly report.
-    Round-trips through ``model_dump`` / ``model_validate`` (cf. I9) so
+    Round-trips through ``model_dump`` / ``model_validate`` so
     the result can be cached as a build artefact or stored alongside
     a deploy."""
 

@@ -1,4 +1,4 @@
-"""A6 — the MCP server must enforce identity via a trusted provider.
+"""The MCP server must enforce identity via a trusted provider.
 
 Before the fix the server compiled every query with ``viewer=None``, so
 ``required_roles`` cube visibility and ``security_sql`` row scoping were

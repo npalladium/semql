@@ -1,4 +1,4 @@
-"""I1: query cost estimation + budget enforcement.
+"""Query cost estimation + budget enforcement.
 
 The compiler emits SQL but the planner has no idea whether a query
 costs 100ms or 30 minutes. ``estimate_cost`` derives a rough
@@ -20,7 +20,7 @@ rather than silently zero. The budget's ``.check()`` treats unknown
 as a free pass (we can't enforce what we can't estimate), but the
 caller can still see the gap by reading ``CostEstimate.rows_scanned_unknown``.
 
-The result is a frozen Pydantic value type (cf. I9) so it survives
+The result is a frozen Pydantic value type so it survives
 JSON round-trips and can be logged alongside a deploy.
 """
 

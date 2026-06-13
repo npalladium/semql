@@ -412,7 +412,7 @@ def random_query(draw: st.DrawFn, catalog: Catalog, features: frozenset[str]) ->
     if "time_dim" in features and any(c.time_dimensions for c in cubes):
         tc = next(c for c in cubes if c.time_dimensions)
         # Order the pair by instant: TimeWindow refuses a reversed range
-        # whose endpoints are both valid ISO-8601 (B9), and temporal_edges
+        # whose endpoints are both valid ISO-8601, and temporal_edges
         # are all well-formed.
         lo, hi = sorted((draw(temporal_edges), draw(temporal_edges)), key=parse_instant)
         kw["time_dimension"] = TimeWindow(

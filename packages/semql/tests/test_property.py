@@ -103,7 +103,7 @@ def test_fixed_catalog_compiles_to_safe_select(query: SemanticQuery) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P1 — Totality (the crash-finder)
+# Totality (the crash-finder)
 # ---------------------------------------------------------------------------
 
 
@@ -125,7 +125,7 @@ def test_p1_totality_compile_never_crashes(
 
 
 # ---------------------------------------------------------------------------
-# P2 — Safe SELECT + sentinel bind-params (injection oracle)
+# Safe SELECT + sentinel bind-params (injection oracle)
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +148,7 @@ def test_p2_values_are_bound_never_spliced(
 
 
 # ---------------------------------------------------------------------------
-# P3 — Dialect validity
+# Dialect validity
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +169,7 @@ def test_p3_emitted_sql_parses_under_its_dialect(
 
 
 # ---------------------------------------------------------------------------
-# P5 — Determinism
+# Determinism
 # ---------------------------------------------------------------------------
 
 
@@ -182,7 +182,7 @@ def test_p5_determinism(trip: tuple[frozenset[str], Catalog, SemanticQuery]) -> 
 
 
 # ---------------------------------------------------------------------------
-# P6 — Insensitivity to catalog construction order
+# Insensitivity to catalog construction order
 # ---------------------------------------------------------------------------
 
 
@@ -200,7 +200,7 @@ def test_p6_cube_order_does_not_change_output(
 
 
 # ---------------------------------------------------------------------------
-# P7 — CNF semantic equivalence + idempotence
+# CNF semantic equivalence + idempotence
 # ---------------------------------------------------------------------------
 
 _ATOMS = [Filter(dimension=f"c.d{i}", op="eq", values=[f"v{i}"]) for i in range(5)]
@@ -268,7 +268,7 @@ def test_p7_cnf_preserves_truth_table_and_is_idempotent(expr: BoolExpr) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P9 — Path equivalence (the A1 net): two compile paths, one truth
+# Path equivalence (the cross-path equivalence net): two compile paths, one truth
 # ---------------------------------------------------------------------------
 
 
@@ -286,12 +286,12 @@ def test_p9_query_path_equals_plan_path(
         assert direct[2] == via_plan[2]  # params
     else:
         # Both paths must agree on refusal (one succeeding while the other
-        # raises would be the A1 divergence bug this guards against).
+        # raises would be the cross-path divergence bug this guards against).
         assert direct[0] == "err" and via_plan[0] == "err"
 
 
 # ---------------------------------------------------------------------------
-# P10 / P12 — Negative properties on one-mutation-off-valid pairs
+# Negative properties on one-mutation-off-valid pairs
 # ---------------------------------------------------------------------------
 
 

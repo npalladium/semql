@@ -82,7 +82,7 @@ class TimeWindow(BaseModel):
         """Refuse a reversed range when both endpoints are real instants.
 
         Half-open ``[start, end)`` with ``start == end`` is an empty but
-        legal window (D7); ``start > end`` is almost always an authoring
+        legal window; ``start > end`` is almost always an authoring
         slip, so it is refused — but only when both endpoints parse as
         ISO-8601. Non-instant endpoints are left untouched: SemQL binds
         range values as parameters (the injection-safety model), so a
@@ -362,7 +362,7 @@ class SemanticQuery(BaseModel):
             "Cubes to LEFT JOIN instead of INNER; pair with op='is_null' for absent-row queries."
         ),
     )
-    # I14 — Output column aliases. Maps the output column name
+    # Output column aliases. Maps the output column name
     # (alias key) to a qualified field ref (alias value). Useful
     # when a dashboard needs the same field under two names in one
     # result. The alias key is the output column name; the alias
@@ -427,7 +427,7 @@ class SavedQuery(BaseModel):
     a one-sentence "what this answers" is the right shape.
 
     ``questions`` / ``keywords`` / ``purpose`` are LLM-grounding
-    metadata (see S7). The planner / router indexes saved queries by
+    metadata. The planner / router indexes saved queries by
     these surfaces independently from cubes.
 
     ``stability`` / ``replacement`` mirror :attr:`Cube.stability` —
@@ -476,7 +476,7 @@ class SavedQuery(BaseModel):
 
 
 class SemanticQueryDefaults(BaseModel):
-    """Declarative compile defaults applied before H1 hooks.
+    """Declarative compile defaults applied before compile hooks.
 
     Merge priority (highest wins): query's own value > per-call
     ``query_defaults`` > catalog ``query_defaults`` > ``None`` (no fill).

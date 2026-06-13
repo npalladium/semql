@@ -1,4 +1,4 @@
-"""Tests for the cache-friendly two-segment prompt layout (P6).
+"""Tests for the cache-friendly two-segment prompt layout.
 
 The cacheable layout splits ``planner_prompt(Catalog, ...)`` into:
 

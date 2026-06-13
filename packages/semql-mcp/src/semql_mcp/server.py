@@ -82,7 +82,7 @@ server never imports a database driver itself."""
 ViewerProvider = Callable[[], "AuthContext | None"]
 """``() -> AuthContext | None`` — the trusted, per-request identity source.
 
-This is the fix for the multi-tenant auth hole (A6). On a networked
+This is the fix for the multi-tenant auth hole. On a networked
 transport (http / sse / streamable-http) the *client* cannot be trusted
 to assert who it is, so tool parameters like ``viewer_id`` / ``roles`` are
 not an authorization boundary. The deployer wires a ``viewer_provider``

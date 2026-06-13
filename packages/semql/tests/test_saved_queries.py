@@ -1,4 +1,4 @@
-"""Tests for ``SavedQuery`` model + ``Catalog.saved_queries`` wiring (S4).
+"""Tests for ``SavedQuery`` model + ``Catalog.saved_queries`` wiring.
 
 The model is small (a name, a SemanticQuery, optional metadata) so
 most of the surface to test is the Catalog's construction-time
