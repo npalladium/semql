@@ -35,7 +35,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1076,8 +1076,15 @@ class Catalog:
         label_keys: list[str] = list(lookup.labels.keys()) if lookup.labels else []
         candidates: list[str] = list(dict.fromkeys([*static_values, *label_keys]))
         did_you_mean: list[str] = []
-        if candidates and exc.value is not None:
-            query_value = str(exc.value) if not isinstance(exc.value, list) else str(exc.value[0])
+        # ``exc.value`` is a user-supplied filter literal (Any by contract);
+        # bind it once so pyright doesn't re-narrow the member access.
+        filter_value: Any = exc.value
+        if candidates and filter_value is not None:
+            query_value = (
+                str(cast("list[object]", filter_value)[0])
+                if isinstance(filter_value, list)
+                else str(filter_value)
+            )
             # Build a (lowercase → original) map and match in lowercase
             # space so the difflib ratio is meaningful regardless of
             # the catalog's casing convention.
@@ -1099,9 +1106,9 @@ class Catalog:
             str(exc),
             dimension=exc.dimension,
             op=exc.op,
-            value=exc.value,
+            value=filter_value,
             next_tool="resolve_lookup",
-            next_tool_args={"dimension": exc.dimension, "query": str(exc.value)},
+            next_tool_args={"dimension": exc.dimension, "query": str(cast("object", filter_value))},
             did_you_mean=did_you_mean,
         )
 

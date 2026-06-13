@@ -30,6 +30,7 @@ from semql import (
     TimeWindow,
     is_read_only_statement,
 )
+from semql.compile import CompiledQuery
 from sqlglot import exp
 
 # Canonical SQL-injection payloads — quote breakouts, stacked queries,
@@ -95,9 +96,9 @@ def _string_literals(sql: str, dialect: str) -> list[str]:
     return [node.this for node in root.find_all(exp.Literal) if node.is_string]
 
 
-def _assert_neutralised(out: object, payload: str, dialect: str) -> None:
-    sql = out.sql  # type: ignore[attr-defined]
-    params = out.params  # type: ignore[attr-defined]
+def _assert_neutralised(out: CompiledQuery, payload: str, dialect: str) -> None:
+    sql = out.sql
+    params = out.params
     # Bound as a parameter — substring, because ``contains`` wraps the value
     # as ``%payload%`` before binding.
     assert any(payload in str(v) for v in params.values()), (

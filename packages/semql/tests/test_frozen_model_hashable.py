@@ -64,4 +64,7 @@ def test_distinct_frozen_models_do_not_collapse_in_a_set() -> None:
     m1 = Measure(name="rev", sql="{t}.x", agg="sum", unit="count")
     m2 = Measure(name="rev", sql="{t}.x", agg="avg", unit="count")
     assert m1 != m2
-    assert len({m1, m2}) == 2
+    # _HashableModel defines a real __hash__, but pyright's pydantic plugin
+    # treats a non-frozen-config model as __hash__=None; runtime hashability
+    # (exactly what this test pins) is correct.
+    assert len({m1, m2}) == 2  # pyright: ignore[reportUnhashable]

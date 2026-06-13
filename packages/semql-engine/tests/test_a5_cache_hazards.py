@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (the private symbols under
+# test, e.g. _cache_key / _clock), so cross-class private access is expected.
+# pyright: reportPrivateUsage=false
 """A5 — Engine result-cache hazards (architecture review 2026-06).
 
 Three defects in the P7 result cache (``engine.py``):

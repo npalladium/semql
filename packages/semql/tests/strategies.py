@@ -338,16 +338,25 @@ def _leaf_filter(
 
 
 def _bool_expr(leaves: st.SearchStrategy[Filter]) -> st.SearchStrategy[object]:
+    # hypothesis types `st.recursive`'s element strategy as Unknown, so the
+    # `st.builds` lambdas below take an Unknown `c`; the type originates
+    # inside hypothesis and no annotation can recover it. Scope an ignore
+    # to each affected line.
     return st.recursive(
         leaves,
         lambda sub: st.one_of(
             st.builds(
-                lambda c: BoolExpr(op="and", children=c), st.lists(sub, min_size=2, max_size=3)
+                lambda c: BoolExpr(op="and", children=c),  # pyright: ignore
+                st.lists(sub, min_size=2, max_size=3),  # pyright: ignore
             ),
             st.builds(
-                lambda c: BoolExpr(op="or", children=c), st.lists(sub, min_size=2, max_size=3)
+                lambda c: BoolExpr(op="or", children=c),  # pyright: ignore
+                st.lists(sub, min_size=2, max_size=3),  # pyright: ignore
             ),
-            st.builds(lambda c: BoolExpr(op="not", children=[c]), sub),
+            st.builds(
+                lambda c: BoolExpr(op="not", children=[c]),  # pyright: ignore
+                sub,  # pyright: ignore
+            ),
         ),
         max_leaves=6,
     )

@@ -326,8 +326,9 @@ def validate(
     # Catalog's ``relations`` attribute is a stable part of the
     # public surface; the alternative ``isinstance`` check would
     # require a top-level catalog import (cycle).
-    if hasattr(catalog, "relations") and catalog.relations:
-        _check_relations_text(catalog.relations, None)
+    catalog_relations = getattr(catalog, "relations", None)
+    if catalog_relations:
+        _check_relations_text(catalog_relations, None)
 
     return errors
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
@@ -193,12 +193,16 @@ def _freeze(value: object) -> object:
             type(value).__name__,
             tuple(_freeze(getattr(value, n)) for n in type(value).model_fields),
         )
+    # ``value`` is ``object``; isinstance-narrowing to a bare container
+    # leaves the element type unknown, but every element is itself an
+    # ``object`` we recurse into — cast says so explicitly.
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze(v) for v in value)
+        return tuple(_freeze(v) for v in cast("Sequence[object]", value))
     if isinstance(value, dict):
-        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+        items = cast("dict[str, object]", value).items()
+        return tuple(sorted((k, _freeze(v)) for k, v in items))
     if isinstance(value, (set, frozenset)):
-        return frozenset(_freeze(v) for v in value)
+        return frozenset(_freeze(v) for v in cast("frozenset[object]", value))
     return value
 
 
@@ -442,23 +446,31 @@ class TimeDimension(BaseField):
 
     @model_validator(mode="before")
     @classmethod
-    def _date_has_no_sub_day_grain(cls, data: object) -> object:
+    def _date_has_no_sub_day_grain(cls, data: Any) -> Any:  # noqa: ANN401
         """A ``date`` time-dimension cannot be truncated below a day.
 
         When the caller doesn't pin ``granularities``, default a date to
         the day-and-coarser set (the class default carries ``hour``, which
         is meaningless for a date). When they pin one explicitly, refuse
         ``hour`` rather than silently dropping it.
+
+        ``data`` is the raw pre-validation input (pydantic ``mode="before"``)
+        — a ``dict`` for the usual kwargs path, but possibly an already-built
+        model or other shape, hence ``Any``.
         """
-        if isinstance(data, dict) and data.get("type") == "date":
-            if "granularities" not in data:
-                data = {**data, "granularities": ("day", "week", "month", "quarter", "year")}
-            elif "hour" in tuple(data["granularities"]):
-                raise ValueError(
-                    "a date TimeDimension cannot have 'hour' granularity: a "
-                    "calendar date has no time-of-day to truncate."
-                )
-        return data
+        if not isinstance(data, dict):
+            return data
+        fields = cast("dict[str, Any]", data)
+        if fields.get("type") != "date":
+            return fields
+        if "granularities" not in fields:
+            return {**fields, "granularities": ("day", "week", "month", "quarter", "year")}
+        if "hour" in tuple(fields["granularities"]):
+            raise ValueError(
+                "a date TimeDimension cannot have 'hour' granularity: a "
+                "calendar date has no time-of-day to truncate."
+            )
+        return fields
 
 
 class Segment(BaseField):

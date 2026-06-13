@@ -197,7 +197,7 @@ def test_collect_all_aggregates_unknown_join_target() -> None:
         joins=[Join(to="ghost", relationship="many_to_one", on="{b}.id = 1")],
         measures=[Measure(name="count", sql="*", agg="count", unit="count")],
     )
-    spec, errors = CatalogSpec.from_iterables(cubes=[bad])
+    _spec, errors = CatalogSpec.from_iterables(cubes=[bad])
     codes = {e["code"] for e in errors}
     assert "unknown_join_target" in codes
 

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import difflib
 from collections.abc import Iterable, Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 _ErrorPayload = dict[str, Any]
 
@@ -92,8 +92,7 @@ class SemQLError(Exception):
         # mypy can't follow ``_from_payload`` on a ``type[SemQLError]``
         # so we cast — the dispatch table is constructed from leaves
         # that define the classmethod.
-        result: SemQLError = leaf._from_payload(payload)  # type: ignore[attr-defined]
-        return result
+        return cast("SemQLError", leaf._from_payload(payload))  # type: ignore[attr-defined]
 
 
 class ResolveError(SemQLError):
@@ -155,14 +154,16 @@ class UnknownIdentifierError(CompileError):
 
     @classmethod
     def _from_payload(cls, payload: Mapping[str, Any]) -> UnknownIdentifierError:
-        alts = payload.get("valid_alternatives") or []
+        alts: Any = payload.get("valid_alternatives") or []
         return cls(
             str(payload.get("message", "")),
             kind=str(payload.get("kind", "field")),
             name=str(payload.get("name", "")),
             cube=payload.get("cube"),
             hint=payload.get("hint"),
-            valid_alternatives=list(alts) if isinstance(alts, list) else None,
+            valid_alternatives=(
+                [str(a) for a in cast("list[object]", alts)] if isinstance(alts, list) else None
+            ),
         )
 
 
@@ -215,7 +216,10 @@ class FilterTypeError(CompileError):
         super().__init__(message)
         self.dimension = dimension
         self.op = op
-        self.value = value
+        # User-supplied filter literal; ``Any`` by contract (see the
+        # ``value`` param). Annotated so readers / pyright don't see an
+        # implicit-Unknown attribute on every ``exc.value`` access.
+        self.value: Any = value
         self.next_tool = next_tool
         self.next_tool_args = dict(next_tool_args) if next_tool_args else None
         self.did_you_mean: list[str] = list(did_you_mean) if did_you_mean else []
@@ -298,8 +302,11 @@ class CrossDialectError(CompileError):
 
     @classmethod
     def _from_payload(cls, payload: Mapping[str, Any]) -> CrossDialectError:
-        b = payload.get("backends") or []
-        return cls(str(payload.get("message", "")), backends=list(b) if isinstance(b, list) else [])
+        b: Any = payload.get("backends") or []
+        return cls(
+            str(payload.get("message", "")),
+            backends=[str(x) for x in cast("list[object]", b)] if isinstance(b, list) else [],
+        )
 
 
 class PhaseDeferredError(CompileError):

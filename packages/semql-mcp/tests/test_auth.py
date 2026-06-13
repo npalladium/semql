@@ -11,6 +11,10 @@ the transport's authenticated request context). It is threaded into every
 ``compile(viewer=...)`` and is authoritative over client-asserted values.
 """
 
+# This module exercises MCPServer internals (e.g. ``_resolve_viewer``) on
+# purpose, so cross-class private access is expected here.
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +31,11 @@ from semql_mcp import MCPServer
 
 def _run[T](coro: Awaitable[T]) -> T:
     return asyncio.run(coro)  # type: ignore[arg-type]
+
+
+def _noop(**_: object) -> None:
+    """Typed no-op stand-in for ``mcp.run`` under monkeypatch (a bare
+    ``lambda **_: None`` gives pyright an Unknown-typed parameter)."""
 
 
 def _gated_catalog() -> Catalog:
@@ -114,14 +123,14 @@ def test_resolve_viewer_falls_back_to_client_asserted_without_provider() -> None
 
 def test_run_warns_on_networked_transport_without_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     server = MCPServer(_gated_catalog())
-    monkeypatch.setattr(server.mcp, "run", lambda **_: None)
+    monkeypatch.setattr(server.mcp, "run", _noop)
     with pytest.warns(UserWarning, match="NOT enforced"):
         server.run(transport="http")
 
 
 def test_run_does_not_warn_with_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     server = MCPServer(_gated_catalog(), viewer_provider=lambda: None)
-    monkeypatch.setattr(server.mcp, "run", lambda **_: None)
+    monkeypatch.setattr(server.mcp, "run", _noop)
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes an error
         server.run(transport="http")

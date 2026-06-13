@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (e.g. _enrich_filter_type_error),
+# so cross-class private access is expected.
+# pyright: reportPrivateUsage=false
 """Tests for the uniform error envelope (B8).
 
 Errors serve machines and humans (PHILOSOPHY.md). ``to_payload()`` on

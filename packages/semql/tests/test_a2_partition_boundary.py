@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (e.g. _ranges_intersect), so
+# cross-module private access is expected.
+# pyright: reportPrivateUsage=false
 """A2 — partition routing must compare timestamps by *instant*, not bytes.
 
 Architecture review (2026-06) A2 flagged two things about

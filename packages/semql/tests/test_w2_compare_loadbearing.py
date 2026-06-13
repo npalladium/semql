@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (_CompileEnv /
+# _emit_compare_query), so cross-module private access is expected.
+# pyright: reportPrivateUsage=false
 """W2 stage 3b — the compare-mode emitter must read its ranges from the
 plan, not recompute them.
 

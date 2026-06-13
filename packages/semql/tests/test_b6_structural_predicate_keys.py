@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (e.g. _CompileEnv /
+# _lookup_filter_field), so cross-module/class private access is expected.
+# pyright: reportPrivateUsage=false
 """B6 (W2 stage 1) — predicate resolution must be structural, not by
 object identity.
 

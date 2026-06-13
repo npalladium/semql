@@ -37,7 +37,7 @@ from semql import (
     validate,
 )
 from semql.cnf import to_cnf
-from semql.compile import compile_plan
+from semql.compile import CompiledQuery, compile_plan
 from semql.dialect import dialect_for as sqlglot_dialect_for
 from semql.errors import SemQLError
 from sqlglot import exp
@@ -53,7 +53,7 @@ def _outcome(thunk: object) -> tuple[str, object, object]:
     """Normalise a compile attempt to a comparable outcome:
     ``("ok", sql, params)`` or ``("err", ExceptionClassName, None)``."""
     try:
-        cq = thunk()  # type: ignore[operator]
+        cq = cast("CompiledQuery", thunk())  # type: ignore[operator]
     except SemQLError as e:
         return ("err", type(e).__name__, None)
     return ("ok", cq.sql, cq.params)
@@ -221,16 +221,24 @@ def _eval(node: BoolExpr | Filter, env: dict[str, bool]) -> bool:
 
 
 def _cnf_expr(leaves: st.SearchStrategy[Filter]) -> st.SearchStrategy[BoolExpr]:
+    # hypothesis types `st.recursive`'s element strategy as Unknown, so the
+    # `st.builds` lambdas below have an Unknown `c` — no annotation can fix
+    # it (the type originates inside hypothesis), hence the scoped ignores.
     strategy = st.recursive(
         leaves,
         lambda sub: st.one_of(
             st.builds(
-                lambda c: BoolExpr(op="and", children=c), st.lists(sub, min_size=2, max_size=3)
+                lambda c: BoolExpr(op="and", children=c),  # pyright: ignore
+                st.lists(sub, min_size=2, max_size=3),  # pyright: ignore
             ),
             st.builds(
-                lambda c: BoolExpr(op="or", children=c), st.lists(sub, min_size=2, max_size=3)
+                lambda c: BoolExpr(op="or", children=c),  # pyright: ignore
+                st.lists(sub, min_size=2, max_size=3),  # pyright: ignore
             ),
-            st.builds(lambda c: BoolExpr(op="not", children=[c]), sub),
+            st.builds(
+                lambda c: BoolExpr(op="not", children=[c]),  # pyright: ignore
+                sub,  # pyright: ignore
+            ),
         ),
         max_leaves=6,
     ).filter(lambda e: isinstance(e, BoolExpr))

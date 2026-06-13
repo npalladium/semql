@@ -1,3 +1,6 @@
+# This module tests internal APIs by design (_parse_fragment /
+# _parse_fragment_cached), so cross-module private access is expected.
+# pyright: reportPrivateUsage=false
 """C9 (ktx-ports M1) — cache parsed catalog SQL fragments.
 
 The same measure/dimension ``expr`` string is parsed many times across a
