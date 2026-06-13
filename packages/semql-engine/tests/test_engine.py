@@ -29,6 +29,7 @@ from semql import (
 )
 from semql.federate import FederatedPlan
 from semql_engine import AdapterResult, DuckDBAdapter, Engine, EngineError
+from semql_engine.merge import render_merge_sql
 
 # ---------------------------------------------------------------------------
 # Test-only adapter: stands in for a non-DuckDB backend.
@@ -339,7 +340,7 @@ def test_engine_repeatable_runs_dont_leak_state(
 
 
 # ---------------------------------------------------------------------------
-# MergePlan + CompiledQuery sanity (would catch a regression in the plan IR
+# MergeSpec + CompiledQuery sanity (would catch a regression in the plan IR
 # that broke executor assumptions).
 # ---------------------------------------------------------------------------
 
@@ -563,9 +564,10 @@ def test_merge_plan_has_required_attributes() -> None:
     q = SemanticQuery(measures=["orders.revenue"], dimensions=["orders.status"])
     # Single-source path through compile_federated_query also feeds the
     # executor when wrapped manually; not the usual path but verifies
-    # the IR shapes are decoupled cleanly.
+    # the IR shapes are decoupled cleanly. The plan carries the
+    # structured spec (no merge SQL — that's rendered in the engine).
     plan = compile_federated_query(q, catalog)
-    assert plan.merge.sql.startswith("SELECT")
+    assert render_merge_sql(plan.merge_spec)[0].startswith("SELECT")
 
 
 def test_engine_custom_merge_engine_receives_merge_spec(

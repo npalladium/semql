@@ -176,8 +176,8 @@ def test_raw_rows_federation_emits_percentile_at_merge() -> None:
         catalog,
         mode="raw_rows",
     )
-    # The AST emitter renders DuckDB's QUANTILE_CONT (its canonical spelling
-    # of PERCENTILE_CONT ... WITHIN GROUP).
-    sql_upper = plan.merge.sql.upper()
-    assert "QUANTILE_CONT" in sql_upper or "PERCENTILE_CONT" in sql_upper
-    assert "0.5" in plan.merge.sql
+    # The spec records the percentile as the measure's merge_agg; the
+    # engine renderer turns it into DuckDB's PERCENTILE_CONT at execution.
+    (measure,) = plan.merge_spec.measures
+    assert measure.output_name == "amount_median"
+    assert measure.merge_agg == "median"

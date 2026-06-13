@@ -86,6 +86,18 @@ class Provenance(StrEnum):
     DIMENSION = "dimension"  # a raw dimension / time-bucket column
 
 
+class Op(StrEnum):
+    """A mutation operation a :class:`MutableEntity` may permit.
+
+    A StrEnum so it round-trips through JSON and lives comfortably in a
+    ``frozenset`` (``MutableEntity.operations``) and in spec values."""
+
+    INSERT = "insert"
+    UPDATE = "update"
+    DELETE = "delete"
+    UPSERT = "upsert"
+
+
 StabilityLiteral = Literal["stable", "beta", "deprecated"]
 """Lifecycle hint for a Cube / SavedQuery. ``deprecated`` is refused by
 the compiler; ``beta`` flows through with an annotation."""
@@ -133,6 +145,11 @@ GranularityLiteral = Literal["second", "minute", "hour", "day", "week", "month",
 # every dialect consistent; ``sunday`` shifts the boundary. See
 # ``Cube.week_start`` and ``DialectStrategy.trunc``.
 WeekStartLiteral = Literal["monday", "sunday"]
+
+# The type of an entity write field. Aliases ``DimTypeLiteral`` so the
+# write surface and the read surface share one type vocabulary — a
+# mutable field's declared type is the same notion as a dimension's.
+FieldType = DimTypeLiteral
 FormatLiteral = Literal["raw", "integer", "percent", "currency", "duration"]
 ChartTypeLiteral = Literal["pie_chart", "bar_chart", "line_chart", "data_table"]
 
@@ -1553,12 +1570,21 @@ class Entity(_HashableModel):
     can be composite — ``User = UserInfo + Identity`` is two
     physical cubes under one entity, joined by a shared key.
 
-    The compiler ignores ``Entity`` entirely. ``Cube`` is the unit
-    of compilation; ``Entity`` is descriptive metadata that
-    downstream tools (MCP, prompt renderers, ER diagrams) can
-    iterate to attach the right business vocabulary. The Catalog
-    validates the entity's references at construction time so
-    callers can trust the surface.
+    ``Entity`` carries two surfaces. As prompt / product metadata it
+    names the business object for MCP, prompt renderers and ER
+    diagrams. As a *read* surface (``key``, ``list_filters``,
+    ``default_order``) it parameterises row-mode fetch/list compilation
+    — "show me order 42", "list this user's open orders" — which lower
+    to the compiler's ungrouped row-listing mode. Analytic aggregation
+    still goes through :class:`SemanticQuery`; the entity surface is the
+    point-lookup / short-list escape hatch.
+
+    References are validated *by the Catalog* at construction time: the
+    bare ``Entity(...)`` constructor only checks format (qualified
+    ``cube.dim`` shape); whether those cubes and dimensions actually
+    exist is checked when the entity is passed to ``Catalog(entities=[...])``
+    (or ``CatalogSpec.from_iterables``). An ``Entity`` built in isolation
+    is therefore format-valid but ungrounded until it joins a catalog.
 
     Fields
     ------
@@ -1599,6 +1625,21 @@ class Entity(_HashableModel):
     keywords: list[str] = Field(default_factory=list)
     metadata: Metadata = Field(default_factory=dict)
     fields: dict[str, str] = Field(default_factory=dict)
+    # Read surface (row-mode fetch/list). ``list_filters`` allowlists the
+    # qualified ``cube.dim`` references an ``EntityList`` may filter on;
+    # anything not listed routes to the analytic layer. ``default_order``
+    # is the ``"cube.dim [asc|desc]"`` ordering a list falls back to (and
+    # the keyset-cursor anchor). Both are format-checked here and
+    # resolved against real dimensions by the Catalog.
+    list_filters: list[str] = Field(default_factory=list)
+    default_order: str | None = None
+    # When True, this entity is served by a row-capable adapter (REST/KV/
+    # custom store), not by raw-SQL execution. Two consequences (D1/§4):
+    # it must be single-cube (the adapter contract is one table-shaped
+    # source), and its cube scope must be *structured* — a raw ``security_sql``
+    # / ``scope`` fragment can't be ported to a non-SQL backend, so the
+    # row-mode compiler refuses it. False (default) = ordinary SQL backend.
+    custom_backend: bool = False
 
     @property
     def kind(self) -> str:
@@ -1652,20 +1693,157 @@ class Entity(_HashableModel):
         return self
 
     @model_validator(mode="after")
+    def _check_list_filters_qualified(self) -> Entity:
+        for ref in self.list_filters:
+            if "." not in ref or ref.count(".") != 1:
+                raise ValueError(
+                    f"Entity {self.name!r}: list_filter {ref!r} must be qualified as 'cube.dim'."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_default_order_shape(self) -> Entity:
+        if self.default_order is None:
+            return self
+        parts = self.default_order.split()
+        if len(parts) not in (1, 2):
+            raise ValueError(
+                f"Entity {self.name!r}: default_order={self.default_order!r} "
+                "must be 'cube.dim' optionally followed by 'asc' or 'desc'."
+            )
+        ref = parts[0]
+        if "." not in ref or ref.count(".") != 1:
+            raise ValueError(
+                f"Entity {self.name!r}: default_order dimension {ref!r} must "
+                "be qualified as 'cube.dim'."
+            )
+        if len(parts) == 2 and parts[1].lower() not in ("asc", "desc"):
+            raise ValueError(
+                f"Entity {self.name!r}: default_order direction {parts[1]!r} "
+                "must be 'asc' or 'desc'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_custom_backend_single_cube(self) -> Entity:
+        if self.custom_backend and len(self.cubes) != 1:
+            raise ValueError(
+                f"Entity {self.name!r}: custom_backend entities must span "
+                f"exactly one cube (the adapter contract is one table-shaped "
+                f"source); got {self.cubes!r}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_grounding(self) -> Entity:
-        # Reuse the catalog-wide grounding validators so an Entity
-        # carries the same vocabulary shape as a Cube — a downstream
-        # prompt renderer can iterate entities with the same
-        # normalisation it applies to cubes. The keyword dedupe
-        # normally rewrites the input list (``Cube`` does that),
-        # but ``Entity`` is frozen and Pydantic refuses assignment
-        # to a frozen model. We call the validator for its
-        # validation side-effects (empty-entry check, length cap)
-        # and let the user pass a pre-deduped list. The Catalog
-        # wraps the entity in a copy-and-replace path when dedupe
-        # matters for prompt hashing.
+        # Reuse the catalog-wide grounding validators so an Entity carries
+        # the same vocabulary shape as a Cube — a downstream prompt
+        # renderer can iterate entities with the same normalisation it
+        # applies to cubes. The keyword dedupe normally rewrites the input
+        # list (``Cube`` does that), but ``Entity`` is frozen and Pydantic
+        # refuses assignment to a frozen model, so we call the validators
+        # only for their side-effects (empty-entry check, length cap) and
+        # the caller passes a pre-deduped list.
         _grounding_validate_questions("Entity", self.name, self.questions)
         _grounding_validate_keywords("Entity", self.name, self.keywords)
+        return self
+
+
+class CtxRef(_HashableModel):
+    """A reference to an :class:`AuthContext` attribute, used to pin a
+    column to a ctx-derived value the LLM cannot supply.
+
+    ``MutableEntity.pinned_values`` maps a target column to a ``CtxRef``;
+    at mutation-compile the value is read from the viewer's ``AuthContext``
+    (``getattr(viewer, attr)`` / ``viewer.attrs[attr]``) and bound as a
+    parameter — never taken from LLM-supplied ``values``. Naming the attr
+    explicitly keeps the col→attr direction unambiguous and leaves room to
+    grow (transforms, defaults) without changing the field type."""
+
+    model_config = ConfigDict(frozen=True)
+    attr: str
+
+    @model_validator(mode="after")
+    def _check_attr(self) -> CtxRef:
+        if not self.attr.strip():
+            raise ValueError("CtxRef.attr cannot be empty.")
+        return self
+
+
+class MutableField(_HashableModel):
+    """A single writable field on a :class:`MutableEntity`.
+
+    Declares the column's write contract: its ``type`` (shared vocabulary
+    with dimensions), whether it is ``required`` on insert, whether it may
+    be ``nullable``, and whether it is ``immutable`` (settable on insert
+    but refused on update)."""
+
+    model_config = ConfigDict(frozen=True)
+    type: FieldType
+    required: bool = False
+    nullable: bool = True
+    immutable: bool = False
+
+
+class MutableEntity(Entity):
+    """An :class:`Entity` that additionally declares a *write* surface.
+
+    Mutations are opt-in at every layer (see ``Catalog.allow_mutations``
+    and the per-operation ``operations`` set); a ``MutableEntity`` is the
+    model-layer declaration of *what* may be written and *how* it is
+    targeted. v1 writes target exactly one cube (``target_cube``); PK
+    targeting is the default and predicate targeting is opt-in
+    (``predicate_targeting``). ``pinned_values`` force ctx-derived columns
+    (tenant, owner) the LLM cannot set.
+
+    A ``MutableEntity`` requires a ``key`` (PK targeting needs it). The
+    ``target_cube ∈ cubes`` rule and pinned/mutable disjointness are
+    checked here; field existence on ``target_cube`` is resolved against
+    the real cube at Catalog construction."""
+
+    model_config = ConfigDict(frozen=True)
+    target_cube: str
+    operations: frozenset[Op]
+    mutable_fields: dict[str, MutableField] = Field(default_factory=dict)
+    pinned_values: dict[str, CtxRef] = Field(default_factory=dict)
+    predicate_targeting: bool = False
+
+    @model_validator(mode="after")
+    def _check_requires_key(self) -> MutableEntity:
+        if self.key is None:
+            raise ValueError(
+                f"MutableEntity {self.name!r}: key is required — PK targeting "
+                "needs a key. Declare key='cube.dim'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_target_cube_listed(self) -> MutableEntity:
+        if self.target_cube not in self.cubes:
+            raise ValueError(
+                f"MutableEntity {self.name!r}: target_cube={self.target_cube!r} "
+                f"must be one of the entity's cubes {self.cubes!r}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_operations_nonempty(self) -> MutableEntity:
+        if not self.operations:
+            raise ValueError(
+                f"MutableEntity {self.name!r}: operations cannot be empty — "
+                "declare at least one of insert/update/delete/upsert."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_pinned_not_mutable(self) -> MutableEntity:
+        clash = set(self.pinned_values) & set(self.mutable_fields)
+        if clash:
+            raise ValueError(
+                f"MutableEntity {self.name!r}: column(s) {sorted(clash)} are "
+                "both pinned and mutable. A pinned (ctx-derived) column is "
+                "not LLM-supplied — remove it from mutable_fields."
+            )
         return self
 
 
@@ -1676,11 +1854,13 @@ __all__ = [
     "BaseField",
     "ChartTypeLiteral",
     "Cube",
+    "CtxRef",
     "CubeSource",
     "DerivedTable",
     "DimTypeLiteral",
     "Dimension",
     "Entity",
+    "FieldType",
     "FormatLiteral",
     "GlossaryEntry",
     "GranularityLiteral",
@@ -1692,7 +1872,10 @@ __all__ = [
     "LookupValues",
     "Measure",
     "Metadata",
+    "MutableEntity",
+    "MutableField",
     "NamedCTE",
+    "Op",
     "Provenance",
     "ResolutionContext",
     "ScopePredicate",

@@ -16,7 +16,6 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Mapping
-from dataclasses import replace
 from typing import Any
 
 import duckdb
@@ -412,7 +411,9 @@ def test_iter_run_single_fragment_fast_path_uses_merge_spec(
         SemanticQuery(measures=["orders.revenue"], order=[("revenue", "desc")], limit=1),
         catalog,
     )
-    plan = replace(plan, merge=replace(plan.merge, sql="not valid sql"))
+    # The single-fragment fast path streams straight from merge_spec and
+    # never renders/executes merge SQL — proven by last_iter_run_used_fast_path
+    # below plus the correct rows, with no merge step in the loop.
 
     engine = AsyncEngine()
     engine.register(Dialect.POSTGRES, AsyncDuckDBAdapter(pg_con))

@@ -1,13 +1,18 @@
 """Merge-SQL filter values bind as parameters, never inline literals.
 
 The federation merge runs in-process DuckDB over fragment result sets.
-Cross-partition ``where`` residuals and ``having`` terms used to be
-hand-built with ``_lit()`` (single-quote doubling only) — the one place
-in core that inlined values instead of binding them. ``Filter.values``
+Cross-partition ``where`` residuals and ``having`` terms are the one
+place a value could slip into the merge SQL as a literal. ``Filter.values``
 in a text-to-SQL chatbot are LLM/user-derived, so the invariant
 "identity values bind as parameters, never as literals" must hold here
-too. These tests pin that: the merge SQL carries ``$name`` placeholders
-and ``MergePlan.params`` carries the values.
+too. These tests pin that on ``render_merge_sql``: the merge SQL carries
+``$name`` placeholders and the rendered params carry the values.
+
+This lives in the engine package because rendering the DuckDB merge SQL
+moved here — the core ``MergeSpec`` is dialect-agnostic and carries no
+SQL. The spec-level coverage (that the planner captures the values at
+all) lives in semql's ``test_federate_merge_spec.py`` /
+``test_federate_where_segments.py``.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from semql import (
 )
 from semql.spec import BoolExpr
 from semql_engine import AdapterResult, Engine
+from semql_engine.merge import render_merge_sql
 
 
 def _orders(dialect: Dialect = Dialect.POSTGRES) -> Cube:
@@ -83,13 +89,13 @@ def test_cross_partition_filter_value_binds_as_param() -> None:
         ),
     )
     plan = compile_federated_query(q, catalog)
-    merge_sql = plan.merge.sql
+    merge_sql, params = render_merge_sql(plan.merge_spec)
     # The cross-partition leaf 'gold' lives on the customers (non-primary)
     # partition, so it survives into the merge WHERE.
     assert "tier" in merge_sql
     # It must be a bound parameter, not an inline literal.
     assert "'gold'" not in merge_sql
-    assert "gold" in plan.merge.params.values()
+    assert "gold" in params.values()
 
 
 def test_cross_partition_in_filter_binds_each_value() -> None:
@@ -107,10 +113,11 @@ def test_cross_partition_in_filter_binds_each_value() -> None:
         ),
     )
     plan = compile_federated_query(q, catalog)
-    assert "'gold'" not in plan.merge.sql
-    assert "'silver'" not in plan.merge.sql
-    assert "gold" in plan.merge.params.values()
-    assert "silver" in plan.merge.params.values()
+    merge_sql, params = render_merge_sql(plan.merge_spec)
+    assert "'gold'" not in merge_sql
+    assert "'silver'" not in merge_sql
+    assert "gold" in params.values()
+    assert "silver" in params.values()
 
 
 def test_cross_partition_injection_value_is_inert() -> None:
@@ -130,7 +137,8 @@ def test_cross_partition_injection_value_is_inert() -> None:
         ),
     )
     plan = compile_federated_query(q, catalog)
-    assert malicious not in plan.merge.sql
+    merge_sql, _ = render_merge_sql(plan.merge_spec)
+    assert malicious not in merge_sql
 
     pg_con = duckdb.connect(":memory:")
     pg_con.execute(
@@ -173,6 +181,7 @@ def test_having_term_value_binds_as_param() -> None:
         having=[Filter(dimension="orders.revenue", op="gt", values=[1234])],
     )
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    assert "HAVING" in plan.merge.sql
-    assert "1234" not in plan.merge.sql
-    assert 1234 in plan.merge.params.values()
+    merge_sql, params = render_merge_sql(plan.merge_spec)
+    assert "HAVING" in merge_sql
+    assert "1234" not in merge_sql
+    assert 1234 in params.values()

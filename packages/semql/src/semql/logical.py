@@ -689,7 +689,7 @@ def partition_scans(plan: LogicalPlan) -> dict[Dialect, LogicalPlan]:
     joins that touch cubes on that backend.  Cross-backend joins in
     the original plan are dropped from the per-partition output
     (the federation merge step stitches the per-partition fragments
-    together via ``MergePlan`` and ``BridgeJoin``).
+    together via ``MergeSpec`` and ``BridgeJoin``).
 
     A single-backend plan returns a one-entry dict whose value is
     the input plan (no rewrap needed for the common case).

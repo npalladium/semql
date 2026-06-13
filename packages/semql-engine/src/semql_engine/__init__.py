@@ -24,6 +24,11 @@ from semql_engine.engine import (
     MergeEngine,
     to_async_merge_engine,
 )
+from semql_engine.rows import (
+    InMemoryRowAdapter,
+    RowCapableAdapter,
+    execute_entity,
+)
 
 __all__ = [
     "Adapter",
@@ -41,7 +46,10 @@ __all__ = [
     "Engine",
     "EngineError",
     "ExecutionResult",
+    "InMemoryRowAdapter",
     "MergeEngine",
+    "RowCapableAdapter",
+    "execute_entity",
     "to_async_adapter",
     "to_async_merge_engine",
 ]

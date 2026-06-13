@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import re
 import time
+import warnings
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from dataclasses import dataclass, replace
@@ -39,6 +40,18 @@ from semql.model import Dialect
 from semql.safe import is_read_only_statement
 
 from semql_engine.adapter import Adapter, AdapterResult, AsyncAdapter
+from semql_engine.merge import render_merge_sql
+
+# Inline-merge deprecation: the engine's built-in DuckDB merge (render
+# the spec and run it on the engine's own connection) is superseded by
+# routing through a MergeEngine. ``DuckDBMergeEngine`` is the drop-in
+# replacement and will become the default; the inline path warns once
+# per engine instance until then.
+_INLINE_MERGE_DEPRECATION = (
+    "The engine's built-in inline DuckDB merge is deprecated and will be removed in "
+    "a future release. Pass merge_engine=DuckDBMergeEngine() (which will become the "
+    "default) to route the merge through the MergeEngine protocol."
+)
 
 
 class EngineError(RuntimeError):
@@ -158,6 +171,28 @@ def _freeze_param(value: object) -> object:
     return value
 
 
+def _merge_spec_key(spec: Any) -> tuple[Any, ...]:  # noqa: ANN401 — MergeSpec travels across versions
+    """Stable, hashable key for a ``MergeSpec``.
+
+    Captures everything the DuckDB renderer reads — the same content that
+    used to be keyed via the rendered merge SQL + params. Nested frozen
+    dataclasses / pydantic filters have deterministic ``repr``, so a
+    repr of the list-valued fields is a faithful, collision-free digest;
+    ``cross_partition_clauses`` is already a hashable tuple of values."""
+    return (
+        spec.primary_index,
+        spec.mode,
+        spec.limit,
+        spec.offset,
+        repr(spec.bridges),
+        repr(spec.dimensions),
+        repr(spec.measures),
+        repr(spec.having),
+        tuple(spec.order_by),
+        spec.cross_partition_clauses,
+    )
+
+
 @runtime_checkable
 class MergeEngine(Protocol):
     def merge(
@@ -189,7 +224,36 @@ def to_async_merge_engine(engine: MergeEngine) -> AsyncMergeEngine:
 
 
 class DuckDBMergeEngine:
-    """Default merge engine marker for the built-in DuckDB merge path."""
+    """Merge engine that renders a ``MergeSpec`` to DuckDB SQL and runs it.
+
+    The structural counterpart to the engine's built-in inline merge:
+    each fragment result is materialised into a private in-memory DuckDB
+    connection, the spec is rendered via :func:`render_merge_sql`,
+    executed, and the merged rows returned. Pass it as ``merge_engine=``
+    to route the merge through the :class:`MergeEngine` protocol instead
+    of the (now deprecated) inline path — it will become the default.
+
+    Holds no state and opens a fresh connection per ``merge`` call, so a
+    single instance is safe to share across threads and concurrent runs.
+    """
+
+    def merge(
+        self,
+        fragment_results: list[AdapterResult],
+        spec: Any,  # noqa: ANN401 — semql.federate.MergeSpec travels across package versions
+    ) -> AdapterResult:
+        sql, params = render_merge_sql(spec)
+        _assert_merge_read_only(sql)
+        con = duckdb.connect(":memory:")
+        try:
+            for i, result in enumerate(fragment_results):
+                _load_fragment_into(con, i, result.columns, [tuple(r) for r in result.rows])
+            cursor = con.execute(sql, params)
+            columns = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+        finally:
+            con.close()
+        return AdapterResult(columns=columns, rows=rows)
 
 
 class Engine:
@@ -264,6 +328,13 @@ class Engine:
         # Monotonic clock used for TTL deadlines. An attribute (not a
         # hard-coded call) so tests can drive expiry deterministically.
         self._clock: Callable[[], float] = time.monotonic
+        # Inline-merge deprecation warning fires once per instance.
+        self._warned_inline = False
+
+    def _warn_inline_once(self) -> None:
+        if not self._warned_inline:
+            self._warned_inline = True
+            warnings.warn(_INLINE_MERGE_DEPRECATION, DeprecationWarning, stacklevel=3)
 
     def register(self, dialect: Dialect, adapter: Adapter) -> None:
         """Bind an adapter to a backend. Replacing an existing
@@ -287,15 +358,15 @@ class Engine:
     def _cache_key(self, plan: FederatedPlan, namespace: str | None) -> tuple[Any, ...]:
         """Build a hashable key from the plan's emitted shape.
 
-        Includes merge SQL + params, per-fragment SQL + params, and the
-        output column list. Excludes column metadata (which is
-        presentation-layer) and any rendering-only fields. ``namespace``
-        — the caller's optional partition key (viewer / tenant) — leads
-        the tuple so distinct namespaces never share a slot."""
+        Includes the merge spec (its structural ``repr`` — capturing the
+        merge SQL the renderer would produce, including bound values),
+        per-fragment SQL + params, and the output column list. Excludes
+        column metadata (presentation-layer). ``namespace`` — the
+        caller's optional partition key (viewer / tenant) — leads the
+        tuple so distinct namespaces never share a slot."""
         return (
             namespace,
-            plan.merge.sql,
-            _freeze_param(plan.merge.params),
+            _merge_spec_key(plan.merge_spec),
             tuple((f.dialect.value, f.sql, _freeze_param(f.params)) for f in plan.fragments),
             tuple(plan.columns),
         )
@@ -405,8 +476,10 @@ class Engine:
             materialised: list[tuple[Any, ...]] = [tuple(r) for r in result.rows]
             self._load_fragment(i, result.columns, materialised)
 
-        _assert_merge_read_only(plan.merge.sql)
-        merge_cursor = self._con.execute(plan.merge.sql, dict(plan.merge.params))
+        self._warn_inline_once()
+        merge_sql, merge_params = render_merge_sql(plan.merge_spec)
+        _assert_merge_read_only(merge_sql)
+        merge_cursor = self._con.execute(merge_sql, dict(merge_params))
         rows = merge_cursor.fetchall()
         return ExecutionResult(
             columns=list(plan.columns),
@@ -579,6 +652,12 @@ class AsyncEngine:
         self._adapters: dict[Dialect, AsyncAdapter] = dict(adapters or {})
         self._merge_engine = merge_engine
         self.last_iter_run_used_fast_path: bool = False
+        self._warned_inline = False
+
+    def _warn_inline_once(self) -> None:
+        if not self._warned_inline:
+            self._warned_inline = True
+            warnings.warn(_INLINE_MERGE_DEPRECATION, DeprecationWarning, stacklevel=3)
 
     @contextlib.contextmanager
     def _merge_con(self, n_fragments: int) -> Generator[Any]:
@@ -644,8 +723,10 @@ class AsyncEngine:
         with self._merge_con(len(plan.fragments)) as con:
             for i, result in enumerate(results):
                 _load_fragment_into(con, i, result.columns, [tuple(r) for r in result.rows])
-            _assert_merge_read_only(plan.merge.sql)
-            rows = con.execute(plan.merge.sql, dict(plan.merge.params)).fetchall()
+            self._warn_inline_once()
+            merge_sql, merge_params = render_merge_sql(plan.merge_spec)
+            _assert_merge_read_only(merge_sql)
+            rows = con.execute(merge_sql, dict(merge_params)).fetchall()
         return ExecutionResult(
             columns=plan.columns,
             column_meta=plan.column_meta,
@@ -706,8 +787,10 @@ class AsyncEngine:
         with self._merge_con(len(plan.fragments)) as con:
             for i, result in enumerate(results):
                 _load_fragment_into(con, i, result.columns, [tuple(r) for r in result.rows])
-            _assert_merge_read_only(plan.merge.sql)
-            cursor = con.execute(plan.merge.sql, dict(plan.merge.params))
+            self._warn_inline_once()
+            merge_sql, merge_params = render_merge_sql(plan.merge_spec)
+            _assert_merge_read_only(merge_sql)
+            cursor = con.execute(merge_sql, dict(merge_params))
             while True:
                 chunk = await asyncio.to_thread(cursor.fetchmany, chunk_rows)
                 if not chunk:

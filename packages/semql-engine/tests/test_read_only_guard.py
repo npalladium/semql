@@ -16,7 +16,7 @@ from collections.abc import Mapping
 
 import pytest
 from semql.compile import ColumnMeta, CompiledQuery
-from semql.federate import FederatedPlan, MergePlan, MergeSpec
+from semql.federate import FederatedPlan, MergeSpec
 from semql.model import Dialect
 from semql_engine import AdapterResult, Engine
 from semql_engine.engine import (
@@ -37,7 +37,7 @@ def _frag(sql: str, *, derived: list[str] | None = None) -> CompiledQuery:
     )
 
 
-def _plan(fragment: CompiledQuery, merge_sql: str = "SELECT * FROM frag_0") -> FederatedPlan:
+def _plan(fragment: CompiledQuery) -> FederatedPlan:
     spec = MergeSpec(
         primary_index=0,
         bridges=[],
@@ -51,7 +51,6 @@ def _plan(fragment: CompiledQuery, merge_sql: str = "SELECT * FROM frag_0") -> F
     )
     return FederatedPlan(
         fragments=[fragment],
-        merge=MergePlan(sql=merge_sql),
         merge_spec=spec,
         columns=["x"],
         column_meta=[ColumnMeta(name="x", kind="dimension", display_name="x")],
@@ -61,7 +60,7 @@ def _plan(fragment: CompiledQuery, merge_sql: str = "SELECT * FROM frag_0") -> F
 def test_clean_select_plan_passes() -> None:
     plan = _plan(_frag("SELECT x FROM t"))
     _assert_fragments_read_only(plan)
-    _assert_merge_read_only(plan.merge.sql)
+    _assert_merge_read_only("SELECT * FROM frag_0")
 
 
 def test_non_select_fragment_refused() -> None:

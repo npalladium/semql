@@ -1,13 +1,14 @@
-# pyright: reportPrivateImportUsage=false
-"""Cross-source compilation: emit per-backend fragments + a DuckDB
+"""Cross-source compilation: emit per-backend fragments + a structured
 merge plan when a query's touched cubes span backends.
 
 The sans-io counterpart of :func:`semql.compile.compile_query` for
-federated queries. Each fragment is a normal :class:`CompiledQuery` for its
-backend; the merge SQL is always DuckDB dialect — DuckDB is the lingua
-franca of the federation layer (both for our in-process executor and
-for sans-io callers who want to materialise results into DuckDB-
-compatible tooling).
+federated queries. Each fragment is a normal :class:`CompiledQuery` for
+its backend; the cross-fragment merge is described structurally by
+:class:`MergeSpec` (dimensions, bridge joins, per-measure re-aggregation
+recipes, residual predicates). This module is dialect-agnostic — it
+emits no merge SQL. The executor's package (``semql_engine.merge``)
+renders the spec to DuckDB SQL, the federation lingua franca; a custom
+executor may consume the spec however it likes.
 
 v1 restrictions, refused with :class:`FederationError`:
 
@@ -35,12 +36,10 @@ type is preferred whenever federation isn't needed.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from dataclasses import field as dc_field
-from typing import TYPE_CHECKING, Literal, Protocol
-
-from sqlglot import exp
+from dataclasses import replace as dc_replace
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from semql.cnf import to_cnf as core_to_cnf
 from semql.compile import ColumnMeta, CompiledQuery, compile_query
@@ -74,20 +73,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class MergePlan:
-    """How to combine per-fragment result sets into the final result.
-
-    ``sql`` references fragments as DuckDB tables named ``frag_0``,
-    ``frag_1``, … indexed into ``FederatedPlan.fragments``. The
-    executor (or any caller doing the merge manually) must materialise
-    each fragment under that name before running ``sql``.
-    """
-
-    sql: str
-    params: dict[str, object] = dc_field(default_factory=lambda: {})
-
-
-@dataclass(frozen=True)
 class FragmentColumn:
     fragment_index: int  # 0-based into FederatedPlan.fragments
     column_name: str  # name in that fragment's output
@@ -105,27 +90,80 @@ class DimensionOutput:
     output_name: str
     sources: list[FragmentColumn]  # COALESCE order for full-outer
     column_meta: ColumnMeta
+    # Time bucketing grain, set only for a time dimension the *merge*
+    # buckets (raw_rows mode renders ``date_trunc(grain, source)``).
+    # ``None`` for ordinary dimensions and for distributive-mode time
+    # columns, which the fragment already bucketed — those pass through
+    # under their own name. Carried on the spec so a renderer can
+    # reconstruct the bucket without the original SemanticQuery.
+    time_grain: str | None = None
+
+
+# How the merge re-aggregates a measure column. Spans both federation
+# modes: distributive folds count into ``sum`` (fragment pre-counted),
+# while raw_rows streams the un-aggregated source and applies the real
+# aggregate at the merge — so the raw aggregates (``avg``, the
+# percentiles) appear here too. Every value is a recipe a renderer can
+# turn into a merge-side expression from the ``*_source`` columns alone.
+MergeAgg = Literal[
+    "sum",  # SUM(source)
+    "count",  # COUNT(source) -- raw_rows; distributive folds count into sum
+    "min",  # MIN(source)
+    "max",  # MAX(source)
+    "avg",  # AVG(source) -- raw_rows
+    "count_distinct",  # COUNT(DISTINCT source)
+    "median",  # PERCENTILE_CONT(0.5)  -- raw_rows
+    "p75",  # PERCENTILE_CONT(0.75) -- raw_rows
+    "p90",  # PERCENTILE_CONT(0.90) -- raw_rows
+    "p95",  # PERCENTILE_CONT(0.95) -- raw_rows
+    "avg_recomposed",  # SUM(sum_src) / NULLIF(SUM(cnt_src), 0)
+    "ratio",  # agg(num) / NULLIF(agg(den), 0)
+    "passthrough",  # single-fragment; no re-aggregation
+]
 
 
 @dataclass(frozen=True)
 class MeasureOutput:
     output_name: str
-    merge_agg: Literal[
-        "sum",  # SUM(source)
-        "count",  # SUM(source) -- fragment pre-counted
-        "min",  # raw_rows only
-        "max",  # raw_rows only
-        "count_distinct",  # raw_rows only
-        "avg_recomposed",  # SUM(sum_src) / NULLIF(SUM(cnt_src), 0)
-        "ratio",  # SUM(num) / NULLIF(SUM(den), 0)
-        "passthrough",  # single-fragment; no re-aggregation
-    ]
+    merge_agg: MergeAgg
     column_meta: ColumnMeta
     source: FragmentColumn | None = None
     sum_source: FragmentColumn | None = None  # avg_recomposed
     count_source: FragmentColumn | None = None  # avg_recomposed
     numerator: FragmentColumn | None = None  # ratio
     denominator: FragmentColumn | None = None  # ratio
+    # Per-side aggregates for ``ratio`` — the merge applies these to the
+    # raw numerator / denominator columns before dividing. ``None`` for
+    # every other ``merge_agg``.
+    numerator_agg: MergeAgg | None = None
+    denominator_agg: MergeAgg | None = None
+
+
+# The aggregates a raw-rows fragment streams un-applied for the merge to
+# apply. Every member is a ``MergeAgg`` literal; the set is the merge's
+# supported raw aggregates (``ratio`` recomposes from these, never
+# itself). Used to narrow a cube measure's ``agg`` string into the typed
+# ``MergeAgg`` recorded on the spec — replaces the old ``type: ignore``.
+_RAW_MERGE_AGGS: frozenset[str] = frozenset(
+    {"sum", "count", "count_distinct", "avg", "min", "max", "median", "p75", "p90", "p95"}
+)
+
+
+def _as_merge_agg(agg: str) -> MergeAgg:
+    if agg not in _RAW_MERGE_AGGS:
+        raise FederationError(
+            f"agg={agg!r} has no raw-rows merge recipe.", reason="unsupported_agg"
+        )
+    return cast("MergeAgg", agg)
+
+
+# A cross-partition residual clause resolved to fragment coordinates.
+# Each literal is ``(negated, fragment_index, column_name, op, values)``;
+# a clause is an OR of literals; the spec holds an AND of clauses. Plain
+# hashable tuples so :class:`MergeSpec` stays frozen, and self-contained
+# so a renderer emits the post-join WHERE with no catalog lookup.
+_ResolvedCrossLiteral = tuple[bool, int, str, str, tuple[object, ...]]
+_ResolvedCrossClause = tuple[_ResolvedCrossLiteral, ...]
 
 
 @dataclass(frozen=True)
@@ -139,21 +177,28 @@ class MergeSpec:
     limit: int | None
     offset: int | None
     mode: Literal["distributive", "raw_rows"]
-    # CNF clauses that touch more than one partition. Each clause is
-    # a list of (negated: bool, dimension: str, op: str, values: tuple)
-    # tuples. The merge applies them as a post-join WHERE combined
-    # with AND across clauses and OR within a clause. Used by the
-    # distributive-mode where-tree lift (v1 carryover from raw_rows).
-    cross_partition_clauses: tuple[tuple[tuple[bool, str, str, tuple[object, ...]], ...], ...] = ()
+    # CNF clauses that touch more than one partition, resolved to
+    # fragment coordinates: each literal is
+    # ``(negated, fragment_index, column_name, op, values)``. The merge
+    # applies them as a post-join WHERE — AND across clauses, OR within a
+    # clause. Self-contained: a renderer needs no catalog or cube→index
+    # map. ``op`` / ``values`` mirror :class:`semql.spec.Filter`.
+    cross_partition_clauses: tuple[_ResolvedCrossClause, ...] = ()
 
 
 # Format version of the federation plan IR.  Bumped when the
-# fragment / merge / merge_spec shape changes in a way an out-of-tree
-# executor would need to know about (``MergeSpec`` travels across
-# package versions — see the executor's ``ANN401`` note).  Stamped on
-# every :class:`FederatedPlan` so a consumer can detect a compiler /
-# executor skew instead of mis-reading a changed shape.
-FEDERATED_PLAN_VERSION = 1
+# fragment / merge_spec shape changes in a way an out-of-tree executor
+# would need to know about (``MergeSpec`` travels across package
+# versions — see the executor's ``ANN401`` note).  Stamped on every
+# :class:`FederatedPlan` so a consumer can detect a compiler / executor
+# skew instead of mis-reading a changed shape.
+#
+# v2: ``FederatedPlan.merge`` (the rendered DuckDB ``MergePlan``) was
+# removed — the plan now carries only the structured ``merge_spec``, and
+# the spec gained ``DimensionOutput.time_grain``, the widened
+# ``MeasureOutput.merge_agg`` (+ ``numerator_agg`` / ``denominator_agg``
+# for ratios), and fragment-resolved ``cross_partition_clauses``.
+FEDERATED_PLAN_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -161,20 +206,23 @@ class FederatedPlan:
     """A query that touches cubes on multiple backends.
 
     ``fragments[i]`` is a :class:`CompiledQuery` to run against its
-    respective backend. Results are loaded into a DuckDB table named
-    ``frag_i`` and the ``merge.sql`` produces the final shape.
+    respective backend. An executor loads each result into a DuckDB
+    table named ``frag_i`` and applies ``merge_spec`` to produce the
+    final shape. The plan is dialect-agnostic: it carries the structured
+    :class:`MergeSpec`, not merge SQL — rendering the DuckDB merge SQL
+    lives in ``semql_engine.merge`` (a custom executor may consume the
+    spec however it likes).
 
     ``columns`` and ``column_meta`` describe the final output shape
     after the merge — same role they play on :class:`CompiledQuery`.
 
     Frozen — like every other node in the federation IR.  Derive a
     tweaked plan with :func:`dataclasses.replace`, never by attribute
-    assignment, so the fragments can't silently desync from the merge.
+    assignment, so the fragments can't silently desync from the spec.
     ``version`` carries :data:`FEDERATED_PLAN_VERSION`.
     """
 
     fragments: list[CompiledQuery]
-    merge: MergePlan
     merge_spec: MergeSpec
     columns: list[str]
     column_meta: list[ColumnMeta]
@@ -629,26 +677,19 @@ class _MergePartition(Protocol):
     bridge_columns: dict[str, str]
 
 
-# A mode-specific SELECT contribution: the value expression plus the
-# MeasureOutput / (alias, source) metadata the MergeSpec records.
-_MeasureSelect = tuple[exp.Expression, MeasureOutput]
-_TimeSelect = tuple[exp.Expression, str, FragmentColumn]
-
-
 def _build_merge_joins(
     partitions: Sequence[_MergePartition],
     bridges: list[_Bridge],
     primary_idx: int,
-) -> tuple[list[tuple[int, int, str, str]], list[BridgeJoin]]:
+) -> list[BridgeJoin]:
     """Resolve the bridge graph into an ordered list of LEFT JOINs.
 
-    Returns ``(join_specs, bridge_joins)`` where each join spec is
-    ``(new_idx, host_idx, host_col, new_col)`` — the fragment being
-    joined in, the already-joined host, and the bridge key columns on
-    each side. Raises if the partitions don't form a connected graph.
+    BFS out from the primary partition so each :class:`BridgeJoin` has
+    its ``left`` (host) side already joined when the ``right`` (new) side
+    is added — the renderer joins them in this order. Raises if the
+    partitions don't form a connected graph.
     """
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
-    join_specs: list[tuple[int, int, str, str]] = []
     bridge_joins: list[BridgeJoin] = []
     joined: set[int] = {primary_idx}
     pending = list(bridges)
@@ -672,7 +713,6 @@ def _build_merge_joins(
                 n_cube, n_dim = b.left_cube.name, b.left_dim
             host_col = partitions[host_idx].bridge_columns[f"{h_cube}.{h_dim}"]
             new_col = partitions[new_idx].bridge_columns[f"{n_cube}.{n_dim}"]
-            join_specs.append((new_idx, host_idx, host_col, new_col))
             bridge_joins.append(
                 BridgeJoin(
                     left=FragmentColumn(host_idx, host_col),
@@ -687,10 +727,16 @@ def _build_merge_joins(
                 "Federated plan has disconnected backend partitions.",
                 reason="disconnected_partitions",
             )
-    return join_specs, bridge_joins
+    return bridge_joins
 
 
-def _assemble_merge_sql(
+# (output alias, fragment source column, bucket grain or None) for the
+# query's time dimension at the merge. Grain None = the fragment already
+# bucketed (distributive passthrough); set = the merge buckets (raw_rows).
+_TimeOutput = tuple[str, FragmentColumn, str | None]
+
+
+def _build_merge_spec(
     q: SemanticQuery,
     catalog: dict[str, Cube],
     primary_partition: Dialect,
@@ -699,75 +745,53 @@ def _assemble_merge_sql(
     output_column_meta: list[ColumnMeta],
     *,
     mode: Literal["distributive", "raw_rows"],
-    measure_selects: list[_MeasureSelect],
-    time_select: _TimeSelect | None,
+    measure_outputs: list[MeasureOutput],
+    time_output: _TimeOutput | None,
     cross_partition_clauses: _Cnf | None = None,
-) -> tuple[str, MergeSpec, dict[str, object]]:
-    """Build the DuckDB merge SELECT as a sqlglot AST and render it.
+) -> MergeSpec:
+    """Assemble the structured :class:`MergeSpec` — the authoritative,
+    dialect-agnostic federation plan. No SQL: rendering DuckDB merge SQL
+    from this spec lives in ``semql_engine.merge`` (see PHILOSOPHY — the
+    core compiler plans, the executor's package renders the dialect).
 
-    Universal across both federation modes: dimensions, FROM + bridge
-    LEFT JOINs, cross-partition WHERE, positional GROUP BY, HAVING,
-    ORDER BY, and LIMIT/OFFSET. The two mode-specific pieces — measure
-    re-aggregation and time bucketing — arrive pre-built as
-    ``measure_selects`` / ``time_select``.
-
-    Frags are aliased ``f0``, ``f1``, …; the primary fragment is the FROM
-    target. Cross-partition filter and HAVING values bind as ``$name``
-    placeholders, never inlined.
+    Universal across both federation modes; the mode-specific pieces
+    (measure re-aggregation, time bucketing) arrive pre-built as
+    ``measure_outputs`` / ``time_output``. Output column order is
+    dimensions, then the time column, then measures — the contract the
+    renderer's positional GROUP BY relies on.
     """
-    binder = _MergeBinder()
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
     primary_idx = next(i for i, p in enumerate(partitions) if p.dialect == primary_partition)
 
-    # SELECT list: dimensions, then the time bucket, then measures —
-    # that order makes the positional GROUP BY (1..n_group) line up.
-    select_list: list[exp.Expression] = []
     dimension_outputs: list[DimensionOutput] = []
     for ref in q.dimensions:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         col = partitions[idx].dim_columns[ref]
         alias = ref.rsplit(".", 1)[1]
-        select_list.append(_aliased(_frag_col(idx, col), alias))
         meta = next(m for m in output_column_meta if m.name == alias)
         dimension_outputs.append(
             DimensionOutput(output_name=alias, sources=[FragmentColumn(idx, col)], column_meta=meta)
         )
 
-    n_group = len(q.dimensions)
-    if time_select is not None:
-        time_expr, time_alias, time_source = time_select
-        select_list.append(_aliased(time_expr, time_alias))
+    if time_output is not None:
+        time_alias, time_source, time_grain = time_output
         meta = next(m for m in output_column_meta if m.name == time_alias)
         dimension_outputs.append(
-            DimensionOutput(output_name=time_alias, sources=[time_source], column_meta=meta)
-        )
-        n_group += 1
-
-    measure_outputs: list[MeasureOutput] = []
-    for measure_expr, m_out in measure_selects:
-        select_list.append(_aliased(measure_expr, m_out.output_name))
-        measure_outputs.append(m_out)
-
-    select = exp.select(*select_list).from_(
-        exp.alias_(exp.to_table(f"frag_{primary_idx}"), f"f{primary_idx}")
-    )
-    join_specs, bridge_joins = _build_merge_joins(partitions, bridges, primary_idx)
-    for new_idx, host_idx, host_col, new_col in join_specs:
-        select = select.join(
-            exp.alias_(exp.to_table(f"frag_{new_idx}"), f"f{new_idx}"),
-            on=exp.EQ(this=_frag_col(host_idx, host_col), expression=_frag_col(new_idx, new_col)),
-            join_type="LEFT",
+            DimensionOutput(
+                output_name=time_alias,
+                sources=[time_source],
+                column_meta=meta,
+                time_grain=time_grain,
+            )
         )
 
-    # Cross-partition residual predicates — each clause ANDs into WHERE.
-    for clause in cross_partition_clauses or []:
-        select = select.where(_emit_cross_partition_clause(clause, cube_to_idx, binder))
+    bridge_joins = _build_merge_joins(partitions, bridges, primary_idx)
+    resolved_cross = _resolve_cross_clauses(cross_partition_clauses or [], cube_to_idx)
 
-    if q.measures and n_group > 0:
-        select = select.group_by(*(exp.Literal.number(i + 1) for i in range(n_group)))
-
+    # HAVING refusal (compile-time): every HAVING target must be one of
+    # the selected measures — the renderer references it by output alias.
     if q.having:
-        selected = {ref.rsplit(".", 1)[1] for ref in q.measures}
+        selected = {m.output_name for m in measure_outputs}
         for hf in q.having:
             alias = hf.dimension.rsplit(".", 1)[1]
             if alias not in selected:
@@ -775,21 +799,8 @@ def _assemble_merge_sql(
                     f"HAVING references {hf.dimension!r}, which is not in query.measures.",
                     reason="having_unknown_measure",
                 )
-            select = select.having(_emit_having_term(alias, hf, binder))
 
-    if q.order:
-        for ref, direction in q.order:
-            alias = ref.rsplit(".", 1)[-1] if "." in ref else ref
-            select = select.order_by(
-                exp.Ordered(this=exp.column(alias, quoted=True), desc=direction == "desc")
-            )
-
-    if q.limit is not None:
-        select = select.limit(int(q.limit))
-    if q.offset is not None and q.offset > 0:
-        select = select.offset(int(q.offset))
-
-    spec = MergeSpec(
+    return MergeSpec(
         primary_index=primary_idx,
         bridges=bridge_joins,
         dimensions=dimension_outputs,
@@ -799,12 +810,11 @@ def _assemble_merge_sql(
         limit=q.limit,
         offset=q.offset,
         mode=mode,
-        cross_partition_clauses=_serialise_cnf(cross_partition_clauses or []),
+        cross_partition_clauses=resolved_cross,
     )
-    return select.sql(dialect="duckdb"), spec, binder.params
 
 
-def _emit_merge_sql(
+def _build_distributive_spec(
     q: SemanticQuery,
     catalog: dict[str, Cube],
     primary_partition: Dialect,
@@ -813,20 +823,22 @@ def _emit_merge_sql(
     output_column_meta: list[ColumnMeta],
     *,
     cross_partition_clauses: _Cnf | None = None,
-) -> tuple[str, MergeSpec, dict[str, object]]:
-    """Distributive merge: fragments pre-aggregate (SUM / decomposed AVG),
-    so the merge re-aggregates each measure with SUM (or SUM/NULLIF(SUM)
-    for recomposed averages). Delegates the shared scaffold to
-    :func:`_assemble_merge_sql`."""
+) -> MergeSpec:
+    """Distributive merge spec: fragments pre-aggregate (SUM / pre-counted
+    / decomposed AVG), so each measure re-aggregates with SUM at the merge
+    (``avg_recomposed`` for averages). Delegates assembly to
+    :func:`_build_merge_spec`."""
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
 
-    time_select: _TimeSelect | None = None
+    time_output: _TimeOutput | None = None
     if q.time_dimension is not None:
         idx = cube_to_idx[_resolve_field_to_cube(q.time_dimension.dimension, catalog).name]
         td_col = partitions[idx].dim_columns[q.time_dimension.dimension]
-        time_select = (_frag_col(idx, td_col), td_col, FragmentColumn(idx, td_col))
+        # Distributive buckets in the fragment; the merge passes the
+        # column through (grain None).
+        time_output = (td_col, FragmentColumn(idx, td_col), None)
 
-    measure_selects: list[_MeasureSelect] = []
+    measure_outputs: list[MeasureOutput] = []
     for ref in q.measures:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         plan = partitions[idx]
@@ -834,32 +846,27 @@ def _emit_merge_sql(
         meta = next(m for m in output_column_meta if m.name == m_name)
         if ref in plan.avg_columns:
             sum_col, count_col = plan.avg_columns[ref]
-            expr: exp.Expression = exp.Div(
-                this=exp.Sum(this=_frag_col(idx, sum_col)),
-                expression=exp.Anonymous(
-                    this="NULLIF",
-                    expressions=[exp.Sum(this=_frag_col(idx, count_col)), exp.Literal.number(0)],
-                ),
-            )
-            m_out = MeasureOutput(
-                output_name=m_name,
-                merge_agg="avg_recomposed",
-                sum_source=FragmentColumn(idx, sum_col),
-                count_source=FragmentColumn(idx, count_col),
-                column_meta=meta,
+            measure_outputs.append(
+                MeasureOutput(
+                    output_name=m_name,
+                    merge_agg="avg_recomposed",
+                    sum_source=FragmentColumn(idx, sum_col),
+                    count_source=FragmentColumn(idx, count_col),
+                    column_meta=meta,
+                )
             )
         else:
             col = plan.measure_columns[ref]
-            expr = exp.Sum(this=_frag_col(idx, col))
-            m_out = MeasureOutput(
-                output_name=m_name,
-                merge_agg="sum",  # both sum and count reduce to SUM at merge
-                source=FragmentColumn(idx, col),
-                column_meta=meta,
+            measure_outputs.append(
+                MeasureOutput(
+                    output_name=m_name,
+                    merge_agg="sum",  # both sum and count reduce to SUM at merge
+                    source=FragmentColumn(idx, col),
+                    column_meta=meta,
+                )
             )
-        measure_selects.append((expr, m_out))
 
-    return _assemble_merge_sql(
+    return _build_merge_spec(
         q,
         catalog,
         primary_partition,
@@ -867,24 +874,33 @@ def _emit_merge_sql(
         bridges,
         output_column_meta,
         mode="distributive",
-        measure_selects=measure_selects,
-        time_select=time_select,
+        measure_outputs=measure_outputs,
+        time_output=time_output,
         cross_partition_clauses=cross_partition_clauses,
     )
 
 
-def _serialise_cnf(
+def _resolve_cross_clauses(
     clauses: _Cnf,
-) -> tuple[tuple[tuple[bool, str, str, tuple[object, ...]], ...], ...]:
-    """Serialise a CNF clause list into the MergeSpec-friendly form.
+    cube_to_idx: dict[str, int],
+) -> tuple[_ResolvedCrossClause, ...]:
+    """Resolve a cross-partition CNF clause list to fragment coordinates.
 
-    Each clause is a list of literals; each literal is a (negated,
-    dimension, op, values) tuple. The serialised form is hashable
-    so MergeSpec can stay frozen.
+    Each ``Filter.dimension`` (``cube.dim``) becomes
+    ``(negated, fragment_index, column_name, op, values)``. The column
+    name is the unqualified dimension — the where-router force-projects
+    such a dimension under that bare name (see ``_route_where_clauses``),
+    so the merge can reference ``f{idx}.{column_name}`` directly. Hashable
+    so :class:`MergeSpec` stays frozen, and self-describing so a renderer
+    needs neither the catalog nor the cube→index map.
     """
-    out: list[tuple[tuple[bool, str, str, tuple[object, ...]], ...]] = []
+    out: list[_ResolvedCrossClause] = []
     for clause in clauses:
-        out.append(tuple((neg, f.dimension, f.op, tuple(f.values)) for neg, f in clause))
+        resolved: list[_ResolvedCrossLiteral] = []
+        for neg, f in clause:
+            cube_name, dim_name = f.dimension.split(".", 1)
+            resolved.append((neg, cube_to_idx[cube_name], dim_name, f.op, tuple(f.values)))
+        out.append(tuple(resolved))
     return tuple(out)
 
 
@@ -1142,88 +1158,6 @@ def _route_where_distributive(
     return out, cross
 
 
-class _MergeBinder:
-    """Bind merge-SQL filter values as DuckDB named parameters.
-
-    The merge step runs in-process DuckDB over fragment result sets;
-    DuckDB reads ``$name`` placeholders against the params mapping. Every
-    cross-partition residual / HAVING value flows through here so it
-    binds rather than inlining — ``Filter.values`` are LLM/user-derived,
-    and the federation invariant is "values bind as parameters, never as
-    literals." Names are ``m0``, ``m1``, … kept distinct from the
-    ``p*`` fragment params (which live in separate dicts regardless)."""
-
-    def __init__(self) -> None:
-        self.params: dict[str, object] = {}
-
-    def placeholder(self, value: object) -> exp.Placeholder:
-        """Register ``value`` and return the ``$m{n}`` placeholder node."""
-        name = f"m{len(self.params)}"
-        self.params[name] = value
-        return exp.Placeholder(this=name)
-
-
-def _frag_col(idx: int, col: str) -> exp.Column:
-    """Quoted ``"f{idx}"."col"`` reference into a fragment's result set."""
-    return exp.column(col, table=f"f{idx}", quoted=True)
-
-
-def _aliased(value: exp.Expression, name: str) -> exp.Alias:
-    """``value AS "name"`` with a quoted output identifier."""
-    return exp.Alias(this=value, alias=exp.to_identifier(name, quoted=True))
-
-
-# Concrete comparison-node classes keyed by Filter op. ``Callable[...,
-# exp.Expression]`` (not ``type[exp.Binary]``) because sqlglot's ``Binary``
-# is an *ancestor* of ``Expression``, not a subtype — see the sqlglot
-# type-node note in CLAUDE memory.
-_BINARY_OPS: dict[str, Callable[..., exp.Expression]] = {
-    "eq": exp.EQ,
-    "neq": exp.NEQ,
-    "gt": exp.GT,
-    "gte": exp.GTE,
-    "lt": exp.LT,
-    "lte": exp.LTE,
-}
-
-
-def _emit_filter_predicate(col: exp.Expression, f: Filter, binder: _MergeBinder) -> exp.Expression:
-    """Build a DuckDB predicate AST for ``f`` over the ``col`` expression,
-    binding every comparison value as a ``$m`` parameter."""
-    op = f.op
-    vals = list(f.values)
-    if op in _BINARY_OPS:
-        return _BINARY_OPS[op](this=col, expression=binder.placeholder(vals[0]))
-    if op == "in":
-        return exp.In(this=col, expressions=[binder.placeholder(v) for v in vals])
-    if op == "not_in":
-        return exp.Not(this=exp.In(this=col, expressions=[binder.placeholder(v) for v in vals]))
-    if op == "is_null":
-        return exp.Is(this=col, expression=exp.Null())
-    if op == "not_null":
-        return exp.Not(this=exp.Is(this=col, expression=exp.Null()))
-    if op == "contains":
-        return exp.ILike(this=col, expression=binder.placeholder("%" + str(vals[0]) + "%"))
-    raise FederationError(f"Filter op {op!r} unsupported.", reason="unsupported_op")
-
-
-def _emit_cross_partition_clause(
-    clause: _CnfClause,
-    cube_to_idx: dict[str, int],
-    binder: _MergeBinder,
-) -> exp.Expression:
-    """One CNF clause → an OR of (optionally negated) predicate nodes."""
-    lits: list[exp.Expression] = []
-    for negated, f in clause:
-        cube_name, dim_name = f.dimension.split(".", 1)
-        pred = _emit_filter_predicate(_frag_col(cube_to_idx[cube_name], dim_name), f, binder)
-        lits.append(exp.Not(this=pred) if negated else pred)
-    clause_expr = lits[0]
-    for lit in lits[1:]:
-        clause_expr = exp.Or(this=clause_expr, expression=lit)
-    return clause_expr
-
-
 _RAW_TIME_PREFIX = "__rt_"
 
 
@@ -1380,7 +1314,7 @@ def _build_partition_sub_query_raw_rows(
     )
 
 
-def _emit_merge_sql_raw_rows(
+def _build_raw_rows_spec(
     q: SemanticQuery,
     catalog: dict[str, Cube],
     primary_partition: Dialect,
@@ -1389,29 +1323,26 @@ def _emit_merge_sql_raw_rows(
     output_column_meta: list[ColumnMeta],
     *,
     cross_partition_clauses: _Cnf | None = None,
-) -> tuple[str, MergeSpec, dict[str, object]]:
-    """Raw-rows merge: fragments stream ungrouped rows, so the merge applies
-    the full aggregation (and time bucketing, and HAVING). Delegates the
-    shared scaffold to :func:`_assemble_merge_sql`."""
+) -> MergeSpec:
+    """Raw-rows merge spec: fragments stream ungrouped rows, so the merge
+    applies the full aggregation (and time bucketing, and HAVING). The
+    measure ``merge_agg`` carries the raw aggregate (``sum`` / ``avg`` /
+    a percentile / …); ``ratio`` records its per-side aggregates.
+    Delegates assembly to :func:`_build_merge_spec`."""
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
 
-    time_select: _TimeSelect | None = None
+    time_output: _TimeOutput | None = None
     if q.time_dimension is not None:
         idx = cube_to_idx[_resolve_field_to_cube(q.time_dimension.dimension, catalog).name]
         plan = partitions[idx]
         assert plan.time_col is not None
-        raw_ref = _frag_col(idx, plan.time_col)
         td_name = q.time_dimension.dimension.rsplit(".", 1)[1]
-        if plan.time_grain:
-            bucket: exp.Expression = exp.Anonymous(
-                this="date_trunc", expressions=[exp.Literal.string(plan.time_grain), raw_ref]
-            )
-            time_alias = f"{td_name}_{plan.time_grain}"
-        else:
-            bucket, time_alias = raw_ref, td_name
-        time_select = (bucket, time_alias, FragmentColumn(idx, plan.time_col))
+        # The merge buckets raw timestamps; the output alias carries the
+        # grain (e.g. ``created_at_day``) when one is set.
+        time_alias = f"{td_name}_{plan.time_grain}" if plan.time_grain else td_name
+        time_output = (time_alias, FragmentColumn(idx, plan.time_col), plan.time_grain)
 
-    measure_selects: list[_MeasureSelect] = []
+    measure_outputs: list[MeasureOutput] = []
     for ref in q.measures:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         plan = partitions[idx]
@@ -1419,32 +1350,29 @@ def _emit_merge_sql_raw_rows(
         meta = next(m for m in output_column_meta if m.name == m_name)
         if ref in plan.ratio_measure_columns:
             num_col, num_agg, den_col, den_agg = plan.ratio_measure_columns[ref]
-            expr: exp.Expression = exp.Div(
-                this=_raw_agg_expr(num_agg, num_col, idx),
-                expression=exp.Anonymous(
-                    this="NULLIF",
-                    expressions=[_raw_agg_expr(den_agg, den_col, idx), exp.Literal.number(0)],
-                ),
-            )
-            m_out = MeasureOutput(
-                output_name=m_name,
-                merge_agg="ratio",
-                numerator=FragmentColumn(idx, num_col),
-                denominator=FragmentColumn(idx, den_col),
-                column_meta=meta,
+            measure_outputs.append(
+                MeasureOutput(
+                    output_name=m_name,
+                    merge_agg="ratio",
+                    numerator=FragmentColumn(idx, num_col),
+                    denominator=FragmentColumn(idx, den_col),
+                    numerator_agg=_as_merge_agg(num_agg),
+                    denominator_agg=_as_merge_agg(den_agg),
+                    column_meta=meta,
+                )
             )
         else:
             col, agg = plan.raw_measure_columns[ref]
-            expr = _raw_agg_expr(agg, col, idx)
-            m_out = MeasureOutput(
-                output_name=m_name,
-                merge_agg=agg,  # type: ignore[arg-type]
-                source=FragmentColumn(idx, col),
-                column_meta=meta,
+            measure_outputs.append(
+                MeasureOutput(
+                    output_name=m_name,
+                    merge_agg=_as_merge_agg(agg),
+                    source=FragmentColumn(idx, col),
+                    column_meta=meta,
+                )
             )
-        measure_selects.append((expr, m_out))
 
-    return _assemble_merge_sql(
+    return _build_merge_spec(
         q,
         catalog,
         primary_partition,
@@ -1452,50 +1380,9 @@ def _emit_merge_sql_raw_rows(
         bridges,
         output_column_meta,
         mode="raw_rows",
-        measure_selects=measure_selects,
-        time_select=time_select,
+        measure_outputs=measure_outputs,
+        time_output=time_output,
         cross_partition_clauses=cross_partition_clauses,
-    )
-
-
-_PERCENTILES: dict[str, float] = {"median": 0.5, "p75": 0.75, "p90": 0.90, "p95": 0.95}
-
-
-def _raw_agg_expr(agg: str, col: str, idx: int) -> exp.Expression:
-    """Merge-side aggregation AST for a raw-rows measure column."""
-    if not col:
-        return exp.Count(this=exp.Star())
-    ref = _frag_col(idx, col)
-    if agg == "sum":
-        return exp.Sum(this=ref)
-    if agg == "count":
-        return exp.Count(this=ref)
-    if agg == "count_distinct":
-        return exp.Count(this=exp.Distinct(expressions=[ref]))
-    if agg == "avg":
-        return exp.Avg(this=ref)
-    if agg == "min":
-        return exp.Min(this=ref)
-    if agg == "max":
-        return exp.Max(this=ref)
-    if agg in _PERCENTILES:
-        # Renders as DuckDB's QUANTILE_CONT(col, q ORDER BY col).
-        return exp.WithinGroup(
-            this=exp.Anonymous(
-                this="PERCENTILE_CONT", expressions=[exp.Literal.number(_PERCENTILES[agg])]
-            ),
-            expression=exp.Order(expressions=[exp.Ordered(this=ref)]),
-        )
-    raise FederationError(f"agg={agg!r} unsupported.", reason="unsupported_agg")
-
-
-def _emit_having_term(alias: str, f: Filter, binder: _MergeBinder) -> exp.Expression:
-    """HAVING predicate AST over an output measure alias."""
-    op = f.op
-    if op not in _BINARY_OPS:
-        raise FederationError(f"HAVING op {op!r} unsupported.", reason="unsupported_having_op")
-    return _BINARY_OPS[op](
-        this=exp.column(alias, quoted=True), expression=binder.placeholder(f.values[0])
     )
 
 
@@ -1616,7 +1503,7 @@ def _compile_raw_rows(
         q, catalog, partitions, fragments, time_output=time_output
     )
 
-    merge_sql, merge_spec, merge_params = _emit_merge_sql_raw_rows(
+    merge_spec = _build_raw_rows_spec(
         q,
         catalog,
         primary_partition,
@@ -1627,7 +1514,6 @@ def _compile_raw_rows(
     )
     return FederatedPlan(
         fragments=fragments,
-        merge=MergePlan(sql=merge_sql, params=merge_params),
         merge_spec=merge_spec,
         columns=output_columns,
         column_meta=output_column_meta,
@@ -1679,7 +1565,6 @@ def compile_federated_query(
         )
         return FederatedPlan(
             fragments=[c],
-            merge=MergePlan(sql="SELECT * FROM frag_0"),
             merge_spec=MergeSpec(
                 primary_index=0,
                 bridges=[],
@@ -1773,14 +1658,19 @@ def compile_federated_query(
     if q.time_dimension:
         ref = q.time_dimension.dimension
         # Distributive already buckets in the fragment, so the merge
-        # passes the dimension column through under its own name.
+        # passes the dimension column through under its bucketed name
+        # (e.g. ``created_at_day``). The fragment's column meta is named
+        # for the bare dimension, so rename it to the bucketed output
+        # column — otherwise the SELECT-list alias and its meta disagree
+        # and the assembler can't find the meta (granularity != None).
         td_col = partitions[cube_to_idx[ref.split(".", 1)[0]]].dim_columns[ref]
-        time_output = (td_col, _merge_meta_for_dim(ref, partitions, fragments, cube_to_idx))
+        td_meta = _merge_meta_for_dim(ref, partitions, fragments, cube_to_idx)
+        time_output = (td_col, dc_replace(td_meta, name=td_col))
     output_columns, output_column_meta = _merge_output_columns(
         q, catalog, partitions, fragments, time_output=time_output
     )
 
-    merge_sql, merge_spec, merge_params = _emit_merge_sql(
+    merge_spec = _build_distributive_spec(
         q,
         catalog,
         primary_partition,
@@ -1791,7 +1681,6 @@ def compile_federated_query(
     )
     return FederatedPlan(
         fragments=fragments,
-        merge=MergePlan(sql=merge_sql, params=merge_params),
         merge_spec=merge_spec,
         columns=output_columns,
         column_meta=output_column_meta,
@@ -1803,6 +1692,5 @@ __all__ = [
     "FederatedPlan",
     "FederationError",
     "FederationMode",
-    "MergePlan",
     "compile_federated_query",
 ]

@@ -1,13 +1,13 @@
 """``FederatedPlan`` is frozen and version-stamped.
 
-Every other node in the federation IR (``MergePlan``,
-``MergeSpec``, ``BridgeJoin``, …) is a frozen dataclass, but
-``FederatedPlan`` itself was a plain mutable ``@dataclass`` — a caller
-could reassign ``plan.merge`` after compilation and silently desync the
-fragments from the merge step.  The ``MergeSpec`` already carries a
-``# travels across package versions`` caveat in the executor; a format
-version on the plan lets a consumer detect a compiler / executor skew
-instead of mis-reading a changed shape.
+Every other node in the federation IR (``MergeSpec``, ``BridgeJoin``, …)
+is a frozen dataclass, but ``FederatedPlan`` itself was a plain mutable
+``@dataclass`` — a caller could reassign ``plan.merge_spec`` after
+compilation and silently desync the fragments from the merge step.  The
+``MergeSpec`` already carries a ``# travels across package versions``
+caveat in the executor; a format version on the plan lets a consumer
+detect a compiler / executor skew instead of mis-reading a changed
+shape.
 
 These tests pin: the plan rejects attribute assignment, and it carries
 the current format version.
@@ -47,7 +47,7 @@ def _single_backend_plan() -> FederatedPlan:
 def test_federated_plan_is_frozen() -> None:
     plan = _single_backend_plan()
     with pytest.raises(dataclasses.FrozenInstanceError):
-        plan.merge = dataclasses.replace(plan.merge, sql="tampered")  # type: ignore[misc]
+        plan.merge_spec = dataclasses.replace(plan.merge_spec, primary_index=9)  # type: ignore[misc]
 
 
 def test_federated_plan_carries_format_version() -> None:
@@ -60,5 +60,5 @@ def test_federated_plan_replace_round_trips_version() -> None:
     """``dataclasses.replace`` (the supported way to derive a tweaked
     plan) preserves the version stamp."""
     plan = _single_backend_plan()
-    tweaked = dataclasses.replace(plan, merge=dataclasses.replace(plan.merge, sql="SELECT 1"))
+    tweaked = dataclasses.replace(plan, columns=[*plan.columns])
     assert tweaked.version == FEDERATED_PLAN_VERSION

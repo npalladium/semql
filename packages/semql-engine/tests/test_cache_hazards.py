@@ -148,7 +148,6 @@ def test_cache_key_hashable_with_list_valued_params() -> None:
     engine = Engine(cache_size=8)
     plan = _plan()
     plan.fragments[0].params["ids"] = [1, 2, 3]
-    plan.merge.params["tags"] = ["a", "b"]
     # The bug raised TypeError here, before the query ever ran.
     assert isinstance(hash(engine._cache_key(plan, None)), int)
 

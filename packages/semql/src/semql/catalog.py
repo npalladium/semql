@@ -35,7 +35,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,13 +51,19 @@ from semql.model import (
     DerivedTable,
     Dialect,
     Dimension,
+    Entity,
     GlossaryEntry,
     Join,
     Lookup,
+    MutableEntity,
     View,
 )
 from semql.retrieve import EmbeddingProvider, Retriever, build_default_retriever
 from semql.spec import SavedQuery, SemanticQuery, SemanticQueryDefaults, _apply_query_defaults
+
+if TYPE_CHECKING:
+    from semql.mutate import CompiledMutation, SemanticMutation
+    from semql.rows import CompiledEntityQuery, EntityFetch, EntityList
 from semql.units import DEFAULT_REGISTRY, Registry
 from semql.validate import ValidationError, validate
 
@@ -134,6 +140,7 @@ def _run_catalog_validations(
     scope_fn_names: Sequence[str] | None,
     unit_registry: Registry,
     emit: _DiagEmit,
+    entities: Sequence[Entity] = (),
 ) -> tuple[list[Cube], str]:
     """Single source of truth for catalog validation.
 
@@ -399,6 +406,12 @@ def _run_catalog_validations(
     except ValueError as exc:
         emit("invalid_relations", str(exc))
 
+    # Entities: names unique; every referenced cube/dim resolves. The
+    # bare ``Entity(...)`` constructor only checks format — grounding
+    # against real cubes/dims is the catalog's job (the entity docstring
+    # promises exactly this).
+    _validate_entities(entities, by_name, emit)
+
     # scope must resolve to a registered scope function. Skipped when
     # ``scope_fn_names`` is None — a spec built without a runtime can't
     # know the registered scopes.
@@ -417,6 +430,134 @@ def _run_catalog_validations(
                 )
 
     return cube_list, relations_str
+
+
+def _validate_entities(
+    entities: Sequence[Entity],
+    by_name: dict[str, Cube],
+    emit: _DiagEmit,
+) -> None:
+    """Ground every entity's references against the real cubes/dims.
+
+    Resolves ``cubes``, ``key``, ``fields``, ``list_filters``,
+    ``default_order`` (and, for a :class:`MutableEntity`, ``target_cube``
+    and ``mutable_fields``) to actual catalog members. Emits one
+    diagnostic per failure through ``emit`` so the first-error and
+    collect-all paths share the checks."""
+
+    def _dim_names(cube: Cube) -> set[str]:
+        # Dimensions + time dimensions are the addressable row-mode
+        # surface (D10: eq/in on dims, range on time dims).
+        return {d.name for d in cube.dimensions} | {t.name for t in cube.time_dimensions}
+
+    seen: set[str] = set()
+    for e in entities:
+        if e.name in seen:
+            emit(
+                "duplicate_entity_name",
+                f"Catalog has duplicate entity name {e.name!r}. "
+                "Each entity.name must be unique within a catalog.",
+                entity=e.name,
+            )
+        seen.add(e.name)
+
+        # Every referenced cube must exist.
+        entity_cubes_ok = True
+        for cube_name in e.cubes:
+            if cube_name not in by_name:
+                entity_cubes_ok = False
+                emit(
+                    "unknown_entity_cube",
+                    f"Entity {e.name!r}: cube {cube_name!r} is not in the "
+                    f"catalog. Known cubes: {sorted(by_name)}.",
+                    entity=e.name,
+                    cube=cube_name,
+                )
+        if not entity_cubes_ok:
+            # Downstream ref checks would just repeat 'unknown cube'.
+            continue
+
+        def _check_ref(ref: str, code: str, what: str, e: Entity = e) -> None:
+            cube_name, _, field_name = ref.partition(".")
+            if cube_name not in by_name:
+                emit(
+                    code,
+                    f"Entity {e.name!r}: {what} {ref!r} names cube "
+                    f"{cube_name!r}, not in the catalog.",
+                    entity=e.name,
+                    ref=ref,
+                )
+                return
+            if field_name not in _dim_names(by_name[cube_name]):
+                emit(
+                    code,
+                    f"Entity {e.name!r}: {what} {ref!r} — cube {cube_name!r} "
+                    f"has no dimension named {field_name!r}. Known: "
+                    f"{sorted(_dim_names(by_name[cube_name]))}.",
+                    entity=e.name,
+                    ref=ref,
+                )
+
+        if e.key is not None:
+            _check_ref(e.key, "unknown_entity_key_dimension", "key")
+        for local, target in e.fields.items():
+            # ``fields`` may rename measures too (output projection), so
+            # resolve against the full field set like a View does.
+            cube_name, _, field_name = target.partition(".")
+            if cube_name not in by_name:
+                emit(
+                    "unknown_entity_field",
+                    f"Entity {e.name!r}, field {local!r}: target {target!r} "
+                    f"names cube {cube_name!r}, not in the catalog.",
+                    entity=e.name,
+                    field=local,
+                )
+                continue
+            tc = by_name[cube_name]
+            all_fields = (
+                {m.name for m in tc.measures}
+                | {d.name for d in tc.dimensions}
+                | {t.name for t in tc.time_dimensions}
+            )
+            if field_name not in all_fields:
+                emit(
+                    "unknown_entity_field",
+                    f"Entity {e.name!r}, field {local!r}: "
+                    f"{target} is not a field on cube {cube_name!r}.",
+                    entity=e.name,
+                    field=local,
+                )
+        for ref in e.list_filters:
+            _check_ref(ref, "unknown_entity_list_filter", "list_filter")
+        if e.default_order is not None:
+            _check_ref(
+                e.default_order.split()[0],
+                "unknown_entity_default_order",
+                "default_order",
+            )
+
+        if isinstance(e, MutableEntity):
+            target_cube = by_name.get(e.target_cube)
+            if target_cube is None:
+                emit(
+                    "unknown_entity_cube",
+                    f"MutableEntity {e.name!r}: target_cube={e.target_cube!r} "
+                    f"is not in the catalog.",
+                    entity=e.name,
+                    cube=e.target_cube,
+                )
+            else:
+                writable = _dim_names(target_cube)
+                for field_name in e.mutable_fields:
+                    if field_name not in writable:
+                        emit(
+                            "unknown_mutable_field",
+                            f"MutableEntity {e.name!r}: mutable field "
+                            f"{field_name!r} is not a dimension on target "
+                            f"cube {e.target_cube!r}. Known: {sorted(writable)}.",
+                            entity=e.name,
+                            field=field_name,
+                        )
 
 
 def _emit_unit_diagnostics(cube: Cube, fld: BaseField, registry: Registry, emit: _DiagEmit) -> None:
@@ -487,9 +628,18 @@ class CatalogSpec(BaseModel):
     lookups: tuple[Lookup, ...] = ()
     saved_queries: tuple[SavedQuery, ...] = ()
     glossary: tuple[GlossaryEntry, ...] = ()
+    entities: tuple[Entity, ...] = ()
     relations: str = ""
     compile_hook_names: tuple[str, ...] = ()
     sql_rewrite_hook_names: tuple[str, ...] = ()
+    #: Global hard gate for entity mutations (D6 / §5 gate 1). False by
+    #: default — a catalog never accepts writes unless opted in.
+    allow_mutations: bool = False
+    #: Upper bound the row-mode list compiler caps ``EntityList.limit`` to.
+    max_list_limit: int = 1000
+    #: Refuse a predicate-targeted mutation whose preview affects more than
+    #: this many rows (A.4.5). Enforced at confirm-time by the executor.
+    max_mutation_rows: int = 1000
 
     #: Aggregated construction errors from :meth:`from_iterables`.
     #: ``()`` for a clean build; populated when collect-all surfaces
@@ -514,10 +664,14 @@ class CatalogSpec(BaseModel):
         lookups: Sequence[Lookup] | None = None,
         saved_queries: Sequence[SavedQuery] | None = None,
         glossary: Sequence[GlossaryEntry] | None = None,
+        entities: Sequence[Entity] | None = None,
         relations: str = "",
         scope_fn_names: Sequence[str] | None = None,
         compile_hook_names: Sequence[str] = (),
         sql_rewrite_hook_names: Sequence[str] = (),
+        allow_mutations: bool = False,
+        max_list_limit: int = 1000,
+        max_mutation_rows: int = 1000,
     ) -> tuple[CatalogSpec, list[dict[str, Any]]]:
         """Collect-all constructor for a spec.
 
@@ -580,6 +734,7 @@ class CatalogSpec(BaseModel):
             scope_fn_names=scope_fn_names,
             unit_registry=DEFAULT_REGISTRY,
             emit=_collect,
+            entities=list(entities or []),
         )
         spec = cls(
             cubes=tuple(cube_list),
@@ -587,9 +742,13 @@ class CatalogSpec(BaseModel):
             lookups=tuple(lookups or []),
             saved_queries=tuple(saved_queries or []),
             glossary=tuple(glossary or []),
+            entities=tuple(entities or []),
             relations=relations_str,
             compile_hook_names=tuple(compile_hook_names),
             sql_rewrite_hook_names=tuple(sql_rewrite_hook_names),
+            allow_mutations=allow_mutations,
+            max_list_limit=max_list_limit,
+            max_mutation_rows=max_mutation_rows,
             construction_errors=tuple(errors),
         )
         return spec, errors
@@ -675,6 +834,7 @@ class Catalog:
             lookups=list(spec.lookups),
             saved_queries=list(spec.saved_queries),
             glossary=list(spec.glossary),
+            entities=list(spec.entities),
             relations=spec.relations,
             policy=policy,
             scope_fns=scope_fns,
@@ -682,6 +842,9 @@ class Catalog:
             error_transform=error_transform,
             compile_hooks=compile_hooks,
             sql_rewrite_hooks=sql_rewrite_hooks,
+            allow_mutations=spec.allow_mutations,
+            max_list_limit=spec.max_list_limit,
+            max_mutation_rows=spec.max_mutation_rows,
         )
 
     def __init__(
@@ -700,9 +863,17 @@ class Catalog:
         compile_hooks: list[CompileHook] | None = None,
         sql_rewrite_hooks: list[SqlRewriteHook] | None = None,
         strict_tenancy: bool = False,
+        entities: list[Entity] | None = None,
+        allow_mutations: bool = False,
+        max_list_limit: int = 1000,
+        max_mutation_rows: int = 1000,
     ) -> None:
         self.compile_hooks = compile_hooks or []
         self.sql_rewrite_hooks = sql_rewrite_hooks or []
+        entity_list: list[Entity] = list(entities or [])
+        self.allow_mutations: bool = allow_mutations
+        self.max_list_limit: int = max_list_limit
+        self.max_mutation_rows: int = max_mutation_rows
 
         # META reflection cubes are appended (so reflection always works)
         # and ``extends`` chains flattened *before* validation, so the
@@ -738,6 +909,7 @@ class Catalog:
             scope_fn_names=list(self._scope_fns),
             unit_registry=self.unit_registry,
             emit=_raise,
+            entities=entity_list,
         )
 
         self._cubes: list[Cube] = merged
@@ -767,6 +939,7 @@ class Catalog:
                 )
 
         self.views: dict[str, View] = {v.name: v for v in view_list}
+        self.entities: dict[str, Entity] = {e.name: e for e in entity_list}
         self._policy: PolicyFn | None = policy
         self.lookups: dict[str, Lookup] = {lk.dimension: lk for lk in lookup_list}
         self.saved_queries: dict[str, SavedQuery] = {sq.name: sq for sq in saved_query_list}
@@ -789,6 +962,7 @@ class Catalog:
             lookups=tuple(lookup_list),
             saved_queries=tuple(saved_query_list),
             glossary=tuple(glossary_list),
+            entities=tuple(entity_list),
             relations=self.relations,
         )
         self.runtime = CatalogRuntime(
@@ -992,6 +1166,54 @@ class Catalog:
             next_tool_args={"dimension": exc.dimension, "query": str(cast("object", filter_value))},
             did_you_mean=did_you_mean,
         )
+
+    def fetch(
+        self,
+        spec: EntityFetch,
+        *,
+        context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
+    ) -> CompiledEntityQuery:
+        """Compile a row-mode fetch (one entity row by key).
+
+        Thin wrapper over :func:`semql.rows.compile_fetch`; see that for
+        the lowering model. Imported lazily — ``rows`` depends on
+        ``compile``, which depends on this module."""
+        from semql.rows import compile_fetch
+
+        return compile_fetch(spec, self, context=context, viewer=viewer)
+
+    def list_rows(
+        self,
+        spec: EntityList,
+        *,
+        context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
+    ) -> CompiledEntityQuery:
+        """Compile a row-mode list (allowlisted short list of entity rows).
+
+        Thin wrapper over :func:`semql.rows.compile_list`. Named
+        ``list_rows`` to avoid shadowing the builtin; this is the "list"
+        operation in the entities spec (D5)."""
+        from semql.rows import compile_list
+
+        return compile_list(spec, self, context=context, viewer=viewer)
+
+    def mutate(
+        self,
+        mutation: SemanticMutation,
+        *,
+        context: dict[str, str] | None = None,
+        viewer: AuthContext | None = None,
+    ) -> CompiledMutation:
+        """Compile a :class:`~semql.mutate.SemanticMutation` to DML + preview.
+
+        Thin wrapper over :func:`semql.mutate.compile_mutation`. All four
+        opt-in gates (``allow_mutations``, MutableEntity + operation, role
+        policy, predicate targeting) are enforced there."""
+        from semql.mutate import compile_mutation
+
+        return compile_mutation(mutation, self, context=context, viewer=viewer)
 
     def compile_collect_all(
         self,

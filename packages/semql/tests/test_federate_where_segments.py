@@ -128,9 +128,12 @@ def test_distributive_where_cross_partition_lands_in_merge() -> None:
     # Both fragments carry their local filter.
     frags_concat = "\n".join(f.sql for f in plan.fragments)
     assert "status" in frags_concat or "paid" in frags_concat
-    # Merge SQL: the cross-partition OR is materialised as a
-    # post-join WHERE.
-    assert "tier" in plan.merge.sql or "gold" in plan.merge.sql
+    # The cross-partition OR rides into the spec as a residual clause
+    # (rendered as a post-join WHERE by the engine). Both partitions'
+    # columns appear, resolved to fragment coordinates.
+    (clause,) = plan.merge_spec.cross_partition_clauses
+    cols = {col for _neg, _idx, col, _op, _vals in clause}
+    assert {"status", "tier"} <= cols
 
 
 def test_distributive_where_engine_end_to_end_matches_reference() -> None:

@@ -66,7 +66,9 @@ from semql.compile import CompiledQuery
 from semql.errors import AuthError, SemQLError
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
-from semql.model import AuthContext, Cube, ResolutionContext
+from semql.model import AuthContext, Cube, Entity, MutableEntity, Op, ResolutionContext
+from semql.mutate import SemanticMutation
+from semql.rows import EntityFetch, EntityList
 from semql.safe import is_read_only_statement
 from semql.spec import Filter, SemanticQuery, TimeWindow
 from semql.validate import ValidationError
@@ -125,17 +127,20 @@ class MCPServer:
         require_viewer: bool = True,
         debug: bool = False,
         name: str = "semql",
+        generic_entity_tools: bool = False,
     ) -> None:
         self.catalog = catalog
         self.executor = executor
         self.viewer_provider = viewer_provider
         self.require_viewer = require_viewer
         self.debug = debug
+        self.generic_entity_tools = generic_entity_tools
         self.mcp = FastMCP(name=name)
         self._register_tools()
         self._register_per_cube_tools()
         self._register_lookup_tools()
         self._register_saved_query_tools()
+        self._register_entity_tools()
 
     def _resolve_viewer(
         self,
@@ -420,6 +425,132 @@ class MCPServer:
                 _make_query_cube_tool(cube, catalog, executor, self._resolve_viewer, self.debug)
             )
 
+    def _register_entity_tools(self) -> None:
+        """Register row-mode entity tools (entities spec M5).
+
+        Per-entity by default: ``get_<entity>`` + ``list_<entity>`` for
+        every entity with a key, plus ``mutate_<entity>`` for each
+        :class:`~semql.model.MutableEntity` — the latter only when the
+        catalog opted into ``allow_mutations`` (gate 1). Set
+        ``generic_entity_tools=True`` to collapse to three generic tools
+        for very large catalogs (D6). The per-call role gate (gate 3) is
+        enforced inside the compiler, so a viewer who can't see the cube
+        gets an AuthError payload rather than rows."""
+        catalog = self.catalog
+        if not catalog.entities:
+            return
+        if self.generic_entity_tools:
+            self._register_generic_entity_tools()
+            return
+        for entity in catalog.entities.values():
+            if entity.key is not None:
+                self.mcp.add_tool(
+                    _make_get_entity_tool(
+                        entity, catalog, self.executor, self._resolve_viewer, self.debug
+                    )
+                )
+                self.mcp.add_tool(
+                    _make_list_entity_tool(
+                        entity, catalog, self.executor, self._resolve_viewer, self.debug
+                    )
+                )
+            if isinstance(entity, MutableEntity) and catalog.allow_mutations:
+                self.mcp.add_tool(
+                    _make_mutate_entity_tool(
+                        entity, catalog, self.executor, self._resolve_viewer, self.debug
+                    )
+                )
+
+    def _register_generic_entity_tools(self) -> None:
+        catalog = self.catalog
+        executor = self.executor
+        resolve_viewer = self._resolve_viewer
+        debug = self.debug
+
+        @self.mcp.tool(
+            name="get_entity",
+            description="Fetch one row of an entity by key. Pass the entity name and its key.",
+        )
+        def get_entity(
+            entity: str,
+            key: str | int,
+            fields: list[str] | None = None,
+            context: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            return _run_entity_read(
+                lambda: catalog.fetch(
+                    EntityFetch(entity=entity, key=key, fields=fields),
+                    context=context,
+                    viewer=resolve_viewer(),
+                ),
+                executor,
+                debug,
+            )
+
+        @self.mcp.tool(
+            name="list_entity",
+            description="List rows of an entity through its allowlisted filters.",
+        )
+        def list_entity(
+            entity: str,
+            where: dict[str, Any] | None = None,
+            time_range: tuple[str, str, str] | None = None,
+            order: str | None = None,
+            limit: int = 50,
+            cursor: str | None = None,
+            context: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            return _run_entity_read(
+                lambda: catalog.list_rows(
+                    EntityList(
+                        entity=entity,
+                        where=where or {},
+                        time_range=time_range,
+                        order=order,
+                        limit=limit,
+                        cursor=cursor,
+                    ),
+                    context=context,
+                    viewer=resolve_viewer(),
+                ),
+                executor,
+                debug,
+            )
+
+        if catalog.allow_mutations:
+
+            @self.mcp.tool(
+                name="mutate",
+                description=(
+                    "Mutate an entity. Two-step: confirm=false (default) previews "
+                    "the affected rows; confirm=true executes the DML."
+                ),
+            )
+            def mutate(
+                entity: str,
+                operation: Op,
+                values: dict[str, Any] | None = None,
+                pk: dict[str, Any] | None = None,
+                where: dict[str, Any] | None = None,
+                confirm: bool = False,
+                context: dict[str, str] | None = None,
+            ) -> dict[str, Any]:
+                return _run_entity_mutation(
+                    SemanticMutation(
+                        entity=entity,
+                        operation=operation,
+                        values=values or {},
+                        pk=pk,
+                        where=where,
+                    ),
+                    catalog,
+                    executor,
+                    resolve_viewer(),
+                    context,
+                    confirm,
+                    debug,
+                )
+
     def run(self, transport: Transport = "stdio", **kwargs: Any) -> None:  # noqa: ANN401
         """Launch the server on ``transport``.
 
@@ -624,6 +755,279 @@ def _make_query_cube_tool(
         "return": dict[str, Any],
     }
     return query_cube_fn
+
+
+def _py_type_for(dim_type: str) -> type:
+    """Map a SemQL dimension type to the Python type a tool param uses."""
+    if dim_type == "number":
+        return float
+    if dim_type == "bool":
+        return bool
+    return str
+
+
+def _entity_output_fields(entity: Entity, catalog: Catalog) -> list[str]:
+    if entity.fields:
+        return list(entity.fields)
+    primary = catalog.as_dict()[entity.cubes[0]]
+    return [d.name for d in primary.dimensions]
+
+
+def _run_entity_read(
+    compile_fn: Callable[[], Any],
+    executor: Executor | None,
+    debug: bool,
+) -> dict[str, Any]:
+    """Compile (and optionally execute) a row-mode read, returning the
+    envelope. Row execution is guarded read-only — entity reads are
+    SELECTs by construction, but the guard is defence-in-depth."""
+    try:
+        compiled = compile_fn()
+    except Exception as exc:
+        return _error_payload(exc, debug=debug)
+    envelope: dict[str, Any] = {
+        "sql": compiled.sql,
+        "params": compiled.params,
+        "columns": compiled.columns,
+        "plan": compiled.plan.model_dump(),
+    }
+    if executor is None or compiled.sql is None:
+        return envelope
+    try:
+        if not is_read_only_statement(compiled.sql, dialect=compiled.plan.source.backend):
+            raise ReadOnlyError("Compiled entity SQL is not a read-only SELECT; refusing.")
+        envelope["rows"] = executor(compiled.sql, compiled.params)
+    except Exception as exc:
+        return _error_payload(exc, debug=debug) | envelope
+    return envelope
+
+
+def _run_entity_mutation(
+    mutation: SemanticMutation,
+    catalog: Catalog,
+    executor: Executor | None,
+    viewer: AuthContext | None,
+    context: dict[str, str] | None,
+    confirm: bool,
+    debug: bool,
+) -> dict[str, Any]:
+    """Two-step mutation (§5 confirm loop). ``confirm=False`` (default)
+    runs only the preview SELECT and reports the affected count; it never
+    touches the DML. ``confirm=True`` re-checks the count against the cap
+    (closing the TOCTOU window, A.4.4) and then executes the DML."""
+    try:
+        compiled = catalog.mutate(mutation, context=context, viewer=viewer)
+    except Exception as exc:
+        return _error_payload(exc, debug=debug)
+    envelope: dict[str, Any] = {
+        "operation": compiled.operation.value,
+        "sql": compiled.sql,
+        "preview_sql": compiled.preview_sql,
+        "affects": compiled.affects,
+    }
+    if executor is None:
+        # Compile-only mode: hand back the DML + preview for the caller to run.
+        return envelope | {"confirmed": False, "executed": False}
+    try:
+        preview_rows = executor(compiled.preview_sql, compiled.preview_params)
+    except Exception as exc:
+        return _error_payload(exc, debug=debug) | envelope
+    affected = len(preview_rows)
+    cap = compiled.max_affected_rows
+    if cap is not None and affected > cap:
+        return envelope | {
+            "error": {
+                "code": "MutationCapExceeded",
+                "message": (
+                    f"Mutation would affect {affected} rows, exceeding the cap of "
+                    f"{cap}. Narrow the target or raise max_mutation_rows."
+                ),
+            },
+            "affected_rows": affected,
+            "executed": False,
+        }
+    if not confirm:
+        return envelope | {
+            "confirmed": False,
+            "executed": False,
+            "affected_rows": affected,
+            "preview_rows": preview_rows,
+        }
+    try:
+        executor(compiled.sql, compiled.params)
+    except Exception as exc:
+        return _error_payload(exc, debug=debug) | envelope
+    return envelope | {"confirmed": True, "executed": True, "affected_rows": affected}
+
+
+def _make_get_entity_tool(
+    entity: Entity,
+    catalog: Catalog,
+    executor: Executor | None,
+    resolve_viewer: ViewerProvider,
+    debug: bool = False,
+) -> Callable[..., dict[str, Any]]:
+    """Build a ``get_<entity>`` point-lookup tool. ``fields`` is a
+    ``Literal`` enum of the entity's output columns."""
+    name = entity.name
+    field_names = tuple(_entity_output_fields(entity, catalog))
+    fields_t = list[Literal[field_names]] if field_names else list[str]  # type: ignore[valid-type]
+
+    def get_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202
+        key,  # noqa: ANN001
+        fields=None,  # noqa: ANN001
+        context=None,  # noqa: ANN001
+    ):
+        return _run_entity_read(
+            lambda: catalog.fetch(
+                EntityFetch(entity=name, key=key, fields=fields),
+                context=context,
+                viewer=resolve_viewer(),
+            ),
+            executor,
+            debug,
+        )
+
+    get_fn.__name__ = f"get_{name}"
+    get_fn.__doc__ = entity.description or f"Fetch one {name} by its key."
+    get_fn.__annotations__ = {
+        "key": str | int,
+        "fields": fields_t | None,
+        "context": dict[str, str] | None,
+        "return": dict[str, Any],
+    }
+    return get_fn
+
+
+def _make_list_entity_tool(
+    entity: Entity,
+    catalog: Catalog,
+    executor: Executor | None,
+    resolve_viewer: ViewerProvider,
+    debug: bool = False,
+) -> Callable[..., dict[str, Any]]:
+    """Build a ``list_<entity>`` tool with one typed parameter per
+    allowlisted ``list_filter`` (so the JSON Schema reflects each filter's
+    field type), plus limit / cursor / time_range / order."""
+    import inspect
+
+    name = entity.name
+    by_name = catalog.as_dict()
+    # local param name -> (qualified ref, python type)
+    filter_map: dict[str, tuple[str, type]] = {}
+    for ref in entity.list_filters:
+        cube_name, _, dim_name = ref.partition(".")
+        cube = by_name.get(cube_name)
+        dim = next((d for d in cube.dimensions if d.name == dim_name), None) if cube else None
+        py = _py_type_for(dim.type) if dim is not None else str
+        filter_map[dim_name] = (ref, py)
+
+    def list_fn(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 — dynamic per-filter params via __signature__
+        where: dict[str, Any] = {
+            ref: kwargs[local]
+            for local, (ref, _) in filter_map.items()
+            if kwargs.get(local) is not None
+        }
+        return _run_entity_read(
+            lambda: catalog.list_rows(
+                EntityList(
+                    entity=name,
+                    where=where,
+                    time_range=kwargs.get("time_range"),
+                    order=kwargs.get("order"),
+                    limit=kwargs.get("limit", 50),
+                    cursor=kwargs.get("cursor"),
+                ),
+                context=kwargs.get("context"),
+                viewer=resolve_viewer(),
+            ),
+            executor,
+            debug,
+        )
+
+    # Annotations must agree with the synthesized signature: pydantic
+    # (via FastMCP) reads parameter types out of ``__annotations__`` while
+    # iterating ``inspect.signature``, so every signature param needs a
+    # matching annotation entry or schema generation raises KeyError.
+    annotations: dict[str, Any] = {local: py | None for local, (_, py) in filter_map.items()}
+    annotations |= {
+        "time_range": tuple[str, str, str] | None,
+        "order": str | None,
+        "limit": int,
+        "cursor": str | None,
+        "context": dict[str, str] | None,
+        "return": dict[str, Any],
+    }
+    defaults: dict[str, Any] = {"limit": 50}
+    params = [
+        inspect.Parameter(
+            pname,
+            inspect.Parameter.KEYWORD_ONLY,
+            default=defaults.get(pname),
+            annotation=annotations[pname],
+        )
+        for pname in annotations
+        if pname != "return"
+    ]
+    list_fn.__signature__ = inspect.Signature(params, return_annotation=dict[str, Any])  # type: ignore[attr-defined]
+    list_fn.__annotations__ = annotations
+    list_fn.__name__ = f"list_{name}"
+    list_fn.__doc__ = entity.description or f"List {name} rows through allowlisted filters."
+    return list_fn
+
+
+def _make_mutate_entity_tool(
+    entity: MutableEntity,
+    catalog: Catalog,
+    executor: Executor | None,
+    resolve_viewer: ViewerProvider,
+    debug: bool = False,
+) -> Callable[..., dict[str, Any]]:
+    """Build a ``mutate_<entity>`` two-step tool. ``operation`` is a
+    ``Literal`` enum of the entity's permitted operations; the docstring
+    lists the mutable fields and their types."""
+    name = entity.name
+    ops = tuple(sorted(o.value for o in entity.operations))
+    op_t = Literal[ops]  # type: ignore[valid-type]
+    field_doc = ", ".join(f"{n}: {f.type}" for n, f in entity.mutable_fields.items())
+
+    def mutate_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202
+        operation,  # noqa: ANN001
+        values=None,  # noqa: ANN001
+        pk=None,  # noqa: ANN001
+        where=None,  # noqa: ANN001
+        confirm=False,  # noqa: ANN001
+        context=None,  # noqa: ANN001
+    ):
+        try:
+            mutation = SemanticMutation(
+                entity=name,
+                operation=Op(operation),
+                values=values or {},
+                pk=pk,
+                where=where,
+            )
+        except Exception as exc:
+            return _error_payload(exc, debug=debug)
+        return _run_entity_mutation(
+            mutation, catalog, executor, resolve_viewer(), context, confirm, debug
+        )
+
+    mutate_fn.__name__ = f"mutate_{name}"
+    mutate_fn.__doc__ = (
+        f"Mutate a {name}. Mutable fields — {field_doc}. Two-step: confirm=false "
+        "(default) previews the affected rows; confirm=true executes the DML."
+    )
+    mutate_fn.__annotations__ = {
+        "operation": op_t,
+        "values": dict[str, Any] | None,
+        "pk": dict[str, Any] | None,
+        "where": dict[str, Any] | None,
+        "confirm": bool,
+        "context": dict[str, str] | None,
+        "return": dict[str, Any],
+    }
+    return mutate_fn
 
 
 def _make_saved_query_tool(

@@ -13,7 +13,7 @@ from semql.compile import compile_query
 from semql.errors import FederationError
 from semql.federate import (
     FederatedPlan,
-    MergePlan,
+    MergeSpec,
     compile_federated_query,
 )
 from semql.model import (
@@ -100,7 +100,10 @@ def test_single_backend_query_returns_one_fragment_plan() -> None:
     )
     assert len(plan.fragments) == 1
     assert plan.fragments[0].dialect is Dialect.POSTGRES
-    assert plan.merge.sql == "SELECT * FROM frag_0"
+    # Degenerate single-backend merge: every measure passes through, no
+    # re-aggregation (the engine renders this as a plain projection).
+    assert all(m.merge_agg == "passthrough" for m in plan.merge_spec.measures)
+    assert plan.merge_spec.cross_partition_clauses == ()
     # Columns + meta match the underlying CompiledQuery.
     assert plan.columns == plan.fragments[0].columns
     assert [m.name for m in plan.column_meta] == plan.columns
@@ -138,7 +141,7 @@ def test_cross_backend_enrichment_emits_two_fragments() -> None:
     assert "region" in plan.fragments[1].columns
 
 
-def test_merge_sql_joins_fragments_on_bridge_keys() -> None:
+def test_merge_spec_joins_fragments_on_bridge_keys() -> None:
     catalog = _federated_catalog()
     plan = compile_federated_query(
         SemanticQuery(
@@ -147,16 +150,18 @@ def test_merge_sql_joins_fragments_on_bridge_keys() -> None:
         ),
         catalog,
     )
-    merge_sql = plan.merge.sql
-    assert "FROM frag_0" in merge_sql
-    assert "LEFT JOIN frag_1" in merge_sql
-    # Bridge key equality is in the merge.
-    assert '"customer_id"' in merge_sql
-    assert '"id"' in merge_sql
-    # Sum re-aggregation at merge (the AST emitter quotes the frag alias).
-    assert 'SUM("f0"."revenue")' in merge_sql
-    # Group by the dim column.
-    assert "GROUP BY 1" in merge_sql
+    spec = plan.merge_spec
+    assert spec.primary_index == 0
+    # One bridge join, primary (frag 0) customer_id == satellite (frag 1) id.
+    (bridge,) = spec.bridges
+    assert (bridge.left.fragment_index, bridge.left.column_name) == (0, "customer_id")
+    assert (bridge.right.fragment_index, bridge.right.column_name) == (1, "id")
+    # Revenue re-aggregates with SUM, sourced from the primary fragment.
+    (measure,) = spec.measures
+    assert measure.output_name == "revenue"
+    assert measure.merge_agg == "sum"
+    assert measure.source is not None
+    assert (measure.source.fragment_index, measure.source.column_name) == (0, "revenue")
 
 
 def test_final_columns_match_user_query_shape() -> None:
@@ -192,10 +197,11 @@ def test_avg_measure_decomposed_in_primary_fragment() -> None:
     primary_cols = plan.fragments[0].columns
     assert any(c.endswith("__avg_sum") for c in primary_cols)
     assert any(c.endswith("__avg_count") for c in primary_cols)
-    # Merge recomposes avg as SUM(sum) / NULLIF(SUM(count), 0).
-    merge_sql = plan.merge.sql
-    assert 'SUM("f0' in merge_sql
-    assert "NULLIF" in merge_sql
+    # Spec recomposes avg from the decomposed sum/count sources (the
+    # engine renders SUM(sum) / NULLIF(SUM(count), 0)).
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "avg_recomposed"
+    assert measure.sum_source is not None and measure.count_source is not None
     # Final output column is the original measure name.
     assert "avg_amount" in plan.columns
 
@@ -393,15 +399,15 @@ def test_single_backend_path_matches_compile_query_output() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_merge_plan_is_a_dataclass_with_sql_and_params() -> None:
+def test_plan_carries_structured_merge_spec() -> None:
     catalog = _federated_catalog()
     plan = compile_federated_query(
         SemanticQuery(measures=["orders.revenue"], dimensions=["customers.region"]),
         catalog,
     )
-    assert isinstance(plan.merge, MergePlan)
-    assert isinstance(plan.merge.sql, str)
-    assert isinstance(plan.merge.params, dict)
+    assert isinstance(plan.merge_spec, MergeSpec)
+    assert plan.merge_spec.measures  # at least the revenue measure
+    assert not hasattr(plan, "merge")  # no rendered merge SQL on the plan
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +430,8 @@ def test_raw_rows_lifts_count_distinct_refusal() -> None:
     primary = plan.fragments[0]
     assert "customer_id" in primary.sql.lower()
     # Merge re-aggregates with COUNT(DISTINCT ...).
-    assert "COUNT(DISTINCT" in plan.merge.sql.upper()
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "count_distinct"
     assert plan.columns == ["region", "distinct_customers"]
 
 
@@ -443,8 +450,8 @@ def test_raw_rows_supports_min_and_max() -> None:
         dimensions=["customers.region"],
     )
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    assert "MIN(" in plan.merge.sql.upper()
-    assert "MAX(" in plan.merge.sql.upper()
+    aggs = {m.output_name: m.merge_agg for m in plan.merge_spec.measures}
+    assert aggs == {"min_amount": "min", "max_amount": "max"}
 
 
 def test_raw_rows_handles_count_star() -> None:
@@ -456,7 +463,10 @@ def test_raw_rows_handles_count_star() -> None:
         dimensions=["customers.region"],
     )
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    assert "COUNT(*)" in plan.merge.sql.upper()
+    # COUNT(*) has no raw source column — the merge emits COUNT(*).
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "count"
+    assert measure.source is not None and measure.source.column_name == ""
 
 
 def test_raw_rows_lifts_having_refusal() -> None:
@@ -471,8 +481,8 @@ def test_raw_rows_lifts_having_refusal() -> None:
         ],
     )
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    assert "HAVING" in plan.merge.sql.upper()
-    assert "distinct_customers" in plan.merge.sql
+    (having,) = plan.merge_spec.having
+    assert having.dimension == "orders.distinct_customers"
 
 
 def test_raw_rows_having_rejects_unknown_measure() -> None:
@@ -521,9 +531,12 @@ def test_raw_rows_supports_ratio_measure() -> None:
     catalog = _catalog(orders, _customers())
     q = SemanticQuery(measures=["orders.aov"], dimensions=["customers.region"])
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    # Merge SQL recomposes the ratio: SUM(revenue_raw) / NULLIF(COUNT(*), 0).
-    assert "SUM(" in plan.merge.sql.upper()
-    assert "NULLIF" in plan.merge.sql.upper()
+    # The spec recomposes the ratio from its per-side aggregates (the
+    # engine renders SUM(revenue_raw) / NULLIF(COUNT(*), 0)).
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "ratio"
+    assert measure.numerator_agg == "sum"
+    assert measure.denominator_agg == "count"
     assert "aov" in plan.columns
 
 
@@ -583,7 +596,8 @@ def test_raw_rows_supports_filtered_measure() -> None:
     primary = plan.fragments[0]
     assert "CASE WHEN" in primary.sql.upper()
     # Merge SUMs the projected (filtered-by-NULL) raw col.
-    assert "SUM(" in plan.merge.sql.upper()
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "sum"
 
 
 def test_raw_rows_supports_filtered_count_star() -> None:
@@ -607,8 +621,11 @@ def test_raw_rows_supports_filtered_count_star() -> None:
     plan = compile_federated_query(q, catalog, mode="raw_rows")
     primary = plan.fragments[0]
     assert "CASE WHEN" in primary.sql.upper()
-    # Filtered COUNT(*) → COUNT(col) at merge (not COUNT(*)).
-    assert "COUNT(F0" in plan.merge.sql.upper().replace('"', "") or "COUNT(f0" in plan.merge.sql
+    # Filtered COUNT(*) → COUNT(col) at merge (not COUNT(*)): the measure
+    # carries a real raw source column, so it's not the count-star sentinel.
+    (measure,) = plan.merge_spec.measures
+    assert measure.merge_agg == "count"
+    assert measure.source is not None and measure.source.column_name != ""
 
 
 def test_raw_rows_supports_time_dimension() -> None:
@@ -625,10 +642,10 @@ def test_raw_rows_supports_time_dimension() -> None:
         ),
     )
     plan = compile_federated_query(q, catalog, mode="raw_rows")
-    # Time bucket lives in the merge SQL as date_trunc (the AST emitter
-    # renders the function + unit in DuckDB's canonical upper case).
-    merge_lower = plan.merge.sql.lower()
-    assert "date_trunc('day'" in merge_lower
+    # The merge buckets the raw timestamp — the spec carries the grain on
+    # the time dimension output (the engine renders date_trunc('day', ...)).
+    time_out = next(d for d in plan.merge_spec.dimensions if d.output_name == "created_at_day")
+    assert time_out.time_grain == "day"
     # Output column name reflects the bucketed grain.
     assert "created_at_day" in plan.columns
     # Fragment received the range as fragment-side filters on the raw
@@ -660,8 +677,8 @@ def test_raw_rows_single_partition_where_routes_to_fragment() -> None:
     # Both branch values made it into the orders fragment.
     assert "paid" in str(primary.params.values())
     assert "pending" in str(primary.params.values())
-    # Merge has no WHERE — the clause stayed inside the fragment.
-    assert " WHERE " not in plan.merge.sql.upper()
+    # No cross-partition residual — the clause stayed inside the fragment.
+    assert plan.merge_spec.cross_partition_clauses == ()
 
 
 def test_raw_rows_cross_partition_or_lifted_to_merge() -> None:
@@ -688,10 +705,12 @@ def test_raw_rows_cross_partition_or_lifted_to_merge() -> None:
     satellite = plan.fragments[1]
     assert "status" in primary.columns
     assert "tier" in satellite.columns
-    # Merge emits the OR predicate over the joined frames.
-    upper = plan.merge.sql.upper()
-    assert " WHERE " in upper
-    assert " OR " in upper
+    # The OR rides into the spec as one cross-partition clause with two
+    # literals (the engine renders it as a post-join WHERE ... OR ...).
+    (clause,) = plan.merge_spec.cross_partition_clauses
+    assert len(clause) == 2
+    cols = {col for _neg, _idx, col, _op, _vals in clause}
+    assert cols == {"status", "tier"}
 
 
 def test_raw_rows_cross_partition_and_splits_by_cnf() -> None:
@@ -719,7 +738,7 @@ def test_raw_rows_cross_partition_and_splits_by_cnf() -> None:
     assert "paid" in str(primary.params.values())
     assert "gold" in str(satellite.params.values())
     # Merge stays free of cross-partition predicates.
-    assert " WHERE " not in plan.merge.sql.upper()
+    assert plan.merge_spec.cross_partition_clauses == ()
 
 
 def test_raw_rows_where_tree_with_not_routes_correctly() -> None:
