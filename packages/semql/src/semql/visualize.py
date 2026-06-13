@@ -26,6 +26,13 @@ from semql.spec import SemanticQuery
 
 PIE_MAX_SLICES = 10
 BAR_MAX_BARS = 30
+# Two categorical dims + one measure: a small grid stacks cleanly as bars;
+# a larger one reads better as an xy heatmap; past the cell cap it's a table.
+STACKED_BAR_MAX_CELLS = 12
+HEATMAP_MAX_CELLS = 400
+# A per-day time series longer than this many points is the GitHub-style
+# calendar-heatmap case; shorter daily series stay a line.
+CALENDAR_MIN_DAYS = 60
 
 # Chart types the picker can emit, plus the ``text_only`` viz-only fallback.
 VizChartType = ChartTypeLiteral | Literal["text_only"]
@@ -156,9 +163,13 @@ def _pick_chart_type(
     if n_measures >= 1 and n_dims == 0:
         return "text_only", "single-value answer"
 
-    # Time series. Several measures composing over time → stacked area; a
-    # single series → line.
+    # Time series. A long *daily* single-measure series is the GitHub-style
+    # calendar heatmap; several measures compose as a stacked area; anything
+    # else is a line.
     if has_time_breakdown:
+        granularity = query.time_dimension.granularity if query.time_dimension else None
+        if n_measures == 1 and granularity == "day" and n_rows > CALENDAR_MIN_DAYS:
+            return "calendar_heatmap", f"daily series, n_rows={n_rows} > {CALENDAR_MIN_DAYS}"
         if n_measures >= 2:
             return "area_chart", f"time series, {n_measures} measures (stacked composition)"
         return "line_chart", "time series with granularity"
@@ -183,10 +194,14 @@ def _pick_chart_type(
     if n_dims == 1 and n_rows <= BAR_MAX_BARS:
         return "bar_chart", f"1 dim, n_rows={n_rows} <= {BAR_MAX_BARS}"
 
-    # Two categorical dimensions + one measure → a primary axis broken down
-    # by the second dimension (stacked bars).
-    if n_dims == 2 and n_measures == 1 and len(cat_dims) == 2 and n_rows <= BAR_MAX_BARS:
-        return "stacked_bar_chart", f"2 dims, 1 measure, n_rows={n_rows} (primary axis + breakdown)"
+    # Two categorical dimensions + one measure. A small grid stacks cleanly
+    # (primary axis + breakdown); a larger one is an xy heatmap (the measure
+    # is the cell colour); past the cell cap it's a table.
+    if n_dims == 2 and n_measures == 1 and len(cat_dims) == 2:
+        if n_rows <= STACKED_BAR_MAX_CELLS:
+            return "stacked_bar_chart", f"2 dims, 1 measure, n_rows={n_rows} (axis + breakdown)"
+        if n_rows <= HEATMAP_MAX_CELLS:
+            return "xy_heatmap", f"2 dims, 1 measure, n_rows={n_rows} (matrix, measure=colour)"
 
     return "data_table", f"multi-dim or n_rows={n_rows} too large for a chart"
 
@@ -265,12 +280,16 @@ def decide_visualization(
     series: str | None = None
     non_measures = [c for c in ordered if not c.is_measure]
     measures_out = [c for c in ordered if c.is_measure]
-    if chart_type in ("bar_chart", "line_chart", "area_chart", "histogram"):
+    if chart_type in ("bar_chart", "line_chart", "area_chart", "histogram", "calendar_heatmap"):
+        # calendar_heatmap is a time series too: x = the time/day column,
+        # y = the measure that colours each day cell.
         if non_measures:
             x_axis = non_measures[0].display_name
         y_axes = [c.display_name for c in measures_out]
-    elif chart_type == "stacked_bar_chart":
-        # First dimension is the primary axis; the second becomes the stack.
+    elif chart_type in ("stacked_bar_chart", "xy_heatmap"):
+        # First dimension is the primary (x) axis; the second is the stack
+        # series (stacked_bar) or the row axis (xy_heatmap). The measure is
+        # the stacked/coloured value.
         if non_measures:
             x_axis = non_measures[0].display_name
         if len(non_measures) >= 2:
@@ -310,7 +329,11 @@ def decide_visualization(
 
 __all__ = [
     "BAR_MAX_BARS",
+    "CALENDAR_MIN_DAYS",
+    "HEATMAP_MAX_CELLS",
     "PIE_MAX_SLICES",
+    "STACKED_BAR_MAX_CELLS",
+    "VizChartType",
     "VizColumn",
     "VizDecision",
     "decide_visualization",

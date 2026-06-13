@@ -165,6 +165,12 @@ ChartTypeLiteral = Literal[
     "area_chart",
     "stacked_bar_chart",
     "histogram",
+    # Heatmaps. ``calendar_heatmap`` is the GitHub-style per-day activity
+    # grid (a long daily time series coloured by a measure);
+    # ``xy_heatmap`` is the two-categorical-dimensions matrix coloured by a
+    # measure (the correlation/cross-tab view).
+    "calendar_heatmap",
+    "xy_heatmap",
 ]
 
 # Per-cube tenant isolation strategy:

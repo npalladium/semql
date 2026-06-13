@@ -335,13 +335,15 @@ def test_two_dims_one_measure_is_stacked_bar() -> None:
 
 
 def test_large_multi_dim_returns_data_table() -> None:
-    """Two dims past BAR_MAX_BARS rows is too dense to stack → data_table."""
+    """Two dims past the heatmap cell cap is too dense to chart → data_table."""
+    from semql.visualize import HEATMAP_MAX_CELLS
+
     decision = _decide(
         SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["orders.region", "orders.status"],
         ),
-        n_rows=BAR_MAX_BARS + 1,
+        n_rows=HEATMAP_MAX_CELLS + 1,
         catalog=_catalog(_orders()),
     )
     assert decision.chart_type == "data_table"
@@ -474,12 +476,14 @@ def test_pie_chart_axes_labels_single_value() -> None:
 
 
 def test_data_table_has_no_axes() -> None:
+    from semql.visualize import HEATMAP_MAX_CELLS
+
     decision = _decide(
         SemanticQuery(
             measures=["orders.revenue"],
             dimensions=["orders.region", "orders.status"],
         ),
-        n_rows=BAR_MAX_BARS + 1,
+        n_rows=HEATMAP_MAX_CELLS + 1,
         catalog=_catalog(_orders()),
     )
     assert decision.chart_type == "data_table"
@@ -703,3 +707,67 @@ def test_supported_charts_none_imposes_no_constraint() -> None:
         supported_charts=None,
     )
     assert decision.chart_type == "pie_chart"
+
+
+# ---------------------------------------------------------------------------
+# Heatmaps: calendar (timeline) + xy (correlation matrix)
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_heatmap_for_long_daily_series() -> None:
+    """A long per-day single-measure series → GitHub-style calendar heatmap;
+    the time column is the x axis and the measure colours the day cells."""
+    from semql.visualize import CALENDAR_MIN_DAYS
+
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            time_dimension=TimeWindow(
+                dimension="orders.created_at",
+                granularity="day",
+                range=("2026-01-01", "2026-12-31"),
+            ),
+        ),
+        n_rows=CALENDAR_MIN_DAYS + 1,
+        catalog=_catalog(_orders()),
+    )
+    assert decision.chart_type == "calendar_heatmap"
+    assert decision.y_axes == ["Revenue"]
+
+
+def test_short_daily_series_stays_line() -> None:
+    """A short daily series is a line, not a calendar heatmap."""
+    from semql.visualize import CALENDAR_MIN_DAYS
+
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            time_dimension=TimeWindow(
+                dimension="orders.created_at",
+                granularity="day",
+                range=("2026-01-01", "2026-02-01"),
+            ),
+        ),
+        n_rows=CALENDAR_MIN_DAYS,  # not strictly greater → line
+        catalog=_catalog(_orders()),
+    )
+    assert decision.chart_type == "line_chart"
+
+
+def test_xy_heatmap_for_two_dim_grid() -> None:
+    """Two categorical dims + one measure over a grid too large to stack →
+    xy heatmap: dim1 is the x axis, dim2 the row series, measure the colour."""
+    from semql.visualize import STACKED_BAR_MAX_CELLS
+
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            dimensions=["orders.region", "orders.status"],
+        ),
+        n_rows=STACKED_BAR_MAX_CELLS + 1,
+        catalog=_catalog(_orders()),
+    )
+    assert decision.chart_type == "xy_heatmap"
+    assert decision.x_axis == "Region"
+    assert decision.series == "Status"
+    assert decision.y_axes == ["Revenue"]
