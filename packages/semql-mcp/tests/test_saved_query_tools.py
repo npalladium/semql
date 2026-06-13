@@ -60,8 +60,8 @@ def _catalog_with_saved() -> Catalog:
     return Catalog([_orders_cube()], saved_queries=[_paid_revenue_query()])
 
 
-def _server(cat: Catalog, *, executor: Any = None) -> MCPServer:  # noqa: ANN401
-    return MCPServer(cat, executor=executor)
+def _server(cat: Catalog, *, executor: Any = None, debug: bool = False) -> MCPServer:  # noqa: ANN401
+    return MCPServer(cat, executor=executor, debug=debug)
 
 
 def _client(server: MCPServer) -> Client[Any]:
@@ -222,20 +222,24 @@ def test_saved_query_tool_executes_when_executor_set() -> None:
 
 def test_saved_query_tool_execute_failure_carries_sql() -> None:
     """If the executor raises, the tool returns a structured error
-    payload alongside the SQL — same shape as ``query_execute``."""
+    payload alongside the SQL — same shape as ``query_execute``. The
+    raw driver text is redacted by default; debug mode surfaces it."""
 
     def boom(sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         raise RuntimeError("connection refused")
 
-    s = _server(_catalog_with_saved(), executor=boom)
-
-    async def call() -> dict[str, Any]:
+    async def call(s: MCPServer) -> dict[str, Any]:
         async with _client(s) as c:
             result = await c.call_tool("saved_paid_revenue_by_region", {})
             return result.data  # type: ignore[no-any-return]
 
-    out = _run(call())
+    out = _run(call(_server(_catalog_with_saved(), executor=boom)))
     assert "error" in out
-    assert out["error"]["code"] == "RuntimeError"
+    assert out["error"]["code"] == "ExecutionError"
+    assert "connection refused" not in out["error"]["message"]
     # SQL still in the envelope so the caller can debug.
     assert "sql" in out
+
+    dbg = _run(call(_server(_catalog_with_saved(), executor=boom, debug=True)))
+    assert dbg["error"]["code"] == "RuntimeError"
+    assert "connection refused" in dbg["error"]["message"]

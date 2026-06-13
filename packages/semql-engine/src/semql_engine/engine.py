@@ -28,7 +28,7 @@ import contextlib
 import re
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -36,6 +36,7 @@ import duckdb
 from semql.compile import ColumnMeta
 from semql.federate import FederatedPlan
 from semql.model import Dialect
+from semql.safe import is_read_only_statement
 
 from semql_engine.adapter import Adapter, AdapterResult, AsyncAdapter
 
@@ -47,6 +48,35 @@ class EngineError(RuntimeError):
     surfaces runtime issues such as a missing adapter for a backend the
     plan references, or an adapter returning rows whose columns don't
     match the fragment's declared output."""
+
+
+def _assert_fragments_read_only(plan: FederatedPlan) -> None:
+    """Defense-in-depth: refuse to execute any fragment that isn't a
+    read-only SELECT.
+
+    The compiler emits SELECT by construction, but RawSQL escape hatches
+    (``DerivedTable.sql``, ``with_ctes``, ``security_sql``,
+    ``ScopePredicate.sql``) splice author-controlled strings into the
+    emitted fragments. Checked at the execution choke point — before any
+    fragment SQL (or its ``derived_sources``) reaches a driver — per
+    PHILOSOPHY, "the defensive guarantee is implemented in the recipe."
+    """
+    for i, frag in enumerate(plan.fragments):
+        for sql in (frag.sql, *frag.derived_sources):
+            if not is_read_only_statement(sql, dialect=frag.dialect.value):
+                raise EngineError(
+                    f"Fragment {i} (backend {frag.dialect.value!r}) is not a "
+                    f"read-only SELECT; refusing to execute."
+                )
+
+
+def _assert_merge_read_only(merge_sql: str) -> None:
+    """Refuse to run merge SQL that isn't a read-only SELECT. Checked
+    immediately before the DuckDB merge executes — paths that never run
+    the merge SQL (the single-fragment fast path, a custom merge engine)
+    skip this by construction."""
+    if not is_read_only_statement(merge_sql, dialect="duckdb"):
+        raise EngineError("Merge SQL is not a read-only SELECT; refusing to execute.")
 
 
 OnExecuteHook = Callable[..., Any]
@@ -317,6 +347,7 @@ class Engine:
             self._on_execute(plan, elapsed_ms, cache_hit=cache_hit)
 
     def _execute_uncached(self, plan: FederatedPlan) -> ExecutionResult:
+        _assert_fragments_read_only(plan)
         fragment_results: list[AdapterResult] = []
         for i, fragment in enumerate(plan.fragments):
             adapter = self._adapters.get(fragment.dialect)
@@ -355,6 +386,7 @@ class Engine:
             materialised: list[tuple[Any, ...]] = [tuple(r) for r in result.rows]
             self._load_fragment(i, result.columns, materialised)
 
+        _assert_merge_read_only(plan.merge.sql)
         merge_cursor = self._con.execute(plan.merge.sql, dict(plan.merge.params))
         rows = merge_cursor.fetchall()
         return ExecutionResult(
@@ -377,12 +409,9 @@ class Engine:
 
     def _reset_frag_tables(self, n: int) -> None:
         """Drop any frag_* tables left over from a previous run so we
-        don't accidentally join against stale data. n is conservatively
-        larger than needed in case a previous plan had more fragments."""
-        # We drop generously to also clean up old runs with more frags.
-        # A failed query won't recurse into Python-level state.
-        for i in range(max(n, 32)):
-            self._con.execute(f"DROP TABLE IF EXISTS frag_{i}")
+        don't accidentally join against stale data. The sync engine
+        runs calls sequentially on one connection, so reuse is safe."""
+        _reset_frag_tables_on(self._con, n)
 
     def _load_fragment(
         self,
@@ -390,25 +419,9 @@ class Engine:
         columns: list[str],
         rows: list[tuple[Any, ...]],
     ) -> None:
-        """Materialise a fragment's rows into ``frag_<index>``.
-
-        Strategy: infer a DuckDB type per column from the first non-NULL
-        value in each column, CREATE TABLE with those types, then
-        ``executemany`` the rows. Adapters that return empty result
-        sets get a VARCHAR-typed table (we have no per-column type
-        info in the adapter contract) — that's fine for merge joins
-        that produce an empty result themselves."""
-        col_idents = ", ".join(_quote(c) for c in columns)
-        types = _infer_column_types(columns, rows)
-        type_decls = ", ".join(f"{_quote(c)} {t}" for c, t in zip(columns, types, strict=True))
-        self._con.execute(f"CREATE TABLE frag_{index} ({type_decls})")
-        if not rows:
-            return
-        placeholders = ", ".join("?" for _ in columns)
-        self._con.executemany(
-            f"INSERT INTO frag_{index} ({col_idents}) VALUES ({placeholders})",
-            rows,
-        )
+        """Materialise a fragment's rows into ``frag_<index>`` on the
+        engine's connection."""
+        _load_fragment_into(self._con, index, columns, rows)
 
 
 def _infer_column_types(columns: list[str], rows: list[tuple[Any, ...]]) -> list[str]:
@@ -461,6 +474,38 @@ def _quote(name: str) -> str:
     return f'"{name}"'
 
 
+def _reset_frag_tables_on(con: Any, n: int) -> None:  # noqa: ANN401 — duckdb conn
+    """Drop any ``frag_*`` tables on ``con`` so a merge can't join stale
+    data. ``n`` is over-dropped (max(n, 32)) to clean up larger prior
+    plans on a reused connection."""
+    for i in range(max(n, 32)):
+        con.execute(f"DROP TABLE IF EXISTS frag_{i}")
+
+
+def _load_fragment_into(
+    con: Any,  # noqa: ANN401 — duckdb conn
+    index: int,
+    columns: list[str],
+    rows: list[tuple[Any, ...]],
+) -> None:
+    """Materialise a fragment's rows into ``frag_<index>`` on ``con``.
+
+    Infers a DuckDB type per column from the first non-NULL value, then
+    ``executemany``s the rows. Empty result sets get a VARCHAR-typed
+    table (no per-column type info in the adapter contract)."""
+    col_idents = ", ".join(_quote(c) for c in columns)
+    types = _infer_column_types(columns, rows)
+    type_decls = ", ".join(f"{_quote(c)} {t}" for c, t in zip(columns, types, strict=True))
+    con.execute(f"CREATE TABLE frag_{index} ({type_decls})")
+    if not rows:
+        return
+    placeholders = ", ".join("?" for _ in columns)
+    con.executemany(
+        f"INSERT INTO frag_{index} ({col_idents}) VALUES ({placeholders})",
+        rows,
+    )
+
+
 _FRAG_TABLE_RE = re.compile(r"\bfrag_(\d+)\b")
 
 
@@ -504,10 +549,36 @@ class AsyncEngine:
         adapters: dict[Dialect, AsyncAdapter] | None = None,
         merge_engine: AsyncMergeEngine | None = None,
     ) -> None:
-        self._con: Any = duckdb_connection or duckdb.connect(":memory:")
+        # The merge step is per-call scratch over fixed ``frag_<i>`` table
+        # names. A single shared connection would let two in-flight run()
+        # coroutines (the normal FastAPI fan-out) race on the same tables
+        # and return wrong results. So each call gets its OWN isolated
+        # in-memory connection by default. A caller-supplied connection is
+        # honoured for backwards-compat but is NOT safe under concurrent
+        # run()/iter_run() on one instance — omit it to get isolation.
+        self._user_con: Any = duckdb_connection
         self._adapters: dict[Dialect, AsyncAdapter] = dict(adapters or {})
         self._merge_engine = merge_engine
         self.last_iter_run_used_fast_path: bool = False
+
+    @contextlib.contextmanager
+    def _merge_con(self, n_fragments: int) -> Generator[Any]:
+        """Yield the DuckDB connection to materialise + merge into.
+
+        Default: a fresh ``:memory:`` connection per call (own catalog →
+        ``frag_<i>`` tables can't collide across concurrent calls), closed
+        on exit. If the caller supplied a connection, reuse it (resetting
+        stale frag tables first) and leave it open — that path trades
+        isolation for the caller's control and isn't concurrency-safe."""
+        if self._user_con is not None:
+            _reset_frag_tables_on(self._user_con, n_fragments)
+            yield self._user_con
+            return
+        con = duckdb.connect(":memory:")
+        try:
+            yield con
+        finally:
+            con.close()
 
     def register(self, dialect: Dialect, adapter: AsyncAdapter) -> None:
         """Bind an async adapter to a backend. Replacing an existing
@@ -526,7 +597,7 @@ class AsyncEngine:
         mismatches.
         """
         self._adapters_present(plan)
-        self._reset_frag_tables(len(plan.fragments))
+        _assert_fragments_read_only(plan)
 
         results = await asyncio.gather(
             *(
@@ -551,11 +622,11 @@ class AsyncEngine:
                 rows=[tuple(r) for r in merged.rows],
             )
 
-        for i, (fragment, result) in enumerate(zip(plan.fragments, results, strict=True)):
-            self._load_result(i, fragment, result)
-
-        merge_cursor = self._con.execute(plan.merge.sql, dict(plan.merge.params))
-        rows = merge_cursor.fetchall()
+        with self._merge_con(len(plan.fragments)) as con:
+            for i, result in enumerate(results):
+                _load_fragment_into(con, i, result.columns, [tuple(r) for r in result.rows])
+            _assert_merge_read_only(plan.merge.sql)
+            rows = con.execute(plan.merge.sql, dict(plan.merge.params)).fetchall()
         return ExecutionResult(
             columns=plan.columns,
             column_meta=plan.column_meta,
@@ -587,6 +658,7 @@ class AsyncEngine:
         if chunk_rows <= 0:
             raise EngineError(f"iter_run: chunk_rows must be positive, got {chunk_rows!r}.")
         self._adapters_present(plan)
+        _assert_fragments_read_only(plan)
         self.last_iter_run_used_fast_path = False
 
         if _can_stream_single_fragment(plan):
@@ -600,8 +672,6 @@ class AsyncEngine:
                 yield rows[start : start + chunk_rows]
             return
 
-        self._reset_frag_tables(len(plan.fragments))
-
         results = await asyncio.gather(
             *(
                 self._adapters[frag.dialect].execute(frag.sql, frag.params)
@@ -609,14 +679,21 @@ class AsyncEngine:
             )
         )
         for i, (fragment, result) in enumerate(zip(plan.fragments, results, strict=True)):
-            self._load_result(i, fragment, result)
+            self._validate_result(i, fragment, result)
 
-        cursor = self._con.execute(plan.merge.sql, dict(plan.merge.params))
-        while True:
-            chunk = await asyncio.to_thread(cursor.fetchmany, chunk_rows)
-            if not chunk:
-                return
-            yield [tuple(row) for row in chunk]
+        # The per-call connection stays open for the whole streaming loop;
+        # the contextmanager closes (or releases) it when the generator
+        # finishes or is closed early.
+        with self._merge_con(len(plan.fragments)) as con:
+            for i, result in enumerate(results):
+                _load_fragment_into(con, i, result.columns, [tuple(r) for r in result.rows])
+            _assert_merge_read_only(plan.merge.sql)
+            cursor = con.execute(plan.merge.sql, dict(plan.merge.params))
+            while True:
+                chunk = await asyncio.to_thread(cursor.fetchmany, chunk_rows)
+                if not chunk:
+                    return
+                yield [tuple(row) for row in chunk]
 
     # ------------------------------------------------------------------
     # Internals
@@ -632,12 +709,6 @@ class AsyncEngine:
                     f"running this plan."
                 )
 
-    def _load_result(self, index: int, fragment: Any, result: AdapterResult) -> None:  # noqa: ANN401
-        self._validate_result(index, fragment, result)
-        materialised: list[tuple[Any, ...]] = [tuple(r) for r in result.rows]
-        # Reuse Engine's loader; signature matches.
-        Engine._load_fragment(self, index, result.columns, materialised)  # type: ignore[arg-type]
-
     def _validate_result(self, index: int, fragment: Any, result: AdapterResult) -> None:  # noqa: ANN401
         if set(result.columns) != set(fragment.columns):
             raise EngineError(
@@ -646,9 +717,6 @@ class AsyncEngine:
                 f"fragment declares {fragment.columns!r}. Adapter "
                 f"must preserve the SELECT-list aliases."
             )
-
-    def _reset_frag_tables(self, n: int) -> None:
-        Engine._reset_frag_tables(self, n)  # type: ignore[arg-type]
 
 
 __all__ = [

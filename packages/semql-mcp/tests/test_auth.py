@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from semql import Catalog, Cube, Dialect, Dimension, Measure, SemanticQuery
+from semql.errors import AuthError
 from semql.model import AuthContext
 from semql_mcp import MCPServer
 
@@ -119,6 +120,30 @@ def test_resolve_viewer_falls_back_to_client_asserted_without_provider() -> None
     assert resolved.viewer_id == "u"
     assert resolved.roles == ["analyst"]
     assert server._resolve_viewer() is None
+
+
+def test_query_tool_refuses_when_provider_returns_none_by_default() -> None:
+    """Fail-secure: a configured provider returning None means 'deny',
+    not 'anonymous OK'. The query tool surfaces an AuthError payload
+    rather than compiling with viewer=None (which would expose every
+    cube without required_roles)."""
+    server = MCPServer(_gated_catalog(), viewer_provider=lambda: None)
+    out = _call_query_semantic(server)
+    assert "error" in out
+    assert out["error"]["code"] == "AuthError"
+
+
+def test_require_viewer_false_allows_anonymous() -> None:
+    """Opt-in anonymous: with require_viewer=False a provider returning
+    None resolves to viewer=None (unscoped) instead of refusing."""
+    server = MCPServer(_gated_catalog(), viewer_provider=lambda: None, require_viewer=False)
+    assert server._resolve_viewer() is None
+
+
+def test_resolve_viewer_raises_when_provider_returns_none() -> None:
+    server = MCPServer(_gated_catalog(), viewer_provider=lambda: None)
+    with pytest.raises(AuthError):
+        server._resolve_viewer()
 
 
 def test_run_warns_on_networked_transport_without_provider(monkeypatch: pytest.MonkeyPatch) -> None:

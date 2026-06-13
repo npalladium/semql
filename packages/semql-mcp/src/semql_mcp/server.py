@@ -62,9 +62,12 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from semql import Catalog
+from semql.compile import CompiledQuery
+from semql.errors import AuthError, SemQLError
 from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
 from semql.model import AuthContext, Cube, ResolutionContext
+from semql.safe import is_read_only_statement
 from semql.spec import Filter, SemanticQuery, TimeWindow
 from semql.validate import ValidationError
 from semql.validate import validate as validate_query
@@ -93,11 +96,17 @@ call — so ``required_roles`` cube/field visibility and ``security_sql``
 row-level scoping are actually enforced.
 
 The provider is invoked inside each tool call, so it sees the current
-request's context. Return ``None`` for an unauthenticated request. When a
-provider is configured it is authoritative: client-asserted ``viewer_id`` /
-``roles`` are ignored. With no provider (the stdio single-tenant default)
-the server falls back to the client-asserted values, which is the only
-mode where trusting them is safe."""
+request's context. Returning ``None`` means "no identity"; by default
+(``require_viewer=True``) that is a hard refusal — the tool returns an
+``AuthError`` payload rather than silently granting unscoped access.
+Do **not** conflate "auth failed" with "anonymous is fine": deny by
+returning ``None`` (refused) or raising ``AuthError``; allow anonymous
+(unscoped) access only by constructing the server with
+``require_viewer=False``. When a provider is configured it is
+authoritative: client-asserted ``viewer_id`` / ``roles`` are ignored.
+With no provider (the stdio single-tenant default) the server falls back
+to the client-asserted values, which is the only mode where trusting
+them is safe."""
 
 
 class MCPServer:
@@ -113,11 +122,15 @@ class MCPServer:
         *,
         executor: Executor | None = None,
         viewer_provider: ViewerProvider | None = None,
+        require_viewer: bool = True,
+        debug: bool = False,
         name: str = "semql",
     ) -> None:
         self.catalog = catalog
         self.executor = executor
         self.viewer_provider = viewer_provider
+        self.require_viewer = require_viewer
+        self.debug = debug
         self.mcp = FastMCP(name=name)
         self._register_tools()
         self._register_per_cube_tools()
@@ -135,9 +148,24 @@ class MCPServer:
         ``viewer_id`` / ``roles`` are ignored, because on a networked
         transport the client can't be trusted to name itself. With no
         provider (stdio single-tenant), fall back to the client-asserted
-        values; that's the only context where trusting them is safe."""
+        values; that's the only context where trusting them is safe.
+
+        Fail-secure: when a provider is configured and ``require_viewer``
+        is set (the default), a provider returning ``None`` is a hard
+        refusal — not a silent grant of unscoped access. Providers must
+        signal "deny" by returning ``None`` (refused here) and may raise
+        their own :class:`~semql.errors.AuthError`; "anonymous is OK" is
+        an explicit opt-in via ``require_viewer=False``."""
         if self.viewer_provider is not None:
-            return self.viewer_provider()
+            viewer = self.viewer_provider()
+            if viewer is None and self.require_viewer:
+                raise AuthError(
+                    "viewer_provider returned no identity and require_viewer "
+                    "is set. Pass require_viewer=False to allow anonymous "
+                    "(unscoped) access.",
+                    reason="no_viewer",
+                )
+            return viewer
         if client_viewer_id is not None:
             return AuthContext(viewer_id=client_viewer_id, roles=list(client_roles or []))
         return None
@@ -146,6 +174,7 @@ class MCPServer:
         catalog = self.catalog
         executor = self.executor
         resolve_viewer = self._resolve_viewer
+        debug = self.debug
 
         @self.mcp.tool(
             name="query_semantic",
@@ -163,7 +192,7 @@ class MCPServer:
             try:
                 compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
             except Exception as exc:
-                return _error_payload(exc)
+                return _error_payload(exc, debug=debug)
             return {
                 "dialect": compiled.dialect.value,
                 "sql": compiled.sql,
@@ -243,11 +272,12 @@ class MCPServer:
                 try:
                     compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
                 except Exception as exc:
-                    return _error_payload(exc)
+                    return _error_payload(exc, debug=debug)
                 try:
+                    _guard_read_only(compiled)
                     rows = executor(compiled.sql, compiled.params)
                 except Exception as exc:
-                    return _error_payload(exc) | {
+                    return _error_payload(exc, debug=debug) | {
                         "sql": compiled.sql,
                         "params": compiled.params,
                     }
@@ -268,6 +298,7 @@ class MCPServer:
         dimensions doesn't advertise misleading tools."""
         catalog = self.catalog
         resolve_viewer = self._resolve_viewer
+        debug = self.debug
         if not catalog.lookups:
             return
 
@@ -292,7 +323,7 @@ class MCPServer:
                     max_candidates=max_candidates,
                 )
             except Exception as exc:
-                return _error_payload(exc)
+                return _error_payload(exc, debug=debug)
             return {"dimension": dimension, "query": query, "values": values}
 
         resolve_lookup_fn.__name__ = "resolve_lookup"
@@ -326,7 +357,7 @@ class MCPServer:
                 ctx = _build_resolution_ctx(resolve_viewer(viewer_id, roles), context)
                 materialized = materialize_lookup(lookup, ctx)
             except Exception as exc:
-                return _error_payload(exc)
+                return _error_payload(exc, debug=debug)
             if materialized is None:
                 # Dynamic lookup, no context — signal "values resolved
                 # at runtime" rather than inventing an empty answer.
@@ -369,7 +400,9 @@ class MCPServer:
             return
 
         for sq in catalog.saved_queries.values():
-            self.mcp.add_tool(_make_saved_query_tool(sq, catalog, executor, self._resolve_viewer))
+            self.mcp.add_tool(
+                _make_saved_query_tool(sq, catalog, executor, self._resolve_viewer, self.debug)
+            )
 
     def _register_per_cube_tools(self) -> None:
         """For each exposed, non-META cube, register a ``query_<cube>``
@@ -383,7 +416,9 @@ class MCPServer:
         catalog = self.catalog
         executor = self.executor
         for cube in iter_cubes(catalog, only_exposed=True):
-            self.mcp.add_tool(_make_query_cube_tool(cube, catalog, executor, self._resolve_viewer))
+            self.mcp.add_tool(
+                _make_query_cube_tool(cube, catalog, executor, self._resolve_viewer, self.debug)
+            )
 
     def run(self, transport: Transport = "stdio", **kwargs: Any) -> None:  # noqa: ANN401
         """Launch the server on ``transport``.
@@ -427,17 +462,53 @@ def _build_resolution_ctx(
     return ResolutionContext(viewer=viewer, context=dict(context or {}))
 
 
-def _error_payload(exc: Exception) -> dict[str, Any]:
+class ReadOnlyError(Exception):
+    """Compiled SQL failed the pre-execution read-only guard.
+
+    Raised at the execution choke point when ``compiled.sql`` (or one of
+    its ``derived_sources``) isn't a single read-only SELECT. The happy
+    path never trips this — the compiler emits SELECT by construction —
+    but RawSQL escape hatches (``DerivedTable.sql``, ``with_ctes``,
+    ``security_sql``, ``ScopePredicate.sql``) splice author-controlled
+    strings in, so we re-check before anything reaches the driver."""
+
+
+def _guard_read_only(compiled: CompiledQuery) -> None:
+    """Refuse to execute anything that isn't a read-only SELECT.
+
+    Defense-in-depth per PHILOSOPHY: "the defensive guarantee reaching
+    the LLM consumer is implemented in the recipe." This is that recipe
+    step for the row-returning tools."""
+    for sql in (compiled.sql, *compiled.derived_sources):
+        if not is_read_only_statement(sql, dialect=compiled.dialect.value):
+            raise ReadOnlyError("Compiled SQL is not a read-only SELECT; refusing to execute.")
+
+
+def _error_payload(exc: Exception, *, debug: bool = False) -> dict[str, Any]:
     """Turn an exception into a structured tool response.
 
     The MCP client should be able to surface the failure mode to the
     planner; raising would just crash the tool call. ``code`` matches
     SemQL's error-leaf class names so callers can branch on them
-    without parsing the message."""
+    without parsing the message.
+
+    Trust boundary: SemQL's own structured errors (and the read-only
+    guard) carry planner-facing messages by construction — they name
+    catalog fields, never raw rows — so they pass through verbatim. An
+    *arbitrary* executor / driver exception (``RuntimeError`` from a
+    DB-API call, a psycopg ``ProgrammingError``, …) can leak table /
+    column names or even row data in ``str(exc)``, so by default it is
+    reduced to a generic ``ExecutionError`` message. Construct the
+    server with ``debug=True`` to surface the raw text for local
+    troubleshooting."""
+    if isinstance(exc, SemQLError):
+        return {"error": exc.to_payload()}
+    if isinstance(exc, ReadOnlyError) or debug:
+        return {"error": {"code": type(exc).__name__, "message": str(exc)}}
     return {
         "error": {
-            "code": type(exc).__name__,
-            "message": str(exc),
+            "code": "ExecutionError",
+            "message": "Execution failed. Enable server debug mode to see details.",
         }
     }
 
@@ -447,6 +518,7 @@ def _make_query_cube_tool(
     catalog: Catalog,
     executor: Executor | None,
     resolve_viewer: ViewerProvider,
+    debug: bool = False,
 ) -> Callable[..., dict[str, Any]]:
     """Build a per-cube ``query_<cube>`` tool function.
 
@@ -510,11 +582,11 @@ def _make_query_cube_tool(
                 ungrouped=ungrouped,
             )
         except Exception as exc:
-            return _error_payload(exc)
+            return _error_payload(exc, debug=debug)
         try:
             compiled = catalog.compile(spec, context=context, viewer=resolve_viewer())
         except Exception as exc:
-            return _error_payload(exc)
+            return _error_payload(exc, debug=debug)
         envelope: dict[str, Any] = {
             "dialect": compiled.dialect.value,
             "sql": compiled.sql,
@@ -525,9 +597,10 @@ def _make_query_cube_tool(
         if executor is None:
             return envelope
         try:
+            _guard_read_only(compiled)
             envelope["rows"] = executor(compiled.sql, compiled.params)
         except Exception as exc:
-            return _error_payload(exc) | envelope
+            return _error_payload(exc, debug=debug) | envelope
         return envelope
 
     query_cube_fn.__name__ = f"query_{cube_name}"
@@ -558,6 +631,7 @@ def _make_saved_query_tool(
     catalog: Catalog,
     executor: Executor | None,
     resolve_viewer: ViewerProvider,
+    debug: bool = False,
 ) -> Callable[..., dict[str, Any]]:
     """Build a zero-arg ``saved_<name>`` tool that compiles + executes
     a pre-baked SemanticQuery.
@@ -575,7 +649,7 @@ def _make_saved_query_tool(
         try:
             compiled = catalog.compile(sq.query, context=context, viewer=resolve_viewer())
         except Exception as exc:
-            return _error_payload(exc)
+            return _error_payload(exc, debug=debug)
         envelope: dict[str, Any] = {
             "dialect": compiled.dialect.value,
             "sql": compiled.sql,
@@ -586,9 +660,10 @@ def _make_saved_query_tool(
         if executor is None:
             return envelope
         try:
+            _guard_read_only(compiled)
             envelope["rows"] = executor(compiled.sql, compiled.params)
         except Exception as exc:
-            return _error_payload(exc) | envelope
+            return _error_payload(exc, debug=debug) | envelope
         return envelope
 
     saved_query_fn.__name__ = f"saved_{saved_name}"

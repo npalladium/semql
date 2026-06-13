@@ -382,17 +382,9 @@ def test_query_execute_compile_failure_surfaces_structured_error() -> None:
     assert result.is_error or (isinstance(data, dict) and "error" in data)
 
 
-def test_query_execute_execute_failure_carries_sql_for_debugging() -> None:
-    """When the executor raises, the response should still include the
-    SQL we tried to run so the caller can inspect / replay it."""
-
-    def boom(sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: ARG001
-        raise RuntimeError("connection refused")
-
-    s = MCPServer(_orders_catalog(), executor=boom)
-
+def _run_query_execute(server: MCPServer) -> dict[str, Any]:
     async def call() -> dict[str, Any]:
-        async with _client(s) as c:
+        async with _client(server) as c:
             result = await c.call_tool(
                 "query_execute",
                 {
@@ -404,13 +396,37 @@ def test_query_execute_execute_failure_carries_sql_for_debugging() -> None:
             )
             return result.data  # type: ignore[no-any-return]
 
-    out = _run(call())
+    return _run(call())
+
+
+def test_query_execute_failure_redacts_driver_text_by_default() -> None:
+    """A raw driver exception must not leak its text to the client. By
+    default the message is generic; the SQL is still returned so the
+    caller can inspect / replay it."""
+
+    def boom(sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: ARG001
+        raise RuntimeError("connection refused to db.internal:5432 as user 'svc_billing'")
+
+    out = _run_query_execute(MCPServer(_orders_catalog(), executor=boom))
     assert "error" in out
+    assert out["error"]["code"] == "ExecutionError"
+    assert "connection refused" not in out["error"]["message"]
+    assert "db.internal" not in out["error"]["message"]
+    # The compiled SQL is still in the response for replay / inspection.
+    assert "sql" in out
+    assert "SUM" in out["sql"].upper()
+
+
+def test_query_execute_failure_surfaces_driver_text_in_debug_mode() -> None:
+    """With debug=True the raw exception text is surfaced for local
+    troubleshooting."""
+
+    def boom(sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: ARG001
+        raise RuntimeError("connection refused")
+
+    out = _run_query_execute(MCPServer(_orders_catalog(), executor=boom, debug=True))
     assert out["error"]["code"] == "RuntimeError"
     assert "connection refused" in out["error"]["message"]
-    # The compiled SQL is still in the response so the caller can
-    # replay / inspect it.
-    assert "sql" in out
     assert "SUM" in out["sql"].upper()
 
 
