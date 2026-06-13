@@ -27,19 +27,6 @@ engines Redshift, Trino, and Databricks.
 - **Drift check** — `semql-validate-db` probes a live database
   against a catalog before deploy.
 
-## Packages
-
-| Package | Description |
-|---|---|
-| `semql` | Core: catalog, compiler, federation planner |
-| `semql-auth` | Credential→identity adapters (bearer/JWKS/mTLS → `AuthContext`) |
-| `semql-engine` | In-process executor for federated plans (DuckDB merge) |
-| `semql-erd` | Graphviz ER-diagram generator for catalogs |
-| `semql-introspect` | Bootstrap a catalog from a live database's schema |
-| `semql-mcp` | MCP server wrapping a catalog |
-| `semql-prompt` | LLM-facing planner/router/presenter/drilldown prompt fragments |
-| `semql-validate-db` | Pre-deploy drift check against a live database |
-
 ## Install
 
 ```sh
