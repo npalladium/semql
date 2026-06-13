@@ -324,7 +324,18 @@ def test_engine_repeatable_runs_dont_leak_state(
 
     r1 = engine.run(plan)
     r2 = engine.run(plan)
-    assert r1.rows == r2.rows
+
+    # The merge SQL groups but does not ORDER BY, so DuckDB is free to
+    # return rows in any order — comparing order-sensitively made this
+    # flaky. The invariant under test is state isolation (no frag_N leak
+    # between runs); a leak would change the *multiset* of rows (stale
+    # data joined against fresh), which an order-insensitive compare still
+    # catches. Sort by a stringified key so mixed/None cells stay sortable.
+    def _key(rows: list[tuple[object, ...]]) -> list[tuple[str, ...]]:
+        return sorted(tuple(str(c) for c in row) for row in rows)
+
+    assert r1.columns == r2.columns
+    assert _key(r1.rows) == _key(r2.rows)
 
 
 # ---------------------------------------------------------------------------
