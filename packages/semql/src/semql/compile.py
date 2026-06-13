@@ -724,18 +724,218 @@ def _compile_where_tree(
     return result
 
 
+# SQL reserved words that must be quoted when used as bare identifiers.
+# sqlglot's own per-dialect ``RESERVED_KEYWORDS`` are inconsistent — empty
+# for Postgres/ClickHouse, only partial for DuckDB — so a fragment like
+# ``{t}.order`` emits unquoted, invalid SQL under Postgres. We quote against
+# this curated set ourselves (C7, ktx-ports M1). Source: ANSI SQL:2016
+# reserved words plus the common dialect keywords that collide with real
+# column names. Quoting a reserved word is safe in every supported dialect;
+# ordinary identifiers (``region``, ``amount``) are left untouched.
+_RESERVED_IDENTIFIERS: frozenset[str] = frozenset(
+    {
+        "all",
+        "and",
+        "any",
+        "are",
+        "array",
+        "as",
+        "asc",
+        "asensitive",
+        "asymmetric",
+        "at",
+        "authorization",
+        "begin",
+        "between",
+        "both",
+        "by",
+        "case",
+        "cast",
+        "check",
+        "collate",
+        "column",
+        "commit",
+        "condition",
+        "connect",
+        "constraint",
+        "create",
+        "cross",
+        "cube",
+        "current",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "current_user",
+        "cursor",
+        "date",
+        "day",
+        "dec",
+        "decimal",
+        "declare",
+        "default",
+        "delete",
+        "desc",
+        "describe",
+        "deterministic",
+        "distinct",
+        "do",
+        "drop",
+        "each",
+        "element",
+        "else",
+        "elseif",
+        "end",
+        "escape",
+        "except",
+        "exec",
+        "execute",
+        "exists",
+        "exit",
+        "external",
+        "false",
+        "fetch",
+        "filter",
+        "for",
+        "foreign",
+        "from",
+        "full",
+        "function",
+        "grant",
+        "group",
+        "grouping",
+        "having",
+        "hour",
+        "if",
+        "in",
+        "index",
+        "inner",
+        "inout",
+        "insensitive",
+        "insert",
+        "intersect",
+        "interval",
+        "into",
+        "is",
+        "join",
+        "key",
+        "language",
+        "leading",
+        "leave",
+        "left",
+        "level",
+        "like",
+        "limit",
+        "loop",
+        "match",
+        "merge",
+        "minute",
+        "month",
+        "natural",
+        "not",
+        "null",
+        "of",
+        "offset",
+        "on",
+        "only",
+        "open",
+        "or",
+        "order",
+        "outer",
+        "over",
+        "partition",
+        "position",
+        "primary",
+        "procedure",
+        "range",
+        "rank",
+        "references",
+        "rename",
+        "repeat",
+        "replace",
+        "reset",
+        "return",
+        "returns",
+        "revoke",
+        "right",
+        "rollback",
+        "rollup",
+        "row",
+        "rows",
+        "schema",
+        "scroll",
+        "second",
+        "select",
+        "sensitive",
+        "session_user",
+        "set",
+        "similar",
+        "some",
+        "specific",
+        "sql",
+        "start",
+        "symmetric",
+        "system",
+        "system_user",
+        "table",
+        "then",
+        "time",
+        "timestamp",
+        "to",
+        "trailing",
+        "trigger",
+        "true",
+        "union",
+        "unique",
+        "unnest",
+        "until",
+        "update",
+        "user",
+        "using",
+        "value",
+        "values",
+        "when",
+        "whenever",
+        "where",
+        "while",
+        "window",
+        "with",
+        "within",
+        "year",
+    }
+)
+
+
+def _quote_reserved_identifiers(node: exp.Expression) -> exp.Expression:
+    """Force-quote identifiers whose name is a SQL reserved word.
+
+    Walks the parsed fragment and marks any unquoted ``exp.Identifier``
+    matching :data:`_RESERVED_IDENTIFIERS` as quoted, so the generator
+    emits it as a delimited identifier under any dialect. Identifiers the
+    author already quoted, and string literals, are left as-is."""
+    for ident in node.find_all(exp.Identifier):
+        if not ident.args.get("quoted") and str(ident.this).lower() in _RESERVED_IDENTIFIERS:
+            ident.set("quoted", True)
+    return node
+
+
 def _parse_fragment(sql: str, dialect: str) -> exp.Expression:
     """Parse a catalog SQL fragment into a sqlglot AST node.
 
     Used for dim/measure/time-dimension expressions, ``Join.on``, and
-    ``base_predicate``. Any parse failure surfaces as a ``CompileError``
-    naming the offending fragment so the catalog author can fix it."""
+    ``base_predicate``. Reserved-word identifiers are force-quoted (C7) so
+    a column named after a keyword emits valid SQL. Any parse failure
+    surfaces as a ``CompileError`` naming the offending fragment so the
+    catalog author can fix it."""
     try:
-        return sqlglot.parse_one(sql, dialect=dialect)  # type: ignore[return-value]
+        # sqlglot's parse_one is stubbed to return the ``Expr`` TypeVar, not
+        # bare ``Expression``; narrow it here (same quirk the prior code
+        # suppressed with type: ignore[return-value]).
+        parsed: exp.Expression = sqlglot.parse_one(sql, dialect=dialect)  # type: ignore[assignment]
     except ParseError as exc:
         raise CompileError(
             f"Could not parse catalog SQL fragment {sql!r} under dialect {dialect!r}: {exc}"
         ) from exc
+    return _quote_reserved_identifiers(parsed)
 
 
 # ---------------------------------------------------------------------------
