@@ -93,6 +93,19 @@ deleted. Its CNF prerequisite is already met.
 **Resolution: (b).** The refusals are loud, not wrong — PHILOSOPHY
 tolerates a refusal far better than a rewrite-twice.
 
+**Superseded 2026-06-13 → effectively (a), by way of D10.** When W2 ran,
+deleting the parallel compiler (B1's core) was deferred to its own
+post-W2 workstream (decisions.md D10): it changes no behaviour and is
+large, so it's poor value at W2's tail. With B1 deferred, holding the
+carryovers hostage to it would have kept distributive where-trees /
+segments refused indefinitely for no gain — so the carryovers landed
+in federate.py now (stage 5: `_route_where_distributive` + segment
+routing + the cross-partition residual the merge already emitted). The
+"rewrite-twice" cost (b) avoided is now owned by D10's workstream, which
+must keep these tests byte-stable as it moves the routing onto the
+split-point. Net: users get correct distributive federation now; the
+IR migration pays the rewrite once, later, against a green oracle.
+
 ### R4 — Three test mechanisms converge on one harness (#47, I4, I6)
 
 **Context.** #47 (pointblank assertions, deferred "until the compiler
@@ -195,6 +208,21 @@ Pros: deletes ~700 LoC of duplicate compiler; unblocks entities M2
 Cons: the longest single item (~1–2 wk); pure refactor pressure with
 user value arriving at the end. **Effort: ~2–3 weeks. Depends: W1
 (A1 specifically).**
+
+**Status 2026-06-13 — functionally complete; the parallel-compiler
+deletion split off (D10).** Landed and green: B6 keyed-by-dimension
+predicate resolution (stage 1); one alias convention via `output_alias`
+(stage 2); `CompareSplit` load-bearing (stage 3b); `compile_plan` trusts
+a prebuilt plan — the A1 finish, a rewritten scan / pushed-down predicate
+survives to emission (stage 4); distributive where-tree + segment lift
+with cross-partition merge residual — the R3 carryovers, 5 parked A4
+tests now green (stage 5); `FederatedPlan` frozen + version-stamped
+(stage 7). Parked: `Join.kind` honouring (D9 → W3); deleting the
+parallel compiler + `_lit` removal (D10 → its own post-W2 workstream —
+`partition_scans` + a plan-trusting `compile_plan` are the primitives it
+will build on). The "user value at the end" risk was retired by landing
+the carryovers in the current compiler rather than gating them on the
+rewrite (see R3 supersession).
 
 ### W3 — Join-graph integrity / chasm trap (ktx M2 → M3, B4)
 

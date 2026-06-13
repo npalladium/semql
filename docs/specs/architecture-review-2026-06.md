@@ -86,6 +86,20 @@ review, the rest should be confirmed with a failing test before fixing
    f-string with values inlined as literals (`_lit`, against the
    bind-params invariant), no output-column collision handling, `views`
    dropped on the multi-backend path.
+   **Mostly resolved 2026-06-13 (W2 stages 2–7):** the alias convention
+   is now one helper (`output_alias`/`output_column_collisions`, stage 2,
+   which also fixed a latent I7-alias dup-column divergence); CompareSplit
+   is load-bearing — the emitter reads `current_range`/`prior_range` off
+   the plan, not recomputed (stage 3b); `compile_plan` trusts a prebuilt
+   plan and no longer re-plans, so a rewritten scan / pushed-down
+   predicate reaches emission (stage 4, the A1 finish); the distributive
+   federation path lifts the where-tree + segments into fragments with a
+   cross-partition residual in the merge (stage 5, the R3 carryovers — 5
+   parked A4 tests now green); `FederatedPlan` is frozen + version-stamped
+   (stage 7). Still open: `Join.kind` honouring (decisions.md D9 → W3) and
+   the parallel-compiler deletion incl. `_lit` removal (decisions.md D10 →
+   its own post-W2 workstream; the split-point primitive `partition_scans`
+   and a plan-trusting `compile_plan` are now in place for it).
 2. **Raw SQL strings are the default, not the escape hatch.** Nine entry
    points (`BaseField.sql`, `Measure.filter`, `base_predicate`,
    `Join.on`, `security_sql`, `ScopePredicate.sql`, `DerivedTable`,

@@ -285,3 +285,43 @@ always-LEFT until the graph produces a trustworthy `kind`.
 **Revisit.** With W3's join-graph rebuild — at which point the emitter
 reads `plan_join.kind` and a spine query roots at the spine cube with
 the fact cube LEFT-joined. (Maintainer-confirmed 2026-06-12.)
+
+---
+
+## D10. The federation parallel-compiler deletion is deferred (post-W2)
+
+**Context.** W2 (review B1) listed "replace federate.py's ~700-LoC
+parallel compiler with a `LogicalPlan` split-point feeding the shared
+emitter (killing `_lit` literal inlining)". The split-point primitive
+exists (`logical.partition_scans`) and `compile_plan` now trusts a
+prebuilt plan, so the load-bearing prerequisite is in place. But the
+rewrite itself was deferred.
+
+**Decision.** Treat W2 as functionally complete with the parallel
+compiler still in place. The behaviour-affecting W2 goals all landed and
+are green: the emitter trusts the plan (`compile_plan` no longer
+re-plans — a rewritten scan / pushed-down predicate survives to
+emission), one alias convention (`output_alias`), `CompareSplit` is
+load-bearing, B6 keys predicate resolution by dimension, the
+distributive path lifts the where-tree + segments (the R3 carryovers /
+5 parked A4 tests), and `FederatedPlan` is frozen + version-stamped.
+`Join.kind` is the only IR-adoption item parked, and that's D9 (W3).
+
+**Why.** Deleting the parallel compiler changes *no behaviour* — every
+federation test already passes through it — so it is regression risk
+with no user-visible upside, and it is large: `partition_scans` today
+gives each backend only its scans/joins; the rewrite must move filter /
+segment routing, bridge-key projection, avg-decomposition, measure
+routing, and a merge-spec derivation into the plan layer. That is a
+multi-step effort of its own, best built incrementally and verified
+against the existing federation suite as an oracle, not folded into
+W2's tail. Shipping the correctness wins now and doing the refactor
+deliberately later is the lower-risk sequencing.
+
+**Revisit.** As its own workstream: extend `partition_scans` to a full
+predicate router + bridge-projection injector, derive the merge from
+partitioned plans, replace `_lit` inlining with bound params, then
+delete `_build_partition_sub_query` / `_emit_merge_sql` and the
+raw_rows twins. The existing federation tests are the behaviour oracle —
+they must stay byte-stable through the swap. (Maintainer-confirmed
+2026-06-13.)
