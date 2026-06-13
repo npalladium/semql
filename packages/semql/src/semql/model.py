@@ -119,7 +119,48 @@ TenancyMode = Literal["schema", "discriminator", "none"]
 Metadata = dict[str, str]
 
 
-class BaseField(BaseModel):
+def _freeze(value: object) -> object:
+    """Recursively turn a field value into a hashable, order-normalised key.
+
+    Mirrors :class:`_HashableModel`'s contract: equal field values produce
+    equal frozen keys, so equal models hash equal. ``dict`` items are
+    sorted by key (insertion order is not part of value identity); ``set``
+    becomes a ``frozenset``; nested models recurse through their fields."""
+    if isinstance(value, BaseModel):
+        return (
+            type(value).__name__,
+            tuple(_freeze(getattr(value, n)) for n in type(value).model_fields),
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(v) for v in value)
+    return value
+
+
+class _HashableModel(BaseModel):
+    """Base for frozen catalog models that restores the frozen→hashable
+    contract.
+
+    ``ConfigDict(frozen=True)`` is meant to make a model hashable, but
+    Pydantic's generated ``__hash__`` hashes the raw field tuple and so
+    raises ``unhashable type: 'list'`` / ``'dict'`` for any model carrying
+    a collection field — which is most of them. We override ``__hash__``
+    with a recursive value-based hash (:func:`_freeze`) so a ``Measure``
+    can go in a ``set`` and a ``Join`` can be a dict key. Pydantic respects
+    an inherited ``__hash__`` (it does not regenerate one when the subclass
+    redeclares ``frozen=True``), and equality stays Pydantic's field-wise
+    ``__eq__`` — so equal models still hash equal."""
+
+    def __hash__(self) -> int:
+        return hash(
+            (type(self).__name__, tuple(_freeze(getattr(self, n)) for n in type(self).model_fields))
+        )
+
+
+class BaseField(_HashableModel):
     """Shared supertype for catalog fields.
 
     Every named, addressable artefact on a cube — measures, dimensions,
@@ -329,7 +370,7 @@ class Segment(BaseField):
     resolves to ``o.status = 'paid'`` at compile time."""
 
 
-class Rollup(BaseModel):
+class Rollup(_HashableModel):
     """Pre-aggregated rollup table for a Cube.
 
     Declares a materialised table holding rows pre-grouped by a subset
@@ -382,7 +423,7 @@ class Rollup(BaseModel):
         return self
 
 
-class GlossaryEntry(BaseModel):
+class GlossaryEntry(_HashableModel):
     """One catalog-wide vocabulary term + its definition + spelling aliases.
 
     Entries live on ``Catalog.glossary``. The retrieval index indexes
@@ -414,7 +455,7 @@ class GlossaryEntry(BaseModel):
         return self
 
 
-class Join(BaseModel):
+class Join(_HashableModel):
     """A directed edge from one cube to another.
 
     `on` is a SQL fragment using `{alias}` placeholders that the
@@ -459,7 +500,7 @@ class NamedCTE(BaseModel):
     sql: str
 
 
-class DerivedTable(BaseModel):
+class DerivedTable(_HashableModel):
     """A cube whose physical source is a SQL expression, not a table.
 
     Emitted as ``(<sql>) AS <alias>`` inside the cube's isolation
@@ -520,7 +561,7 @@ class TimePartition(BaseModel):
     time_dimension: str
 
 
-class TimePartitionedSource(BaseModel):
+class TimePartitionedSource(_HashableModel):
     """One physical table in a cube's time-partitioned source set.
 
     A cube that historically has "old" and "new" tables (e.g. a
@@ -1033,7 +1074,7 @@ class Cube(BaseModel):
         return names
 
 
-class ScopePredicate(BaseModel):
+class ScopePredicate(_HashableModel):
     """The output of a ``ScopeFn`` — a SQL predicate the compiler injects
     inside a cube's tenancy/security wrapper so it can't be bypassed by
     outer ``OR`` clauses.
@@ -1052,7 +1093,7 @@ class ScopePredicate(BaseModel):
     ctx_keys: list[str] = Field(default_factory=list)
 
 
-class AuthContext(BaseModel):
+class AuthContext(_HashableModel):
     """Identity + roles a viewer carries into a request.
 
     Threads through ``Catalog.compile`` / ``Catalog.prompt`` / ``iter_cubes``
@@ -1083,7 +1124,7 @@ class AuthContext(BaseModel):
     attrs: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResolutionContext(BaseModel):
+class ResolutionContext(_HashableModel):
     """The context handed to :class:`Lookup` loaders.
 
     Loaders are pure functions of this context — same input, same
@@ -1131,7 +1172,7 @@ class LookupEnricher(_Protocol):
     ) -> dict[str, str]: ...
 
 
-class Lookup(BaseModel):
+class Lookup(_HashableModel):
     """A finite set of valid values for a string dimension.
 
     Surfaces dimension values to the planner so "Show me sales in EMEA"
@@ -1189,7 +1230,7 @@ class Lookup(BaseModel):
         return self
 
 
-class View(BaseModel):
+class View(_HashableModel):
     """A curated catalog facade.
 
     A view exposes a renamed subset of measures / dimensions drawn
@@ -1233,7 +1274,7 @@ class View(BaseModel):
         return self
 
 
-class Entity(BaseModel):
+class Entity(_HashableModel):
     """A first-class business-object declaration — the prompt / product
     counterpart to a :class:`Cube`.
 
