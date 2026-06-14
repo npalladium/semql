@@ -292,6 +292,31 @@ radius was two assertions (`test_compile.py` default-join test + one
 federation paths are unaffected (verified: full suite green, 1714
 passed). (Resolved 2026-06-13.)
 
+**Update — Dijkstra rebuild landed (ktx M2 / C6, 2026-06-14).**
+`find_join_path` is now a weighted, bidirectional Dijkstra (`logical.py`):
+
+- *Bidirectional reachability.* The join graph is undirected for path
+  finding — a join declared on one cube resolves from either side. This
+  fixes a real defect: a child-cube measure aggregated by a parent-cube
+  dimension (e.g. `SUM(order_items.qty) BY orders.region`, where only
+  `orders` declares the `one_to_many` edge) previously raised
+  `JoinPathError`; it now resolves via the reverse edge.
+- *Fan-out weighting.* `one_to_many` traversals cost 10×, `many_to_one` /
+  `one_to_one` cost 1× (`_edge_weight`, the single fan-out model shared
+  with `_check_fan_out`). Given multiple paths, the planner prefers the
+  one that doesn't multiply rows even if it has more hops.
+- *Transit prohibition.* `forbid_transit` (the `left_joins` set) lets a
+  path *end* at a LEFT-joined cube but never pass *through* one, so the
+  chasm-trap refusal (a non-left cube reachable only behind a left-joined
+  cube) is preserved. The root is exempt (it is a start, not a transit).
+
+**Behaviour change.** Spine→facts edges now resolve *without* `left_joins`
+as an INNER JOIN (the anti-join's LEFT JOIN still requires `left_joins`);
+`test_left_joins.py::test_spine_to_facts_without_left_joins_*` was updated
+to assert the INNER resolution. The `JoinPath` value type + `is_ambiguous`
+warning surface (the rest of C6) remains a follow-on. (Verified: full
+semql + engine suites green.)
+
 ---
 
 ## D10. The federation parallel-compiler deletion is deferred (post-W2)
@@ -331,3 +356,116 @@ delete `_build_partition_sub_query` / `_emit_merge_sql` and the
 raw_rows twins. The existing federation tests are the behaviour oracle —
 they must stay byte-stable through the swap. (Maintainer-confirmed
 2026-06-13.)
+
+---
+
+## D11. SemQL grows a write path — opt-in, compiled, never LLM-authored SQL
+
+**Context.** PHILOSOPHY.md frames SemQL as a read/compile layer:
+`SemanticQuery + Catalog → CompiledQuery`, "running the SQL is the
+caller's job." The entities work (`docs/specs/entities.md`, design
+agreed 2026-06-12) adds two escape hatches the analytic layer can't
+serve: **row-mode reads** (fetch one row by key, list a few by
+allowlisted filters — "show me order 42") and **mutations** (insert /
+update / delete / upsert). Mutations are a genuine scope expansion —
+the layer has only ever emitted `SELECT`. The question is whether SemQL
+should grow a write path at all, and if so, under which invariants — so
+that adding DML doesn't quietly erode the properties that make the read
+path trustworthy.
+
+**Decision.** Yes, but writes are opt-in at every layer and *compiled*,
+never LLM-generated. The LLM may construct a `SemanticMutation` spec
+(which entity, which operation, which values / target); it never writes
+SQL. `compile_mutation` template-generates a single parameterised DML
+statement plus a preflight preview `SELECT`, binding every value as a
+parameter. Four independent gates must all pass: (1) `Catalog.
+allow_mutations` — a global hard gate, **off by default**; (2) the
+target is a `MutableEntity` and the operation is in its `operations`
+set; (3) the viewer passes the target cube's role policy — the same
+door as cube visibility; (4) predicate (`where`) targeting only when the
+entity opts in via `predicate_targeting=True`, PK targeting otherwise.
+Row-mode reads lower to the existing ungrouped `LogicalPlan`, then derive
+a serializable `RowPlan` that SQL backends render and custom (non-SQL)
+backends interpret via a row-capable adapter.
+
+**Why this does not violate PHILOSOPHY.** The load-bearing invariants
+hold. *Compiler purity*: `compile_mutation` returns a statement + bound
+params + preview; it performs no I/O — executing the DML stays the
+caller's / engine's job, exactly as for reads. *Bind-never-inline*:
+every mutation value binds as a parameter, never a SQL literal.
+*Refusal over wrong results*: scope on a write is **fail-closed** — v1
+injects only *structured* discriminator tenancy into every UPDATE/DELETE
+WHERE (bound, bypass-proof), and a target cube carrying raw
+`security_sql` or a `scope` ScopeFn is **refused**, because silently not
+enforcing raw scope on a write is worse than refusing it. Refusing these
+escape hatches outright wouldn't keep SemQL "read-only" — it would push
+text-to-SQL and MCP users to hand-built SQL strings, which is precisely
+the unaudited, unparameterised path the project exists to replace. So
+the compiler-purity line in PHILOSOPHY.md still reads true and needs no
+edit; this entry records *why* the write path is consistent with it
+rather than an exception to it.
+
+**Scope.** v1 mutations target exactly one cube (multi-cube writes are
+designed in entities §8, built later). PK targeting is the default;
+predicate targeting is per-entity opt-in and every compiled mutation
+carries a preview. Row-mode reads are SQL-backend in-library; non-SQL
+sources (REST, KV) bring a row-capable adapter — no library change.
+`Entity` (read-only) is a first-class base; `MutableEntity(Entity)` adds
+the write schema and requires a `key`. Reads over a vocabulary-only
+entity (`key is None`) are refused at compile time.
+
+**Revisit.** Multi-cube / transactional writes when entities §8 is
+built. Raw-scope (`security_sql` / ScopeFn) write targets stay refused
+until scope is expressible as a structured, bound predicate the write
+path can enforce without trusting opaque SQL. If `allow_mutations`
+adoption shows the global gate is redundant with the per-entity
+`operations` allowlist, reconsider collapsing the gates — but not before
+v1. (Design agreed 2026-06-12; entry drafted 2026-06-13.)
+
+---
+
+## D12. `SemanticQuery` is recursive — tool schemas go through `tool_json_schema()`
+
+**Context.** The cross-backend semi-join primitive (`docs/specs`, landed
+2026-06-15) added `SemanticQuery.semi_joins: list[SemiJoin]`, and a
+`SemiJoin` carries an inner `source: SemanticQuery`. That self-reference
+makes `SemanticQuery` a **recursive** model, so Pydantic's
+`model_json_schema()` no longer emits an object-rooted schema — it emits a
+bare root `$ref` (`{"$ref": "#/$defs/SemanticQuery", "$defs": {…}}`).
+OpenAI, Anthropic, and Bedrock tool-calling all require the tool
+`inputSchema` to be object-rooted (`type: "object"` at the top); Bedrock
+Converse rejects a root `$ref` on every model family. So the moment the IR
+gained a nested-query field, every tool-schema projection that called
+`SemanticQuery.model_json_schema()` directly started shipping a schema the
+APIs reject — not just the Bedrock adapter, the plain OpenAI/LangChain
+projections too.
+
+**Decision.** Core owns both the quirk and the fix.
+
+- `semql.flatten_root_ref(schema)` (in `semql/_schema.py`, exported from
+  the package root) is the single implementation: it splices a root `$ref`
+  back up to the top level while keeping `$defs` and every *internal*
+  (recursive) `$ref` intact, so the self-reference still resolves. It is a
+  no-op on an already object-rooted schema and raises on a schema that
+  cannot be made object-rooted (a `RootModel` over a union/scalar).
+- `SemanticQuery.tool_json_schema()` is the **canonical front door**:
+  `flatten_root_ref(cls.model_json_schema())`. Anything that ships a
+  `SemanticQuery` schema as a tool spec must call this, never the raw
+  `model_json_schema()`. All current projections route through it
+  (`to_openai_function`, `to_openai_tools`) or re-flatten on top of it
+  (`to_bedrock_converse_tools`).
+
+**Why core, not the prompt layer.** The recursion is a property of a core
+type, so the response to it belongs with the type — and putting the
+mechanism in core means the projection layers don't each re-implement
+flattening (or each forget to). `semql-prompt` and the Bedrock adapter
+import `flatten_root_ref` from core; it is not re-exported from
+`semql-prompt` (a cross-package re-export the API-doc generator could not
+resolve, and an unnecessary second public home).
+
+**Revisit.** If a future IR change removes the recursion (no nested
+`SemanticQuery` field), `tool_json_schema()` degrades to a no-op wrapper
+over `model_json_schema()` and could be retired — but it is the safe
+default to keep regardless, since it costs nothing on a non-recursive
+schema and guards against the next nested-query field reintroducing the
+trap silently. (Landed with the semi-join primitive, 2026-06-15.)
