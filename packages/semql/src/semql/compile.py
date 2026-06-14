@@ -2084,7 +2084,7 @@ class _CompileEnv:
                 )
             else:  # "computed" — derived / inline measure, deferred to ``_emit_simple_query``
                 continue
-            sel = sel.select(exp.alias_(expr, out_name), copy=False)
+            sel = sel.select(exp.alias_(expr, out_name, copy=False), copy=False)
 
         if self.plan.aggregate is not None and measure_count == 0:
             # Row-listing mode with no measures — DISTINCT collapses
@@ -2369,6 +2369,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
                     ],
                 ),
                 col_name,
+                copy=False,
             ),
             copy=False,
         )
@@ -2385,6 +2386,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
                     ],
                 ),
                 time_col_name,
+                copy=False,
             ),
             copy=False,
         )
@@ -2398,8 +2400,8 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
         delta_col = f"{col_name}_delta"
         pct_col = f"{col_name}_pct_change"
 
-        outer = outer.select(exp.alias_(cur_ref.copy(), cur_col), copy=False)
-        outer = outer.select(exp.alias_(pri_ref.copy(), pri_col), copy=False)
+        outer = outer.select(exp.alias_(cur_ref.copy(), cur_col, copy=False), copy=False)
+        outer = outer.select(exp.alias_(pri_ref.copy(), pri_col, copy=False), copy=False)
 
         # delta: COALESCE both to 0 so the diff is meaningful when one
         # period is missing the entity.
@@ -2413,6 +2415,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
             exp.alias_(
                 exp.Sub(this=coalesced_cur, expression=coalesced_pri),
                 delta_col,
+                copy=False,
             ),
             copy=False,
         )
@@ -2441,7 +2444,7 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
             ],
             default=exp.Null(),
         )
-        outer = outer.select(exp.alias_(pct_expr, pct_col), copy=False)
+        outer = outer.select(exp.alias_(pct_expr, pct_col, copy=False), copy=False)
 
         outer_columns.extend([cur_col, pri_col, delta_col, pct_col])
 
@@ -2565,7 +2568,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     # address them by the derived measure's ``name``.
     for ir in q.derived_measures:
         node = _build_inline_derived_expr(ir, env, columns)
-        select_node = select_node.select(exp.alias_(node, ir.name), copy=False)
+        select_node = select_node.select(exp.alias_(node, ir.name, copy=False), copy=False)
         columns.append(ir.name)
         measure_alias_map[ir.name] = node
 
@@ -2657,6 +2660,7 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
                         ],
                     ),
                     col_name,
+                    copy=False,
                 ),
                 copy=False,
             )

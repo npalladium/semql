@@ -290,7 +290,7 @@ class _StdSqlDialect:
             this="generate_series",
             expressions=[trunc_start, trunc_end, step.copy()],
         )
-        inner = exp.Select().select(exp.alias_(series, bucket_alias))
+        inner = exp.Select().select(exp.alias_(series, bucket_alias, copy=False), copy=False)
         return inner
 
 
@@ -357,7 +357,7 @@ class BigQueryDialect(_StdSqlDialect):
             expressions=[bucket_col, exp.Var(this=granularity.upper())],
         )
         inner = exp.Select(distinct=exp.Distinct())
-        inner = inner.select(exp.alias_(trunc_node, bucket_alias))
+        inner = inner.select(exp.alias_(trunc_node, bucket_alias, copy=False), copy=False)
         unnest = exp.Unnest(
             expressions=[series],
             alias=exp.TableAlias(this=exp.to_identifier("d")),
@@ -413,8 +413,10 @@ class SnowflakeDialect(_StdSqlDialect):
             ],
         )
         table_func = exp.Anonymous(this="TABLE", expressions=[generator])
-        inner = exp.Select(distinct=exp.Distinct()).select(exp.alias_(bucket, bucket_alias))
-        inner = inner.from_(table_func)
+        inner = exp.Select(distinct=exp.Distinct()).select(
+            exp.alias_(bucket, bucket_alias, copy=False), copy=False
+        )
+        inner = inner.from_(table_func, copy=False)
         return inner
 
 
@@ -634,8 +636,8 @@ class ClickHouseDialect:
             ],
         )
         inner = exp.Select(distinct=exp.Distinct())
-        inner = inner.select(exp.alias_(bucket, bucket_alias))
-        inner = inner.from_(exp.Anonymous(this="numbers", expressions=[day_diff]))
+        inner = inner.select(exp.alias_(bucket, bucket_alias, copy=False), copy=False)
+        inner = inner.from_(exp.Anonymous(this="numbers", expressions=[day_diff]), copy=False)
         return inner
 
 

@@ -139,8 +139,8 @@ def _project(physical: str, logical: str) -> exp.Expression:
     always returns a concrete ``Expression`` at runtime."""
     parsed = sqlglot.parse_one(physical, read="postgres")
     if isinstance(parsed, exp.Column):
-        return exp.alias_(parsed, logical, quoted=False)  # type: ignore[return-value]
-    return exp.alias_(parsed, logical, quoted=parsed.is_string)  # type: ignore[return-value]
+        return exp.alias_(parsed, logical, quoted=False, copy=False)  # type: ignore[return-value]
+    return exp.alias_(parsed, logical, quoted=parsed.is_string, copy=False)  # type: ignore[return-value]
 
 
 def _column_from_sql(sql: str) -> str:
