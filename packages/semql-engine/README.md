@@ -19,7 +19,7 @@ pip install semql-engine
 
 ```python
 import duckdb
-from semql import Catalog, compile_federated_query
+from semql import Catalog, Dialect, compile_federated_query
 from semql_engine import DuckDBAdapter, Engine
 
 catalog = Catalog([...])  # cubes spanning multiple backends
@@ -28,7 +28,9 @@ plan = compile_federated_query(query, catalog.as_dict())
 engine = Engine()
 engine.register(Dialect.POSTGRES, my_pg_adapter)
 engine.register(Dialect.BIGQUERY, my_bq_adapter)
-rows = list(engine.run(plan))
+result = engine.run(plan)
+result.columns  # ['region', 'revenue', ...]
+result.rows     # [(...), ...]   — or stream with engine.iter_rows(plan)
 ```
 
 ## What it does
@@ -36,7 +38,8 @@ rows = list(engine.run(plan))
 For every fragment in the plan, the engine calls the adapter registered
 for that backend with `(sql, params)`. It loads the resulting rows into
 a DuckDB table named `frag_<i>` (matching `FederatedPlan.fragments`
-indices) and finally runs `plan.merge.sql` to produce the merged shape.
+indices) and finally applies `plan.merge_spec` — rendered to DuckDB SQL
+by `semql_engine.merge` — to produce the merged shape.
 
 Single-fragment plans (single-backend queries that went through
 `compile_federated_query` anyway) work transparently — the merge is a
@@ -54,6 +57,23 @@ row dicts. Built-ins:
   sqlite, etc).
 
 Bring your own for warehouses that need a vendor SDK.
+
+## Semi-joins
+
+A cross-backend semi-join (restrict an outer dimension to the value set
+of an inner query, shipped as a value list rather than a join) compiles
+to a `SemiJoinPlan` via `semql.compile_semi_join_query`. Run it with
+`run_semi_join(plan, engine)` — it executes each inner plan, projects the
+key column to a value list, and runs the outer query with that list bound
+as an `IN` / `NOT IN` filter:
+
+```python
+from semql import compile_semi_join_query
+from semql_engine import Engine, run_semi_join
+
+plan = compile_semi_join_query(query, catalog.as_dict())
+result = run_semi_join(plan, engine)  # same ExecutionResult shape as run()
+```
 
 ## Scope
 

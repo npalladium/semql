@@ -99,6 +99,49 @@ scope predicate inside the alias, so no outer `OR` can reach a row
 the viewer isn't authorised to see. Identity and context values
 always bind as parameters — never SQL literals.
 
+## Run it end-to-end
+
+`semql` stops at SQL — running it is the caller's job. `semql-engine`
+closes the loop: register one adapter per backend and it executes the
+plan (federating across backends when a query spans them) and hands
+back rows.
+
+```python
+import duckdb
+from semql import (
+    Catalog, Cube, Dialect, Dimension, Measure, SemanticQuery,
+    compile_federated_query,
+)
+from semql_engine import DuckDBAdapter, Engine
+
+con = duckdb.connect()
+con.execute("CREATE TABLE orders(region VARCHAR, amount INT)")
+con.execute("INSERT INTO orders VALUES ('EMEA', 100), ('EMEA', 50), ('US', 30)")
+
+orders = Cube(
+    name="orders", dialect=Dialect.DUCKDB, table="orders", alias="o",
+    measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+    dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+)
+catalog = Catalog([orders])
+
+plan = compile_federated_query(
+    SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+    catalog.as_dict(),
+)
+
+engine = Engine()
+engine.register(Dialect.DUCKDB, DuckDBAdapter(con))
+result = engine.run(plan)
+
+result.columns  # ['region', 'revenue']
+result.rows     # [('EMEA', 150), ('US', 30)]
+```
+
+`compile_federated_query` returns a one-fragment plan for a
+single-backend query and a multi-fragment plan (per-backend SQL + a
+merge spec) when cubes span dialects — `engine.run` executes either.
+
 ## The four-role prompt pipeline
 
 Bring your own LLM. Each role pairs a **prompt-fragment builder**

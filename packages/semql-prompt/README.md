@@ -12,7 +12,9 @@ renders a prompt. This package is the rendering layer on top:
 - **Cacheable segments** — `CatalogPrompt` (viewer-invariant `static` +
   per-viewer `overlay`) for prompt-cache breakpoints, plus `prompt_hash`.
 - **Tool-description projection** — `to_openai_tools` / `to_langchain_tools`
-  / `to_openai_function` for function-calling clients.
+  / `to_openai_function` for function-calling clients, and
+  `to_bedrock_converse_tools` for the Bedrock Converse API (object-rooted
+  `inputSchema`).
 - **Prompt-token budgeting** — `PromptBudget`, `apply_budget`,
   `estimate_tokens`.
 
