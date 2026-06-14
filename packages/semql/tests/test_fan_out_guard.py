@@ -12,7 +12,7 @@ import pytest
 from semql.catalog import Catalog
 from semql.errors import CompileError
 from semql.model import Cube, Dialect, Dimension, Join, Measure
-from semql.spec import SemanticQuery
+from semql.spec import Filter, SemanticQuery
 
 
 def _customers(measures: list[Measure]) -> Cube:
@@ -91,5 +91,72 @@ def test_fan_out_allows_single_cube_aggregation() -> None:
     customers = _customers([Measure(name="m", sql="*", agg="count", unit="count")])
     cat = Catalog([customers, _orders()])
     q = SemanticQuery(measures=["customers.m"], dimensions=["customers.region"])
+    out = cat.compile(q)
+    assert "COUNT" in out.sql.upper()
+
+
+# ---------------------------------------------------------------------------
+# Conformed-dimension chasm trap: two fact cubes that each carry an additive
+# measure and both join (many-side) to a shared bridge cube. Joining them
+# through the bridge cross-multiplies rows, inflating both measures. The
+# per-edge guard above misses it (the duplicated cube is the *bridge*, not
+# either fact). Phase 2 refuses it; Phase 3 will emit symmetric aggregation.
+# ---------------------------------------------------------------------------
+
+
+def _chasm_catalog() -> Catalog:
+    users = Cube(
+        name="users",
+        dialect=Dialect.POSTGRES,
+        table="users",
+        alias="u",
+        primary_key="id",
+        dimensions=[
+            Dimension(name="id", sql="{u}.id", type="string"),
+            Dimension(name="name", sql="{u}.name", type="string"),
+        ],
+    )
+    orders = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="identity_id", sql="{o}.identity_id", type="string")],
+        joins=[Join(to="users", relationship="many_to_one", on="{o}.identity_id = {u}.id")],
+    )
+    reviews = Cube(
+        name="reviews",
+        dialect=Dialect.POSTGRES,
+        table="reviews",
+        alias="r",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="identity_id", sql="{r}.identity_id", type="string")],
+        joins=[Join(to="users", relationship="many_to_one", on="{r}.identity_id = {u}.id")],
+    )
+    return Catalog([users, orders, reviews])
+
+
+def test_chasm_trap_refuses_when_not_symmetric_handled() -> None:
+    # orders.count + reviews.count through a shared users bridge is a chasm
+    # trap. The bare count/count form is now emitted fan-safely (see
+    # test_symmetric_aggregation.py); but a shape the symmetric path does
+    # not handle — here, a *fact-side* dimension (orders.identity_id) — must
+    # still refuse rather than silently emit the cross-product.
+    cat = _chasm_catalog()
+    q = SemanticQuery(
+        measures=["orders.count", "reviews.count"],
+        dimensions=["orders.identity_id"],
+        filters=[Filter(dimension="users.name", op="eq", values=["Nikhil"])],
+    )
+    with pytest.raises(CompileError, match="chasm|cross-multipl|inflat"):
+        cat.compile(q)
+
+
+def test_two_facts_one_additive_measure_is_allowed() -> None:
+    # Only one fan-out-sensitive measure in play (reviews contributes a
+    # dimension, not a measure) — single-fact aggregation, no chasm refusal.
+    cat = _chasm_catalog()
+    q = SemanticQuery(measures=["orders.count"], dimensions=["users.name"])
     out = cat.compile(q)
     assert "COUNT" in out.sql.upper()

@@ -30,6 +30,7 @@ rollup's physical table, leaving the original catalog untouched.
 from __future__ import annotations
 
 import heapq
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -53,6 +54,15 @@ from semql.model import (
 from semql.model import Join as ModelJoin
 from semql.partition import select_physical_sources
 from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
+
+# Aggregates whose value is inflated when a join duplicates the rows of the
+# cube the measure lives on. The single basis shared by the fan-out guard
+# (``compile._check_fan_out``) and the symmetric-aggregation detector.
+# ``min`` / ``max`` / ``count_distinct`` are duplication-invariant; ``avg`` /
+# ``ratio`` / quantiles are distorted only by *uneven* duplication and are
+# handled separately.
+FAN_OUT_SENSITIVE_AGGS: frozenset[str] = frozenset({"sum", "count"})
+
 
 # ---------------------------------------------------------------------------
 # Pure data nodes
@@ -209,6 +219,42 @@ class CompareSplit:
         return f"CompareSplit(current_range={self.current_range}, prior_range={self.prior_range})"
 
 
+@dataclass(frozen=True)
+class FactAgg:
+    """One fact cube in a :class:`SymmetricAgg`, pre-aggregated to the
+    conformed-dimension grain.
+
+    ``key_sql`` is the ``{alias}``-placeholder SQL for the fact's side of
+    the join to the shared bridge cube (e.g. ``"{o}.identity_id"``); the
+    emitter groups the fact by it and joins fact subqueries on it."""
+
+    cube: Cube
+    key_sql: str
+
+    def __repr__(self) -> str:
+        return f"FactAgg({self.cube.name}, key={self.key_sql})"
+
+
+@dataclass(frozen=True)
+class SymmetricAgg:
+    """Fan-safe multi-fact aggregation. Two or more fact cubes that each
+    carry an additive measure and share a conformed bridge cube get
+    pre-aggregated to the bridge grain in their own subqueries, then
+    FULL OUTER JOINed on the conformed key and joined to the bridge —
+    avoiding the chasm-trap cross-product a flat join would produce.
+
+    ``bridge_key_sql`` is the bridge's side of the conformed join
+    (e.g. ``"{u}.id"``)."""
+
+    facts: tuple[FactAgg, ...]
+    bridge: Cube
+    bridge_key_sql: str
+
+    def __repr__(self) -> str:
+        facts = ", ".join(f.cube.name for f in self.facts)
+        return f"SymmetricAgg(facts=[{facts}], bridge={self.bridge.name})"
+
+
 # ---------------------------------------------------------------------------
 # Top-level plan
 # ---------------------------------------------------------------------------
@@ -238,6 +284,12 @@ class LogicalPlan:
     having: tuple[Filter, ...] = ()
     segments: tuple[str, ...] = ()
     aliases: tuple[tuple[str, str], ...] = ()
+    # Multi-fact symmetric aggregation. Set when the query is a
+    # conformed-dimension chasm trap the emitter can answer fan-safely
+    # (two+ additive-measure facts sharing one bridge cube). ``None`` for
+    # every other plan — kept out of ``__repr__`` to preserve the
+    # plan-snapshot contract, exactly like ``having`` / ``segments``.
+    symmetric: SymmetricAgg | None = None
 
     def __repr__(self) -> str:
         lines = [
@@ -432,6 +484,8 @@ def to_logical_plan(
             prior_range=prior_range,
         )
 
+    symmetric = _detect_symmetric_agg(query, resolved, join_edges, cubes_in_from)
+
     return LogicalPlan(
         scans=scans,
         joins=joins,
@@ -447,7 +501,122 @@ def to_logical_plan(
         having=tuple(query.having),
         segments=tuple(query.segments),
         aliases=tuple(query.aliases.items()),
+        symmetric=symmetric,
     )
+
+
+# Conformed-key join shape the symmetric detector understands: a single
+# ``{a}.col = {b}.col`` equality. Anything more complex falls back to the
+# chasm-trap refusal in ``_check_fan_out``.
+_CONFORMED_KEY_RE = re.compile(
+    r"^\s*\{(?P<a_alias>\w+)\}\.(?P<a_col>\w+)\s*=\s*\{(?P<b_alias>\w+)\}\.(?P<b_col>\w+)\s*$"
+)
+
+
+def _detect_symmetric_agg(
+    query: SemanticQuery,
+    resolved: _ResolvedFields,
+    join_edges: list[tuple[Cube, Cube, ModelJoin]],
+    cubes_in_from: list[Cube],
+) -> SymmetricAgg | None:
+    """Recognise the fan-safe multi-fact shape, or ``None`` to fall back
+    to the chasm-trap refusal.
+
+    Matches only the conservative v1 shape: two or more fact cubes that
+    each carry an additive (``sum`` / ``count``) measure and are all the
+    *many* side of a join to one shared bridge cube; that bridge is the
+    only non-fact cube; dimensions (if any) are on the bridge; no time
+    breakdown, no where-tree, derived measures, segments, having,
+    compare, or ungrouped. Every excluded shape stays a refusal so the
+    emitter never has to handle a half-supported query."""
+    if (
+        query.ungrouped
+        or query.where is not None
+        or query.derived_measures
+        or query.segments
+        or query.having
+        or query.compare is not None
+        or query.time_dimension is not None
+    ):
+        return None
+
+    # Fact cubes = distinct cubes carrying a measure. All measures must be
+    # additive; a non-additive measure (avg / count_distinct / …) is left
+    # to the refusal so we never mix a handled and unhandled measure.
+    fact_names: list[str] = []
+    fact_by_name: dict[str, Cube] = {}
+    for cube, m in resolved.measure_fields:
+        if m.agg not in FAN_OUT_SENSITIVE_AGGS:
+            return None
+        if cube.name not in fact_by_name:
+            fact_by_name[cube.name] = cube
+            fact_names.append(cube.name)
+    if len(fact_names) < 2:
+        return None
+
+    # ``parents[X]`` = cubes X joins to on its many side (same basis the
+    # chasm-trap guard uses). The bridge is a cube every fact shares as a
+    # many-side parent.
+    parents: dict[str, set[str]] = {}
+    on_by_pair: dict[tuple[str, str], str] = {}
+    for left, right, join in join_edges:
+        names = {left.name, right.name}
+        if join.to not in names or len(names) != 2:
+            continue
+        declarer = (names - {join.to}).pop()
+        on_by_pair[(declarer, join.to)] = join.on
+        if join.relationship == "many_to_one":
+            parents.setdefault(declarer, set()).add(join.to)
+        elif join.relationship == "one_to_many":
+            parents.setdefault(join.to, set()).add(declarer)
+
+    shared: set[str] = set(parents.get(fact_names[0], set()))
+    for name in fact_names[1:]:
+        shared &= parents.get(name, set())
+    shared -= set(fact_names)
+    if len(shared) != 1:
+        return None
+    bridge_name = next(iter(shared))
+    bridge = next((c for c in cubes_in_from if c.name == bridge_name), None)
+    if bridge is None:
+        return None
+
+    # The bridge must be the *only* non-fact cube; another joined cube
+    # would change the row grain in ways this v1 emit path doesn't model.
+    if {c.name for c in cubes_in_from} != set(fact_names) | {bridge_name}:
+        return None
+
+    # Every projected dimension must live on the bridge.
+    if any(cube.name != bridge_name for cube, _dim in resolved.dim_fields):
+        return None
+
+    # Parse each fact↔bridge conformed key from the declared join ``on``.
+    facts: list[FactAgg] = []
+    bridge_key_sql: str | None = None
+    for name in fact_names:
+        on = on_by_pair.get((name, bridge_name))
+        if on is None:
+            return None
+        match = _CONFORMED_KEY_RE.match(on)
+        if match is None:
+            return None
+        fact_cube = fact_by_name[name]
+        groups = match.groupdict()
+        aliases = {groups["a_alias"]: groups["a_col"], groups["b_alias"]: groups["b_col"]}
+        if fact_cube.alias not in aliases or bridge.alias not in aliases:
+            return None
+        fact_key_sql = f"{{{fact_cube.alias}}}.{aliases[fact_cube.alias]}"
+        this_bridge_key = f"{{{bridge.alias}}}.{aliases[bridge.alias]}"
+        if bridge_key_sql is None:
+            bridge_key_sql = this_bridge_key
+        elif bridge_key_sql != this_bridge_key:
+            # Facts conform on different bridge columns — out of scope.
+            return None
+        facts.append(FactAgg(cube=fact_cube, key_sql=fact_key_sql))
+
+    if bridge_key_sql is None:
+        return None
+    return SymmetricAgg(facts=tuple(facts), bridge=bridge, bridge_key_sql=bridge_key_sql)
 
 
 def output_column_collisions(

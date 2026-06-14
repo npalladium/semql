@@ -17,6 +17,7 @@ from semql import (
     Dialect,
     Dimension,
     Filter,
+    Join,
     Measure,
     SemanticQuery,
     TimeDimension,
@@ -149,3 +150,46 @@ def test_plan_snap_compare_mode(snapshot: SnapshotAssertion) -> None:
     )
     plan = to_logical_plan(query, catalog)
     assert repr(plan) == snapshot
+
+
+def test_plan_snap_symmetric_aggregation(snapshot: SnapshotAssertion) -> None:
+    """Multi-fact symmetric aggregation node. The ``SymmetricAgg`` is kept
+    out of ``LogicalPlan.__repr__`` (so the other plan snapshots stay
+    stable), so pin its own repr here — the facts, bridge, and conformed
+    keys the emitter reads."""
+    users = Cube(
+        name="users",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.users",
+        alias="u",
+        primary_key="id",
+        dimensions=[
+            Dimension(name="id", sql="{u}.id", type="number"),
+            Dimension(name="name", sql="{u}.name", type="string"),
+        ],
+    )
+    orders = Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="count", sql="*", agg="count")],
+        dimensions=[Dimension(name="identity_id", sql="{o}.identity_id", type="number")],
+        joins=[Join(to="users", relationship="many_to_one", on="{o}.identity_id = {u}.id")],
+    )
+    reviews = Cube(
+        name="reviews",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.reviews",
+        alias="r",
+        measures=[Measure(name="count", sql="*", agg="count")],
+        dimensions=[Dimension(name="identity_id", sql="{r}.identity_id", type="number")],
+        joins=[Join(to="users", relationship="many_to_one", on="{r}.identity_id = {u}.id")],
+    )
+    catalog = {c.name: c for c in (users, orders, reviews)}
+    query = SemanticQuery(
+        measures=["orders.count", "reviews.count"],
+        filters=[Filter(dimension="users.name", op="eq", values=["Nikhil"])],
+    )
+    plan = to_logical_plan(query, catalog)
+    assert repr(plan.symmetric) == snapshot

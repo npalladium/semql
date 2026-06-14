@@ -41,6 +41,9 @@
     compare=None
   '''
 # ---
+# name: test_plan_snap_symmetric_aggregation
+  'SymmetricAgg(facts=[orders, reviews], bridge=users)'
+# ---
 # name: test_plan_snap_time_breakdown_with_granularity
   '''
   LogicalPlan(root=orders)

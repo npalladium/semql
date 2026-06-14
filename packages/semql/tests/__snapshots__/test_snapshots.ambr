@@ -11,6 +11,13 @@
 # name: test_snap_count_distinct_non_additive_measure
   "SELECT s.app_name AS app_name, COUNT(DISTINCT s.user_id) AS unique_users FROM sessions AS s WHERE s.event_type = 'active' GROUP BY app_name"
 # ---
+# name: test_snap_federation_filter_only_fragments
+  '''
+  [clickhouse] SELECT o.user_id AS user_id, COUNT(*) AS count FROM prod.orders AS o GROUP BY user_id
+  ---
+  [postgres] SELECT DISTINCT u.id AS id FROM prod.users AS u WHERE u.name = %(p0)s GROUP BY id
+  '''
+# ---
 # name: test_snap_filtered_aggregation
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL AND o.status IN (%(p0)s, %(p1)s) GROUP BY region'
 # ---
@@ -19,6 +26,18 @@
 # ---
 # name: test_snap_simple_pg_aggregation
   'SELECT o.region AS region, SUM(o.amount) AS revenue FROM prod.orders AS o WHERE o.deleted_at IS NULL GROUP BY region'
+# ---
+# name: test_snap_symmetric_fact_local_filter
+  'SELECT _f0.orders_count AS orders_count, _f1.reviews_count AS reviews_count FROM (SELECT o.identity_id AS __semql_conformed_key, COUNT(*) AS orders_count FROM prod.orders AS o WHERE o.status = %(p0)s GROUP BY __semql_conformed_key) AS _f0 FULL OUTER JOIN (SELECT r.identity_id AS __semql_conformed_key, COUNT(*) AS reviews_count FROM prod.reviews AS r GROUP BY __semql_conformed_key) AS _f1 ON _f1.__semql_conformed_key = _f0.__semql_conformed_key INNER JOIN prod.users AS u ON u.id = COALESCE(_f0.__semql_conformed_key, _f1.__semql_conformed_key) WHERE u.name = %(p1)s'
+# ---
+# name: test_snap_symmetric_three_fact_mixed_agg
+  'SELECT _f0.orders_count AS orders_count, _f1.reviews_count AS reviews_count, _f2.total AS total FROM (SELECT o.identity_id AS __semql_conformed_key, COUNT(*) AS orders_count FROM prod.orders AS o GROUP BY __semql_conformed_key) AS _f0 FULL OUTER JOIN (SELECT r.identity_id AS __semql_conformed_key, COUNT(*) AS reviews_count FROM prod.reviews AS r GROUP BY __semql_conformed_key) AS _f1 ON _f1.__semql_conformed_key = _f0.__semql_conformed_key FULL OUTER JOIN (SELECT p.identity_id AS __semql_conformed_key, SUM(p.amount) AS total FROM prod.payments AS p GROUP BY __semql_conformed_key) AS _f2 ON _f2.__semql_conformed_key = COALESCE(_f0.__semql_conformed_key, _f1.__semql_conformed_key) INNER JOIN prod.users AS u ON u.id = COALESCE(_f0.__semql_conformed_key, _f1.__semql_conformed_key, _f2.__semql_conformed_key)'
+# ---
+# name: test_snap_symmetric_two_fact
+  'SELECT _f0.orders_count AS orders_count, _f1.reviews_count AS reviews_count FROM (SELECT o.identity_id AS __semql_conformed_key, COUNT(*) AS orders_count FROM prod.orders AS o GROUP BY __semql_conformed_key) AS _f0 FULL OUTER JOIN (SELECT r.identity_id AS __semql_conformed_key, COUNT(*) AS reviews_count FROM prod.reviews AS r GROUP BY __semql_conformed_key) AS _f1 ON _f1.__semql_conformed_key = _f0.__semql_conformed_key INNER JOIN prod.users AS u ON u.id = COALESCE(_f0.__semql_conformed_key, _f1.__semql_conformed_key) WHERE u.name = %(p0)s'
+# ---
+# name: test_snap_symmetric_with_bridge_dimension
+  'SELECT u.name AS name, _f0.orders_count AS orders_count, _f1.reviews_count AS reviews_count FROM (SELECT o.identity_id AS __semql_conformed_key, COUNT(*) AS orders_count FROM prod.orders AS o GROUP BY __semql_conformed_key) AS _f0 FULL OUTER JOIN (SELECT r.identity_id AS __semql_conformed_key, COUNT(*) AS reviews_count FROM prod.reviews AS r GROUP BY __semql_conformed_key) AS _f1 ON _f1.__semql_conformed_key = _f0.__semql_conformed_key INNER JOIN prod.users AS u ON u.id = COALESCE(_f0.__semql_conformed_key, _f1.__semql_conformed_key)'
 # ---
 # name: test_snap_tenancy_discriminator
   'SELECT e.region AS region, COUNT(*) AS count FROM (SELECT * FROM events AS e WHERE e.tenant_id = %(p0)s AND e.team_id = %(p1)s) AS e GROUP BY region'

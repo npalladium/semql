@@ -380,7 +380,37 @@ def _dim_by_name(cube: Cube, name: str) -> Dimension:
 
 def _touched(q: SemanticQuery, catalog: dict[str, Cube]) -> list[Cube]:
     resolved = resolve_query(q, catalog)
-    return list(resolved.touched_cubes)
+    touched = list(resolved.touched_cubes)
+
+    # ``resolve_query`` reports the cubes named by measures / dimensions,
+    # but a cube can also enter a query through a *filter* alone — e.g.
+    # "count orders, filtered to a customer tier" where the tier lives in
+    # another backend and there is no grouping dimension on it. Such a
+    # cube must count toward the touched set, or the federation entry gate
+    # sees a single backend, declines to federate, and the single-backend
+    # compiler then pulls the foreign cube onto the join path as a bridge
+    # (invalid cross-dialect SQL). Add any filter- / where-referenced cube
+    # that resolve_query didn't already surface, preserving order.
+    seen = {c.name for c in touched}
+    for cube_name in _filter_where_cube_names(q):
+        if cube_name not in seen and cube_name in catalog:
+            touched.append(catalog[cube_name])
+            seen.add(cube_name)
+    return touched
+
+
+def _filter_where_cube_names(q: SemanticQuery) -> list[str]:
+    """Cube names referenced by ``q.filters`` and the ``q.where`` tree.
+
+    Filter dimensions are qualified ``cube.field`` refs; the where-tree is
+    flattened to its ``Filter`` leaves. Order-preserving, may contain
+    duplicates (the caller de-dups)."""
+    names: list[str] = [f.dimension.split(".", 1)[0] for f in q.filters]
+    if q.where is not None:
+        for clause in _to_cnf(q.where):
+            for _negated, lit in clause:
+                names.append(lit.dimension.split(".", 1)[0])
+    return names
 
 
 def _find_bridges(

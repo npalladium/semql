@@ -24,6 +24,7 @@ from semql import (
     SemanticQuery,
     TimeDimension,
     TimeWindow,
+    compile_federated_query,
 )
 from syrupy.assertion import SnapshotAssertion
 
@@ -222,3 +223,148 @@ def test_snap_tenancy_discriminator(snapshot: SnapshotAssertion) -> None:
         context={"tenant": "acme", "ctx.team_id": "growth"},
     )
     assert out.sql == snapshot
+
+
+# ---------------------------------------------------------------------------
+# Multi-fact symmetric aggregation — the chasm-trap-safe emit path. Two/three
+# fact cubes sharing a conformed bridge are pre-aggregated per fact and FULL
+# OUTER JOINed on the key, never cross-multiplied.
+# ---------------------------------------------------------------------------
+
+
+def _chasm_catalog(dialect: Dialect = Dialect.POSTGRES) -> Catalog:
+    users = Cube(
+        name="users",
+        dialect=dialect,
+        table="{schema}.users",
+        alias="u",
+        primary_key="id",
+        dimensions=[
+            Dimension(name="id", sql="{u}.id", type="number"),
+            Dimension(name="name", sql="{u}.name", type="string"),
+        ],
+    )
+    orders = Cube(
+        name="orders",
+        dialect=dialect,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[
+            Dimension(name="identity_id", sql="{o}.identity_id", type="number"),
+            Dimension(name="status", sql="{o}.status", type="string"),
+        ],
+        joins=[Join(to="users", relationship="many_to_one", on="{o}.identity_id = {u}.id")],
+    )
+    reviews = Cube(
+        name="reviews",
+        dialect=dialect,
+        table="{schema}.reviews",
+        alias="r",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="identity_id", sql="{r}.identity_id", type="number")],
+        joins=[Join(to="users", relationship="many_to_one", on="{r}.identity_id = {u}.id")],
+    )
+    payments = Cube(
+        name="payments",
+        dialect=dialect,
+        table="{schema}.payments",
+        alias="p",
+        measures=[Measure(name="total", sql="{p}.amount", agg="sum", unit="currency")],
+        dimensions=[Dimension(name="identity_id", sql="{p}.identity_id", type="number")],
+        joins=[Join(to="users", relationship="many_to_one", on="{p}.identity_id = {u}.id")],
+    )
+    return Catalog([users, orders, reviews, payments])
+
+
+def test_snap_symmetric_two_fact(snapshot: SnapshotAssertion, context: dict[str, str]) -> None:
+    out = _chasm_catalog().compile(
+        SemanticQuery(
+            measures=["orders.count", "reviews.count"],
+            filters=[Filter(dimension="users.name", op="eq", values=["Nikhil"])],
+        ),
+        context=context,
+    )
+    assert out.sql == snapshot
+
+
+def test_snap_symmetric_with_bridge_dimension(
+    snapshot: SnapshotAssertion, context: dict[str, str]
+) -> None:
+    out = _chasm_catalog().compile(
+        SemanticQuery(
+            measures=["orders.count", "reviews.count"],
+            dimensions=["users.name"],
+        ),
+        context=context,
+    )
+    assert out.sql == snapshot
+
+
+def test_snap_symmetric_fact_local_filter(
+    snapshot: SnapshotAssertion, context: dict[str, str]
+) -> None:
+    # The orders.status filter must render inside the orders subquery; the
+    # users.name filter on the outer query.
+    out = _chasm_catalog().compile(
+        SemanticQuery(
+            measures=["orders.count", "reviews.count"],
+            filters=[
+                Filter(dimension="users.name", op="eq", values=["Nikhil"]),
+                Filter(dimension="orders.status", op="eq", values=["shipped"]),
+            ],
+        ),
+        context=context,
+    )
+    assert out.sql == snapshot
+
+
+def test_snap_symmetric_three_fact_mixed_agg(
+    snapshot: SnapshotAssertion, context: dict[str, str]
+) -> None:
+    # count + count + sum across three facts → two FULL OUTER JOINs and a
+    # 3-arg COALESCE bridge key.
+    out = _chasm_catalog().compile(
+        SemanticQuery(measures=["orders.count", "reviews.count", "payments.total"]),
+        context=context,
+    )
+    assert out.sql == snapshot
+
+
+# ---------------------------------------------------------------------------
+# Federation — a cross-backend query whose foreign cube enters only via a
+# filter. Snapshot every fragment's SQL so a routing regression surfaces.
+# ---------------------------------------------------------------------------
+
+
+def test_snap_federation_filter_only_fragments(snapshot: SnapshotAssertion) -> None:
+    orders = Cube(
+        name="orders",
+        dialect=Dialect.CLICKHOUSE,
+        table="{schema}.orders",
+        alias="o",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="user_id", sql="{o}.user_id", type="number")],
+        joins=[Join(to="users", relationship="many_to_one", on="{o}.user_id = {u}.id")],
+    )
+    users = Cube(
+        name="users",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.users",
+        alias="u",
+        primary_key="id",
+        dimensions=[
+            Dimension(name="id", sql="{u}.id", type="number"),
+            Dimension(name="name", sql="{u}.name", type="string"),
+        ],
+    )
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.count"],
+            filters=[Filter(dimension="users.name", op="eq", values=["Nikhil"])],
+        ),
+        {c.name: c for c in (orders, users)},
+        context={"schema": "prod"},
+    )
+    rendered = "\n---\n".join(f"[{f.dialect.value}] {f.sql}" for f in plan.fragments)
+    assert rendered == snapshot

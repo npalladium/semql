@@ -240,6 +240,37 @@ def test_filter_on_dim_routes_to_dim_fragment() -> None:
     assert "gold" not in plan.fragments[0].params.values()
 
 
+def test_filter_only_foreign_cube_engages_federation() -> None:
+    """A cross-backend query whose foreign cube is referenced *only* by a
+    filter (no grouping dimension) must still engage federation.
+
+    "How many orders did this customer-tier place?" with the measure in
+    Postgres (orders) and the filtered dimension in BigQuery (customers),
+    and NO ``customers`` dimension in the output. The foreign cube enters
+    the touched set via the filter; without that, the query collapses to
+    a single (Postgres) backend, falls to single-backend compile, and the
+    BigQuery ``customers`` bridge gets pulled onto the join path —
+    invalid/cross-dialect SQL. Federation must split it into two
+    fragments and route the filter to the customers fragment."""
+    catalog = _federated_catalog()
+    plan = compile_federated_query(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            filters=[Filter(dimension="customers.tier", op="eq", values=["gold"])],
+        ),
+        catalog,
+    )
+    assert len(plan.fragments) == 2
+    # The filter value lands in the customers (BigQuery) fragment, not the
+    # orders (Postgres) measure fragment.
+    bq_idx = next(i for i, f in enumerate(plan.fragments) if f.dialect is Dialect.BIGQUERY)
+    pg_idx = next(i for i, f in enumerate(plan.fragments) if f.dialect is Dialect.POSTGRES)
+    assert "gold" in plan.fragments[bq_idx].params.values()
+    assert "gold" not in plan.fragments[pg_idx].params.values()
+    # And the merge still bridges the two fragments on the join key.
+    assert plan.merge_spec.bridges
+
+
 # ---------------------------------------------------------------------------
 # Refusals — every v1 restriction surfaces as FederationError with a
 # structured ``reason``.

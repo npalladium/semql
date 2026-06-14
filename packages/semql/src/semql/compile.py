@@ -77,6 +77,7 @@ from semql.errors import (
 )
 from semql.introspect import PolicyFn, ScopeFn, viewer_sees
 from semql.logical import (
+    FAN_OUT_SENSITIVE_AGGS,
     LogicalPlan,
     apply_rollup_to_plan,
     output_alias,
@@ -1285,17 +1286,11 @@ def _check_alias_uniqueness(touched: list[Cube]) -> None:
         owner[c.alias] = c.name
 
 
-# Aggregates whose value is inflated when a join duplicates the rows of
-# the cube the measure lives on. ``min`` / ``max`` / ``count_distinct``
-# are invariant under row duplication and stay safe; ``avg`` / ``ratio`` /
-# quantiles are distorted only by *uneven* duplication and are left to the
-# join-graph rework rather than refused with this coarser check.
-_FAN_OUT_SENSITIVE_AGGS: frozenset[str] = frozenset({"sum", "count"})
-
-
 def _check_fan_out(
     measure_fields: list[tuple[Cube, Measure]],
     join_edges: list[tuple[Cube, Cube, Any]],
+    *,
+    symmetric_handled: bool = False,
 ) -> None:
     """Refuse a query whose join graph fans out an additive measure.
 
@@ -1310,6 +1305,10 @@ def _check_fan_out(
     Scoped to a single query's join edges, so a cube whose measures only
     fan out under *some other* join still aggregates fine on its own."""
     duplicated: dict[str, tuple[str, str]] = {}  # cube -> (other cube, relationship)
+    # ``parents[X]`` = cubes ``X`` joins to on *its* many side (X is the
+    # duplicated-causing side). Used for the conformed-dimension chasm-trap
+    # check below: two cubes sharing a many-side parent cross-multiply.
+    parents: dict[str, set[str]] = {}
     for left, right, join in join_edges:
         target = getattr(join, "to", None)
         rel = getattr(join, "relationship", None)
@@ -1320,13 +1319,47 @@ def _check_fan_out(
         if rel == "many_to_one":
             # many ``declarer`` rows per one ``target`` row → target duplicates.
             duplicated.setdefault(target, (declarer, rel))
+            parents.setdefault(declarer, set()).add(target)
         elif rel == "one_to_many":
             # one ``declarer`` row per many ``target`` rows → declarer duplicates.
             duplicated.setdefault(declarer, (target, rel))
+            parents.setdefault(target, set()).add(declarer)
+
+    # Conformed-dimension chasm trap. Two cubes that each carry an additive
+    # measure and are both the *many* side of a join to a shared bridge cube
+    # cross-multiply when joined through it (``factA ⋈ bridge ⋈ factB``),
+    # inflating every additive measure — the per-edge check below can't see
+    # it, because the duplicated cube is the *bridge*, not either fact.
+    # Refuse it here unless the planner recognised a shape symmetric
+    # aggregation can emit fan-safely (``symmetric_handled``), in which
+    # case ``_emit_symmetric_query`` produces the correct per-fact-subquery
+    # SQL and there is nothing to refuse.
+    additive = [(c, m) for c, m in measure_fields if m.agg in FAN_OUT_SENSITIVE_AGGS]
+    if not symmetric_handled:
+        for i in range(len(additive)):
+            cube_a, m_a = additive[i]
+            for j in range(i + 1, len(additive)):
+                cube_b, m_b = additive[j]
+                if cube_a.name == cube_b.name:
+                    continue  # several additive measures on one fact — fine.
+                shared = parents.get(cube_a.name, set()) & parents.get(cube_b.name, set())
+                if shared:
+                    bridge = sorted(shared)[0]
+                    raise CompileError(
+                        f"Measures {cube_a.name}.{m_a.name} and "
+                        f"{cube_b.name}.{m_b.name} both aggregate across a shared "
+                        f"join to {bridge!r} — a conformed-dimension 'chasm trap'. "
+                        f"Joining {cube_a.name!r} and {cube_b.name!r} through "
+                        f"{bridge!r} cross-multiplies their rows, so both "
+                        f"{m_a.agg.upper()}s would be inflated. Query each fact "
+                        f"separately for now; multi-fact symmetric aggregation "
+                        f"(one pre-aggregated subquery per fact) is the planned fix."
+                    )
+
     if not duplicated:
         return
     for cube, m in measure_fields:
-        if m.agg in _FAN_OUT_SENSITIVE_AGGS and cube.name in duplicated:
+        if m.agg in FAN_OUT_SENSITIVE_AGGS and cube.name in duplicated:
             other, rel = duplicated[cube.name]
             raise CompileError(
                 f"Measure {cube.name}.{m.name} ({m.agg}) fans out: the "
@@ -1576,8 +1609,13 @@ class _CompileEnv:
         # Now that the query's join graph is resolved, refuse additive
         # measures that the joins would fan out (silently inflated SUM /
         # COUNT). Needs the edges, so it runs here rather than in the
-        # touched-cube prelude above.
-        _check_fan_out(self.measure_fields, self.join_edges)
+        # touched-cube prelude above. A chasm trap the planner flagged for
+        # symmetric aggregation is emitted fan-safely, so it is not refused.
+        _check_fan_out(
+            self.measure_fields,
+            self.join_edges,
+            symmetric_handled=self.plan.symmetric is not None,
+        )
 
         self.cube_aliases: dict[str, str] = {c.name: c.alias for c in self.cubes_in_from}
         self.strategy = dialect_for(self.dialect, dialects)
@@ -1696,7 +1734,7 @@ class _CompileEnv:
             return False
         return any(r in self.viewer.roles for r in mask_roles)
 
-    def _masked_field_expr(
+    def masked_field_expr(
         self,
         field: Measure | Dimension | TimeDimension,
         default_expr: exp.Expression,
@@ -2066,14 +2104,14 @@ class _CompileEnv:
             out_name = self.alias_map.get(col_name, col_name) if apply_aliases else col_name
             if col.kind == "dimension":
                 assert col.field is not None and isinstance(col.field, Dimension)
-                expr = self._masked_field_expr(col.field, self.parse(col.field.sql), col_name)
+                expr = self.masked_field_expr(col.field, self.parse(col.field.sql), col_name)
             elif col.kind == "time":
                 assert col.field is not None and isinstance(col.field, TimeDimension)
                 assert self.plan.aggregate is not None
                 assert self.plan.aggregate.time is not None
                 granularity = self.plan.aggregate.time.granularity
                 assert granularity is not None
-                expr = self._masked_field_expr(
+                expr = self.masked_field_expr(
                     col.field,
                     self.strategy.trunc(
                         granularity,
@@ -2092,7 +2130,7 @@ class _CompileEnv:
                 measure_count += 1
                 # ``build_measure_expr`` needs (cube, measure) — both
                 # are on the ColumnRef.
-                expr = self._masked_field_expr(
+                expr = self.masked_field_expr(
                     col.field, self.build_measure_expr(col.cube, col.field), col_name
                 )
             else:  # "computed" — derived / inline measure, deferred to ``_emit_simple_query``
@@ -2152,7 +2190,7 @@ class _CompileEnv:
     def _predicate_term(self, expr: BoolExpr | Filter) -> exp.Expression:
         """Render one plan Predicate into a SQL predicate.
 
-        Flat ``Filter`` leaves reuse ``_filter_term`` (which knows how
+        Flat ``Filter`` leaves reuse ``filter_term`` (which knows how
         to bind values).  ``BoolExpr`` trees reuse ``_compile_where_tree``
         so the AND/OR/NOT combinators emit identically to the
         pre-plan path.
@@ -2163,11 +2201,11 @@ class _CompileEnv:
             # keys by Filter object identity; fall back to
             # ``where_leaf_resolutions`` for leaves in the where tree.
             fld = self._lookup_filter_field(expr)
-            return self._filter_term(expr, fld)
+            return self.filter_term(expr, fld)
 
         def _leaf_to_node(leaf: Filter) -> exp.Expression:
             fld = self._lookup_filter_field(leaf)
-            return self._filter_term(leaf, fld)
+            return self.filter_term(leaf, fld)
 
         return _compile_where_tree(expr, _leaf_to_node)
 
@@ -2191,7 +2229,7 @@ class _CompileEnv:
             "field is not in the resolution results."
         )
 
-    def _filter_term(
+    def filter_term(
         self,
         f: Filter,
         fld: Dimension | Measure | TimeDimension | Segment,
@@ -2278,7 +2316,9 @@ class _CompileEnv:
         return sel
 
     def emit(self) -> CompiledQuery:
-        """Dispatch to the compare or non-compare emission helper."""
+        """Dispatch to the symmetric, compare, or simple emission helper."""
+        if self.plan.symmetric is not None:
+            return _emit_symmetric_query(self)
         if self.q.compare is not None:
             return _emit_compare_query(self)
         return _emit_simple_query(self)
@@ -2525,6 +2565,194 @@ def _emit_compare_query(env: _CompileEnv) -> CompiledQuery:
         sql=sql,
         params=env.params,
         columns=outer_columns,
+        column_meta=cm,
+        touched_cube_names=[c.name for c in env.touched],
+        derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
+        applied_rollup=env.applied_rollup,
+        physical_sources_hit=env.all_matched_physical_source_names(),
+    )
+
+
+def _coalesce_keys(aliases: list[str], key_col: str) -> exp.Expression:
+    """``COALESCE(a.key, b.key, ...)`` over fact-subquery aliases, or the
+    bare column for a single alias (no COALESCE needed)."""
+    cols = [exp.column(key_col, table=a) for a in aliases]
+    if len(cols) == 1:
+        return cols[0]
+    return exp.Anonymous(this="COALESCE", expressions=cols)
+
+
+# Uniform conformed-key column name inside every fact subquery, so the
+# FULL OUTER JOINs reference one stable name regardless of each fact's
+# physical key column.
+_SYM_KEY = "__semql_conformed_key"
+
+
+def _emit_symmetric_query(env: _CompileEnv) -> CompiledQuery:
+    """Emit fan-safe multi-fact symmetric aggregation.
+
+    Each fact cube is pre-aggregated to the conformed-dimension grain in
+    its own subquery (``GROUP BY`` the conformed key). The subqueries are
+    FULL OUTER JOINed on that key and the bridge cube is joined on
+    ``bridge_key = COALESCE(fact keys)`` — so two facts sharing an
+    identity are counted independently instead of cross-multiplied (the
+    chasm trap). Fact-cube filters land inside the owning subquery (they
+    must constrain rows *before* aggregation); bridge-cube filters land
+    on the outer query. ``sum`` / ``count`` measures only — the detector
+    refuses every other shape, so this path never sees one."""
+    sym = env.plan.symmetric
+    assert sym is not None
+
+    # Route filters by owning cube: bridge → outer WHERE, fact → its
+    # subquery. (The detector guarantees every filter cube is the bridge
+    # or a fact, and that there is no where-tree.)
+    fact_filters: dict[str, list[tuple[Filter, Dimension | Measure | TimeDimension | Segment]]] = {}
+    bridge_filters: list[tuple[Filter, Dimension | Measure | TimeDimension | Segment]] = []
+    for f, cube, fld in env.filter_resolutions:
+        if cube.name == sym.bridge.name:
+            bridge_filters.append((f, fld))
+        else:
+            fact_filters.setdefault(cube.name, []).append((f, fld))
+
+    # Output measures grouped by fact cube, preserving env's column order
+    # and collision-prefixed names (``orders_count`` / ``reviews_count``).
+    measures_by_fact: dict[str, list[tuple[Measure, str]]] = {}
+    for (cube, m), col in zip(env.measure_fields, env.measure_col_names, strict=True):
+        measures_by_fact.setdefault(cube.name, []).append((m, col))
+
+    # One pre-aggregating subquery per fact.
+    fact_aliases: dict[str, str] = {}
+    fact_selects: list[tuple[str, exp.Select]] = []
+    for idx, fa in enumerate(sym.facts):
+        cube = fa.cube
+        alias = f"_f{idx}"
+        fact_aliases[cube.name] = alias
+        sub = exp.Select()
+        src = env.wrap_for_tenancy(
+            cube, env.strategy.emit_source(cube, env.catalog, env.resolve_in_ctx)
+        )
+        sub = sub.from_(src, copy=False)
+        sub = sub.select(exp.alias_(env.parse(fa.key_sql), _SYM_KEY, copy=False), copy=False)
+        for m, col in measures_by_fact.get(cube.name, []):
+            # Mask inside the subquery so a masked measure emits its mask
+            # constant per group, never the real aggregate.
+            expr = env.masked_field_expr(m, env.build_measure_expr(cube, m), col)
+            sub = sub.select(exp.alias_(expr, col, copy=False), copy=False)
+        where_terms: list[exp.Expression] = []
+        if cube.base_predicate and cube.dialect is not Dialect.META:
+            where_terms.append(env.parse(cube.base_predicate))
+        for f, fld in fact_filters.get(cube.name, []):
+            where_terms.append(env.filter_term(f, fld))
+        if where_terms:
+            sub = sub.where(*where_terms, copy=False)
+        sub = sub.group_by(exp.column(_SYM_KEY), copy=False)
+        fact_selects.append((alias, sub))
+
+    # Outer: FROM f0 FULL OUTER JOIN f1 ON f1.key = COALESCE(prior keys) ...
+    outer = exp.Select()
+    first_alias, first_sel = fact_selects[0]
+    outer = outer.from_(
+        exp.Subquery(this=first_sel, alias=exp.TableAlias(this=exp.to_identifier(first_alias))),
+        copy=False,
+    )
+    prior_aliases = [first_alias]
+    for alias, sel in fact_selects[1:]:
+        outer = outer.join(
+            exp.Subquery(this=sel, alias=exp.TableAlias(this=exp.to_identifier(alias))),
+            on=exp.EQ(
+                this=exp.column(_SYM_KEY, table=alias),
+                expression=_coalesce_keys(prior_aliases, _SYM_KEY),
+            ),
+            join_type="full outer",
+            copy=False,
+        )
+        prior_aliases.append(alias)
+
+    # Join the bridge on bridge_key = COALESCE(all fact keys).
+    bridge_src = env.wrap_for_tenancy(
+        sym.bridge, env.strategy.emit_source(sym.bridge, env.catalog, env.resolve_in_ctx)
+    )
+    outer = outer.join(
+        bridge_src,
+        on=exp.EQ(
+            this=env.parse(sym.bridge_key_sql),
+            expression=_coalesce_keys([a for a, _ in fact_selects], _SYM_KEY),
+        ),
+        join_type="inner",
+        copy=False,
+    )
+
+    # Projection: bridge dimensions, then measures (env column order).
+    columns: list[str] = []
+    for (_cube, d), col in zip(env.dim_fields, env.dim_col_names, strict=True):
+        expr = env.masked_field_expr(d, env.parse(d.sql), col)
+        outer = outer.select(exp.alias_(expr, col, copy=False), copy=False)
+        columns.append(col)
+    for (cube, _m), col in zip(env.measure_fields, env.measure_col_names, strict=True):
+        outer = outer.select(
+            exp.alias_(exp.column(col, table=fact_aliases[cube.name]), col, copy=False),
+            copy=False,
+        )
+        columns.append(col)
+    if not columns:
+        raise CompileError("Compiled query has no SELECT projections.")
+
+    # Bridge-cube predicates → outer WHERE.
+    outer_where: list[exp.Expression] = []
+    if sym.bridge.base_predicate and sym.bridge.dialect is not Dialect.META:
+        outer_where.append(env.parse(sym.bridge.base_predicate))
+    for f, fld in bridge_filters:
+        outer_where.append(env.filter_term(f, fld))
+    if outer_where:
+        outer = outer.where(*outer_where, copy=False)
+
+    # ORDER BY references an output column (the detector forbids the
+    # shapes that would need an unprojected expression).
+    qualified_to_output: dict[str, str] = {}
+    for (cube, d), col in zip(env.dim_fields, env.dim_col_names, strict=True):
+        qualified_to_output[f"{cube.name}.{d.name}"] = col
+    for (cube, m), col in zip(env.measure_fields, env.measure_col_names, strict=True):
+        qualified_to_output[f"{cube.name}.{m.name}"] = col
+    for ref, direction in env.plan.order.keys:
+        if ref in qualified_to_output:
+            target = qualified_to_output[ref]
+        elif ref in columns:
+            target = ref
+        else:
+            raise CompileError(
+                f"ORDER BY {ref!r}: in a multi-fact symmetric-aggregation "
+                f"query, order keys must reference an output column "
+                f"({columns})."
+            )
+        outer = outer.order_by(
+            exp.Ordered(this=exp.column(target), desc=(direction == "desc")), copy=False
+        )
+
+    if env.plan.limit.limit is not None:
+        outer = outer.limit(int(env.plan.limit.limit), copy=False)
+    if env.plan.limit.offset is not None and env.plan.limit.offset > 0:
+        outer = outer.offset(int(env.plan.limit.offset), copy=False)
+
+    outer = _apply_with_clause(
+        outer, _collect_hoisted_ctes(env.touched, env.resolve_in_ctx), env.dialect
+    )
+    sql = outer.sql(dialect=env.sqlglot_dialect, pretty=False, normalize_functions=False)
+    cm = _build_column_meta(
+        columns,
+        env.dim_fields,
+        env.dim_col_names,
+        env.measure_fields,
+        env.measure_col_names,
+        None,
+        None,
+        is_compare=False,
+    )
+    cm = _apply_mask_metadata(cm, env)
+    return CompiledQuery(
+        dialect=env.dialect,
+        sql=sql,
+        params=env.params,
+        columns=columns,
         column_meta=cm,
         touched_cube_names=[c.name for c in env.touched],
         derived_sources=_collect_derived_sources(env.touched, env.resolve_in_ctx),
