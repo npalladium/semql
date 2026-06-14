@@ -170,6 +170,69 @@ print(build_planner_prompt_fragment(catalog.as_dict(), viewer=viewer))
 
 Catalog cubes the viewer can't see vanish from the rendered prompt.
 
+## Minimal example: MCP server
+
+Wrap a catalog in a stdio MCP server so any MCP client (Claude Code,
+Cursor, etc.) can call `query_semantic`, `validate`, `explain`, and the
+auto-generated `query_<cube>` tools.
+
+```python
+from semql import Dialect, Catalog, Cube, Dimension, Measure
+from semql_mcp import MCPServer
+
+catalog = Catalog([
+    Cube(
+        name="orders",
+        dialect=Dialect.POSTGRES,
+        table="orders",
+        alias="o",
+        measures=[Measure(name="revenue", sql="{o}.amount", agg="sum", unit="currency")],
+        dimensions=[Dimension(name="region", sql="{o}.region", type="string")],
+    ),
+])
+
+server = MCPServer(catalog)
+server.run(transport="stdio")
+```
+
+For exec mode, pass an `executor: (sql, params) -> list[dict]` and a
+`query_execute` tool registers alongside the compile-only ones.
+
+## Minimal example: Pydantic text-to-SQL chatbot agent
+
+Pair prompt-fragment builders with typed Pydantic outputs. The
+generator's `QueryPlan` contains `SemanticQuery` objects you feed
+straight into `Catalog.compile`.
+
+```python
+from pydantic_ai import Agent
+from semql import Catalog
+from semql.plan import QueryPlan
+from semql_prompt import build_query_generator_prompt_fragment
+
+generator = Agent(
+    model="openai:gpt-4o",
+    system_prompt=build_query_generator_prompt_fragment(catalog.as_dict()),
+    result_type=QueryPlan,
+)
+
+def answer(question: str, catalog: Catalog, run_sql) -> str:
+    plan: QueryPlan = generator.run_sync(question).data
+    if not plan.steps:
+        return "I couldn't map that to the catalog."
+    head = plan.steps[0]
+    compiled = catalog.compile(head.query)
+    rows = run_sql(compiled.sql, compiled.params)  # your DB driver
+    return f"{head.label or 'Result'}: {rows}"
+```
+
+The four prompt-fragment builders (`build_router_prompt_fragment`,
+`build_query_generator_prompt_fragment`, `build_presenter_prompt_fragment`,
+`build_drilldown_prompt_fragment`) pair one-to-one with the four output
+models in `semql.plan` (`RouterDecision`, `QueryPlan`, `Presentation`,
+`DrilldownSuggestions`). `demos/pipeline_demo.py` wires the full
+Router → Generator → Compile → Presenter → Drilldown chain.
+
 ## Skills
 
 Two skills ship in the repo, both following the
@@ -184,12 +247,19 @@ markdown body):
   doc (or directly).
 
 The skills work across any agent that consumes the vercel-labs
-skill format — Claude Code, Codex CLI, Cursor, Gemini CLI, Copilot,
-and others. Use the vercel-labs CLI to install them into your
-agent's expected directory:
+skill format — Claude Code, Codex CLI, Cursor, Gemini CLI, GitHub
+Copilot, and others. Use the [vercel-labs CLI](https://github.com/vercel-labs/skills)
+to install them into your agent's expected directory:
 
 ```sh
-npx skills install <agent-name>
+# install both skills into Claude Code
+npx skills add npalladium/semql -a claude-code
+
+# install into multiple agents at once
+npx skills add npalladium/semql -a claude-code -a codex -a cursor
+
+# install a single skill, globally
+npx skills add npalladium/semql -g -a claude-code --skill semql-cube
 ```
 
 The skill bodies are deliberately tool-agnostic: they say *what* to
