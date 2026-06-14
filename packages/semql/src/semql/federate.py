@@ -1824,6 +1824,13 @@ def compile_federated_query(
     scope_fns: dict[str, ScopeFn] | None = None,
     mode: FederationMode = "distributive",
 ) -> FederatedPlan:
+    if q.semi_joins:
+        raise FederationError(
+            "Query carries semi_joins; a semi-join is staged (run the inner query, "
+            "ship its values across the backend boundary, then filter the outer) and "
+            "is not a single federated plan. Use compile_semi_join_query.",
+            reason="semi_join_needs_staged_compile",
+        )
     if q.compare is not None:
         raise FederationError(
             "Federated compare-mode is not supported in v1.",

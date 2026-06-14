@@ -164,6 +164,11 @@ from semql.rows import (
     non_portable_entities,
 )
 from semql.safe import is_read_only_statement
+from semql.semijoin import (
+    SemiJoinBinding,
+    SemiJoinPlan,
+    compile_semi_join_query,
+)
 from semql.spec import (
     BoolExpr,
     CompareWindow,
@@ -174,6 +179,7 @@ from semql.spec import (
     SavedQuery,
     SemanticQuery,
     SemanticQueryDefaults,
+    SemiJoin,
     TimeWindow,
 )
 from semql.units import (
@@ -308,6 +314,10 @@ __all__ = [
     "StabilityLiteral",
     "SemanticQuery",
     "SemanticQueryDefaults",
+    "SemiJoin",
+    "SemiJoinBinding",
+    "SemiJoinPlan",
+    "compile_semi_join_query",
     "PhysicalTable",
     "Provenance",
     "RawSQL",

@@ -29,6 +29,7 @@ from semql_engine.rows import (
     RowCapableAdapter,
     execute_entity,
 )
+from semql_engine.semijoin import run_semi_join
 
 __all__ = [
     "Adapter",
@@ -50,6 +51,7 @@ __all__ = [
     "MergeEngine",
     "RowCapableAdapter",
     "execute_entity",
+    "run_semi_join",
     "to_async_adapter",
     "to_async_merge_engine",
 ]

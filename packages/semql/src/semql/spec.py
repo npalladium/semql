@@ -289,6 +289,65 @@ class InlineDerived(BaseModel):
         return self
 
 
+class SemiJoin(BaseModel):
+    """Cross-backend semi-join: restrict an outer dimension to the value
+    set produced by an inner query, shipped as a literal value list — never
+    a cross-backend join.
+
+    The inner ``source`` runs first on its own backend(s); its ``select``
+    column is projected to a de-duplicated list and spliced into the outer
+    query as an ``in`` / ``not_in`` ``Filter`` on ``dimension``. This is the
+    answer to "metric X (backend A) restricted to the entities matching
+    condition Y (backend B)" without forcing a federated join.
+
+    AND-composed with the outer query's ``filters`` / ``where``. v1 is
+    AND-only: a semi-join cannot be OR'd or NOT'd against other predicates
+    (use ``op='not_in'`` for negation). The ``source`` may itself span
+    backends, but must not contain its own ``semi_joins`` (no nesting in v1).
+
+    The outer ``dimension`` and the inner ``select`` dimension must have
+    compatible declared types — same coercion rule as a cross-backend bridge
+    join (opt in via ``Dimension.coerce_to``). Otherwise the compiler refuses
+    rather than silently coercing the value list.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    dimension: str = Field(
+        description="Qualified outer dimension to constrain, e.g. 'activity.employee_id'.",
+    )
+    op: Literal["in", "not_in"] = Field(
+        default="in",
+        description="Membership test of the outer dimension against the inner value list.",
+    )
+    select: str = Field(
+        description="Qualified inner dimension whose values form the list, e.g. 'employees.id'.",
+    )
+    source: SemanticQuery = Field(
+        description="Inner query producing the value list; must project ``select`` as a dimension.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> SemiJoin:
+        if "." not in self.dimension:
+            raise ValueError(
+                f"SemiJoin.dimension must be a qualified 'cube.field' ref; got {self.dimension!r}."
+            )
+        if "." not in self.select:
+            raise ValueError(
+                f"SemiJoin.select must be a qualified 'cube.field' ref; got {self.select!r}."
+            )
+        if self.select not in self.source.dimensions:
+            raise ValueError(
+                f"SemiJoin.select {self.select!r} must be one of the inner query's "
+                f"dimensions; got {self.source.dimensions!r}."
+            )
+        if self.source.semi_joins:
+            raise ValueError(
+                "SemiJoin.source must not itself contain semi_joins (v1 supports no nesting)."
+            )
+        return self
+
+
 class SemanticQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
     measures: list[str] = Field(
@@ -357,6 +416,13 @@ class SemanticQuery(BaseModel):
         default_factory=lambda: list[InlineDerived](),
         description=(
             "Ad-hoc derived measures (ratio/sum/diff) composed inline from catalog measures."
+        ),
+    )
+    semi_joins: list[SemiJoin] = Field(
+        default_factory=lambda: list[SemiJoin](),
+        description=(
+            "Cross-backend semi-joins: restrict a dimension to the value set of an inner "
+            "query, shipped as a value list (no join). AND-composed with filters/where."
         ),
     )
     left_joins: list[str] = Field(
@@ -478,6 +544,11 @@ class SavedQuery(BaseModel):
         return self
 
 
+# ``SemiJoin.source`` and ``SemanticQuery.semi_joins`` are mutually
+# recursive; rebuild the forward ref now that both classes exist.
+SemiJoin.model_rebuild()
+
+
 class SemanticQueryDefaults(BaseModel):
     """Declarative compile defaults applied before compile hooks.
 
@@ -534,6 +605,7 @@ __all__ = [
     "SavedQuery",
     "SemanticQuery",
     "SemanticQueryDefaults",
+    "SemiJoin",
     "TimeWindow",
     "_apply_query_defaults",
 ]
