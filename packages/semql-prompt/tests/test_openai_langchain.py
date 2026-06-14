@@ -122,6 +122,24 @@ def test_to_openai_function_parameters_is_json_schema() -> None:
     assert "properties" in params or "type" in params
 
 
+def test_to_openai_function_parameters_object_rooted_despite_recursion() -> None:
+    """``SemanticQuery`` is recursive (``semi_joins[].source`` is itself a
+    ``SemanticQuery``), so Pydantic emits a root ``$ref``. The projection must
+    flatten it to an object-rooted schema while keeping the recursive
+    ``$defs`` so the self-reference still resolves — otherwise OpenAI /
+    Bedrock tool-calling rejects the schema."""
+    from semql_prompt import to_openai_function
+
+    params = to_openai_function(_cube())["function"]["parameters"]
+    assert params.get("type") == "object"
+    assert "$ref" not in params  # root ref flattened away
+    assert "semi_joins" in params["properties"]
+    # The recursion target survives, and the inner source still refs it.
+    assert "SemanticQuery" in params["$defs"]
+    source = params["$defs"]["SemiJoin"]["properties"]["source"]
+    assert source["$ref"] == "#/$defs/SemanticQuery"
+
+
 def test_to_openai_function_parameters_no_blank_descriptions() -> None:
     """All properties in the parameters schema must have a non-empty description."""
     from semql_prompt import to_openai_function

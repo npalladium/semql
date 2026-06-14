@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import BaseModel, ValidationError
-from semql.spec import CompareWindow, Filter, SemanticQuery, TimeWindow
+from semql.spec import CompareWindow, Filter, SemanticQuery, SemiJoin, TimeWindow
 
 # ---------------------------------------------------------------------------
 # Value-object invariants: every spec type is frozen.
@@ -266,6 +266,77 @@ def test_compare_window_explicit_with_range() -> None:
 def test_compare_window_rejects_unknown_mode() -> None:
     with pytest.raises(ValidationError):
         CompareWindow(mode="rolling")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# SemiJoin — cross-backend value-list semi-join node
+# ---------------------------------------------------------------------------
+
+
+def _sales_subquery() -> SemanticQuery:
+    return SemanticQuery(
+        dimensions=["employees.id"],
+        filters=[Filter(dimension="employees.dept", op="eq", values=["Sales"])],
+    )
+
+
+def test_semijoin_defaults_to_in() -> None:
+    sj = SemiJoin(dimension="activity.employee_id", select="employees.id", source=_sales_subquery())
+    assert sj.op == "in"
+
+
+def test_semijoin_is_frozen() -> None:
+    sj = SemiJoin(dimension="activity.employee_id", select="employees.id", source=_sales_subquery())
+    with pytest.raises(ValidationError):
+        sj.op = "not_in"
+
+
+def test_semijoin_requires_qualified_dimension() -> None:
+    with pytest.raises(ValueError, match="dimension must be a qualified"):
+        SemiJoin(dimension="employee_id", select="employees.id", source=_sales_subquery())
+
+
+def test_semijoin_requires_qualified_select() -> None:
+    with pytest.raises(ValueError, match="select must be a qualified"):
+        SemiJoin(dimension="activity.employee_id", select="id", source=_sales_subquery())
+
+
+def test_semijoin_select_must_be_projected_by_source() -> None:
+    with pytest.raises(ValueError, match="must be one of the inner query's dimensions"):
+        SemiJoin(
+            dimension="activity.employee_id",
+            select="employees.id",
+            source=SemanticQuery(dimensions=["employees.name"]),
+        )
+
+
+def test_semijoin_rejects_nested_semi_joins() -> None:
+    inner = SemanticQuery(
+        dimensions=["employees.id"],
+        semi_joins=[
+            SemiJoin(
+                dimension="employees.id",
+                select="teams.lead_id",
+                source=SemanticQuery(dimensions=["teams.lead_id"]),
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="must not itself contain semi_joins"):
+        SemiJoin(dimension="activity.employee_id", select="employees.id", source=inner)
+
+
+def test_semijoin_only_in_or_not_in() -> None:
+    with pytest.raises(ValidationError):
+        SemiJoin(
+            dimension="activity.employee_id",
+            op="eq",  # type: ignore[arg-type]
+            select="employees.id",
+            source=_sales_subquery(),
+        )
+
+
+def test_semanticquery_semi_joins_default_empty() -> None:
+    assert SemanticQuery(measures=["activity.active_secs"]).semi_joins == []
 
 
 # ---------------------------------------------------------------------------

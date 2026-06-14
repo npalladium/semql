@@ -68,6 +68,7 @@ from semql.dialect import dialect_for as sqlglot_dialect_for
 from semql.errors import (
     CompileError,
     CrossDialectError,
+    FederationError,
     FilterTypeError,
     JoinPathError,
     PhaseDeferredError,
@@ -3223,6 +3224,13 @@ def compile_query(
         function with ``(cube, viewer)`` and AND-injects the returned
         ``ScopePredicate`` inside the cube's isolation subquery.
     """
+    if q.semi_joins:
+        raise FederationError(
+            "Query carries semi_joins; a semi-join is staged execution (run the "
+            "inner query, ship its values, then filter the outer) and cannot be "
+            "compiled to a single CompiledQuery. Use compile_semi_join_query.",
+            reason="semi_join_needs_staged_compile",
+        )
     env = _CompileEnv(
         q,
         catalog,
