@@ -24,71 +24,18 @@ keeps that from regressing into a silently-rejected schema.
 
 from __future__ import annotations
 
-import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+# Re-exported from the shared schema helper so the Bedrock adapter and the
+# OpenAI / LangChain projections flatten root ``$ref``\\ s through one
+# implementation. Kept importable here for back-compat (``__init__`` and
+# callers import ``flatten_root_ref`` from this module).
+from semql_prompt._schema import flatten_root_ref
 from semql_prompt.catalog_tools import to_openai_tools
 
 if TYPE_CHECKING:
     from semql import Catalog
     from semql.model import AuthContext
-
-
-def flatten_root_ref(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``schema`` whose top level is an object schema.
-
-    If the root is a ``$ref`` into ``$defs`` (Pydantic's output for a recursive
-    root model), splice the referenced definition's body up to the top level —
-    keeping ``$defs`` intact so internal/recursive ``$ref``\\ s still resolve.
-    Sibling keywords sitting next to the root ``$ref`` (``description``,
-    ``default``, …) are preserved and win over the spliced body. If the root is
-    already an object schema, it is returned unchanged (deep-copied).
-
-    Raises:
-        ValueError: if the schema cannot be made object-rooted — e.g. a
-            ``RootModel`` over a union or scalar whose top level is ``anyOf`` or
-            a non-object ``type``. Bedrock requires an object root, so such a
-            model cannot be a Converse tool input; fail loudly rather than ship
-            a schema the API will reject at request time.
-    """
-    schema = copy.deepcopy(schema)
-    ref = schema.get("$ref")
-    if ref is not None:
-        defs = schema.get("$defs")
-        target = _resolve_local_ref(ref, schema)
-        # Keywords beside the root $ref override the spliced body (JSON Schema
-        # 2020-12 allows $ref siblings; Pydantic uses them for default/title).
-        siblings = {k: v for k, v in schema.items() if k not in ("$ref", "$defs")}
-        schema = {**target, **siblings}
-        if defs is not None:
-            # Retain $defs untouched — the spliced body (and any recursive
-            # node) still references entries inside it.
-            schema["$defs"] = defs
-    if schema.get("type") != "object":
-        raise ValueError(
-            "flatten_root_ref: schema is not object-rooted after flattening "
-            f"(top-level type={schema.get('type')!r}, keys={sorted(schema)}). "
-            "Bedrock Converse requires a tool inputSchema whose root is "
-            "type='object'; a RootModel over a union or scalar cannot be a "
-            "Converse tool input."
-        )
-    return schema
-
-
-def _resolve_local_ref(ref: str, root: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a local JSON-pointer ``$ref`` (e.g. ``#/$defs/Name``) in ``root``."""
-    if not ref.startswith("#/"):
-        raise ValueError(f"flatten_root_ref: only local '#/...' refs are supported, got {ref!r}.")
-    node: Any = root
-    for raw in ref[2:].split("/"):
-        token = raw.replace("~1", "/").replace("~0", "~")  # RFC 6901 unescape
-        try:
-            node = node[token]
-        except (KeyError, TypeError):
-            raise ValueError(f"flatten_root_ref: cannot resolve ref {ref!r}.") from None
-    if not isinstance(node, dict):
-        raise ValueError(f"flatten_root_ref: ref {ref!r} does not point at a schema object.")
-    return cast("dict[str, Any]", node)
 
 
 def to_bedrock_converse_tools(
@@ -123,3 +70,8 @@ def to_bedrock_converse_tools(
             }
         )
     return tools
+
+
+# ``flatten_root_ref`` is re-exported (it now lives in ``_schema``); name it
+# here so importing it from this module is an explicit public re-export.
+__all__ = ["flatten_root_ref", "to_bedrock_converse_tools"]

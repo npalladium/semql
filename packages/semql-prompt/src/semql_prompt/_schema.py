@@ -1,64 +1,86 @@
 """JSON-Schema post-processing shared by the tool-description projections.
 
-Pydantic emits a *root* ``$ref`` when the root model is recursive — which
+Pydantic emits a *root* ``$ref`` whenever the root model is recursive — which
 ``SemanticQuery`` became once ``semi_joins[].source`` referenced
-``SemanticQuery`` itself. A root ``$ref`` is not an object-rooted schema, and
-OpenAI / Anthropic / Bedrock tool-calling all expect
-``{"type": "object", "properties": {...}}`` at the top.
+``SemanticQuery`` itself (and which a self-referential :class:`BoolExpr`
+exported as a tool root would also produce). A bare root ``$ref`` is not an
+object-rooted schema, and OpenAI / Anthropic / Bedrock tool-calling all expect
+``{"type": "object", "properties": {...}}`` at the top. Bedrock Converse in
+particular rejects a root ``$ref`` on every model family (verified against the
+live API, 2026-06).
 
-:func:`flatten_root_ref` splices the referenced definition up to the root
-while keeping ``$defs`` and every *internal* (recursive) ``$ref`` intact, so
-the self-reference still resolves. It is a no-op on an already object-rooted
-schema.
+:func:`flatten_root_ref` splices the referenced definition up to the root while
+keeping ``$defs`` and every *internal* (recursive) ``$ref`` intact, so the
+self-reference still resolves. Internal refs, ``$defs``, and ``prefixItems``
+tuples are left untouched — only the root is rewritten. It is a no-op (a deep
+copy) on an already object-rooted schema, and raises if the schema cannot be
+made object-rooted (a ``RootModel`` over a union or scalar), since such a model
+cannot be a tool input.
+
+This is the single source of truth for root-``$ref`` flattening; the Bedrock
+adapter re-exports it.
 """
 
 from __future__ import annotations
 
+import copy
 from typing import Any, cast
 
 
-def _resolve_local_ref(schema: dict[str, Any], ref: str) -> dict[str, Any]:
-    """Resolve a local JSON-pointer ``$ref`` (RFC 6901) against ``schema``."""
-    if not ref.startswith("#/"):
-        raise ValueError(f"Only local '#/' JSON-pointer refs are supported; got {ref!r}.")
-    node: Any = schema
-    for raw in ref[2:].split("/"):
-        token = raw.replace("~1", "/").replace("~0", "~")
-        if not isinstance(node, dict) or token not in node:
-            raise ValueError(f"Cannot resolve $ref {ref!r}: missing segment {token!r}.")
-        node = cast("dict[str, Any]", node)[token]
-    if not isinstance(node, dict):
-        raise ValueError(f"$ref {ref!r} does not resolve to a schema object.")
-    return cast("dict[str, Any]", node)
-
-
 def flatten_root_ref(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return ``schema`` with a root ``$ref`` spliced inline to the top level.
+    """Return a copy of ``schema`` whose top level is an object schema.
 
-    No-ops when the root is already object-rooted (no top-level ``$ref``).
-    Keeps ``$defs`` so internal/recursive refs still resolve; any sibling keys
-    alongside the root ``$ref`` take precedence over the spliced definition.
-    Raises ``ValueError`` if the root ``$ref`` resolves to a non-object schema.
+    If the root is a ``$ref`` into ``$defs`` (Pydantic's output for a recursive
+    root model), splice the referenced definition's body up to the top level —
+    keeping ``$defs`` intact so internal/recursive ``$ref``\\ s still resolve.
+    Sibling keywords sitting next to the root ``$ref`` (``description``,
+    ``default``, …) are preserved and win over the spliced body. If the root is
+    already an object schema, it is returned unchanged (deep-copied).
+
+    Raises:
+        ValueError: if the schema cannot be made object-rooted — e.g. a
+            ``RootModel`` over a union or scalar whose top level is ``anyOf`` or
+            a non-object ``type``. Fail loudly rather than ship a schema the
+            tool-calling API will reject at request time.
     """
-    if "$ref" not in schema:
-        return schema
-    ref = schema["$ref"]
-    if not isinstance(ref, str):
-        raise ValueError(f"Root $ref must be a string; got {ref!r}.")
-    target = _resolve_local_ref(schema, ref)
-    if target.get("type") != "object":
+    schema = copy.deepcopy(schema)
+    ref = schema.get("$ref")
+    if ref is not None:
+        defs = schema.get("$defs")
+        target = _resolve_local_ref(ref, schema)
+        # Keywords beside the root $ref override the spliced body (JSON Schema
+        # 2020-12 allows $ref siblings; Pydantic uses them for default/title).
+        siblings = {k: v for k, v in schema.items() if k not in ("$ref", "$defs")}
+        schema = {**target, **siblings}
+        if defs is not None:
+            # Retain $defs untouched — the spliced body (and any recursive
+            # node) still references entries inside it.
+            schema["$defs"] = defs
+    if schema.get("type") != "object":
         raise ValueError(
-            f"Root $ref {ref!r} resolves to a non-object schema "
-            f"(type={target.get('type')!r}); cannot flatten to an object root."
+            "flatten_root_ref: schema is not object-rooted after flattening "
+            f"(top-level type={schema.get('type')!r}, keys={sorted(schema)}). "
+            "Tool-calling APIs require an inputSchema whose root is "
+            "type='object'; a RootModel over a union or scalar cannot be a "
+            "tool input."
         )
-    flattened: dict[str, Any] = dict(target)
-    if "$defs" in schema:
-        flattened["$defs"] = schema["$defs"]
-    for key, value in schema.items():
-        if key == "$ref":
-            continue
-        flattened[key] = value  # root siblings win over the spliced definition
-    return flattened
+    return schema
+
+
+def _resolve_local_ref(ref: str, root: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a local JSON-pointer ``$ref`` (e.g. ``#/$defs/Name``) in ``root``."""
+    if not ref.startswith("#/"):
+        raise ValueError(f"flatten_root_ref: only local '#/...' refs are supported, got {ref!r}.")
+    node: Any = root
+    for raw in ref[2:].split("/"):
+        token = raw.replace("~1", "/").replace("~0", "~")  # RFC 6901 unescape
+        try:
+            node = node[token]
+        except (KeyError, TypeError):
+            raise ValueError(f"flatten_root_ref: cannot resolve ref {ref!r}.") from None
+    if not isinstance(node, dict):
+        raise ValueError(f"flatten_root_ref: ref {ref!r} does not point at a schema object.")
+    return cast("dict[str, Any]", node)
 
 
 __all__ = ["flatten_root_ref"]
