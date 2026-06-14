@@ -1456,12 +1456,14 @@ from typing import runtime_checkable  # noqa: E402
 
 @runtime_checkable
 class LookupEnricher(_Protocol):
-    """Optional extension for :data:`LookupLoader` callables that support
-    batch ID→label resolution after a query executes.
+    """A batch ID→label resolver assigned to :attr:`Lookup.enricher`.
 
-    Implement this alongside a loader callable when the lookup source is
-    too large to load in full but can efficiently resolve a specific batch
-    of IDs (DB query by PK, cache lookup, REST API batch endpoint).
+    Runs *after* a query executes — never at prompt time — so the
+    resolved IDs (UUIDs, customer keys) are attached to result rows
+    without ever entering the planner prompt. Use it when the source is
+    too large or too sensitive to inline as a vocabulary but can
+    efficiently resolve a specific batch of IDs (DB query by PK, cache
+    lookup, REST API batch endpoint).
 
     ``enrich`` returns a ``{id: label}`` mapping. Missing IDs are filled
     by the caller with the raw ID value — never raises for unknown IDs.
@@ -1485,11 +1487,14 @@ class MultiFieldEnricher(_Protocol):
     label guarantee generalises to "the row carries the whole reference
     record the catalog author wanted shown, not just one label".
 
+    Like :class:`LookupEnricher`, assign it to :attr:`Lookup.enricher`;
+    it runs post-query only and never feeds the prompt.
+
     ``enrich_fields`` returns ``{id: {field_name: value}}``. An id absent
     from the mapping adds no columns for that row (never raises for
     unknown ids); a field absent for a present id is simply omitted.
 
-    A loader may implement this *instead of* or *in addition to*
+    An enricher may implement this *instead of* or *in addition to*
     ``LookupEnricher``; :func:`semql.lookups.enrich_result` prefers the
     multi-field path when both are present."""
 
@@ -1501,11 +1506,14 @@ class MultiFieldEnricher(_Protocol):
 
 
 class Lookup(_HashableModel):
-    """A finite set of valid values for a string dimension.
+    """Two independent jobs for one string dimension: a **vocabulary**
+    the planner sees, and an **enricher** that labels result rows.
 
-    Surfaces dimension values to the planner so "Show me sales in EMEA"
-    binds to a concrete predicate without the LLM having to guess. Two
-    flavours:
+    The two are orthogonal — declare either, or both:
+
+    **Vocabulary** (prompt-time) — surfaces valid values to the planner
+    so "Show me sales in EMEA" binds to a concrete predicate without the
+    LLM having to guess. Two flavours, mutually exclusive:
 
     - **Static**: ``values=("EMEA", "APAC", "NA")``. Values live in the
       catalog.
@@ -1517,9 +1525,21 @@ class Lookup(_HashableModel):
     Beyond it the rendered catalog tells the planner to call a
     ``resolve_<dim>`` tool (or :func:`semql.lookups.resolve`) instead.
 
-    Loaders are an I/O entry point — they live in
-    ``semql_prompt.planner_prompt(...)``, never in ``Catalog.compile(...)``. The
-    compiler stays sans-io."""
+    **Enricher** (post-query) — ``enricher=`` attaches reference fields
+    to result rows *after* the query runs, via :func:`semql.lookups.enrich_result`.
+    It is **never** materialised into the prompt, so a large or sensitive
+    keyspace (UUIDs, customer ids) gets its human label silently in the
+    background without ever leaking ids to the planner. This is the right
+    home for a :func:`semql.lookups.sql_enricher` over a reference table.
+
+    A lookup may be vocabulary-only (small enum the planner filters on),
+    enricher-only (id→label the user sees but the planner never does), or
+    both. ``loader`` and ``enricher`` may be the same object when a source
+    legitimately serves both jobs.
+
+    Loaders/enrichers are an I/O entry point — they fire in
+    ``semql_prompt.planner_prompt(...)`` and at result time, never in
+    ``Catalog.compile(...)``. The compiler stays sans-io."""
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     # Qualified ``cube.dim`` reference. The dimension must exist and
@@ -1532,7 +1552,10 @@ class Lookup(_HashableModel):
     # Middle East & Africa"}`` renders both the canonical id and the label.
     # Loader-backed lookups can return a Mapping to populate this dynamically.
     labels: dict[str, str] | None = None
+    # Vocabulary loader (prompt-time). Mutually exclusive with ``values``.
     loader: LookupLoader | None = None
+    # Post-query enricher. Orthogonal to vocabulary; never feeds the prompt.
+    enricher: LookupEnricher | MultiFieldEnricher | None = None
     max_inline: int = 50
     description: str = ""
 
@@ -1540,10 +1563,12 @@ class Lookup(_HashableModel):
     def _check_source(self) -> Lookup:
         has_values = self.values is not None
         has_loader = self.loader is not None
-        if not has_values and not has_loader:
+        has_enricher = self.enricher is not None
+        if not has_values and not has_loader and not has_enricher:
             raise ValueError(
-                f"Lookup({self.dimension!r}): must declare either "
-                "``values=`` (static) or ``loader=`` (dynamic)."
+                f"Lookup({self.dimension!r}): must declare a vocabulary "
+                "(``values=`` static or ``loader=`` dynamic) and/or an "
+                "``enricher=`` (post-query label attachment)."
             )
         if has_values and has_loader:
             raise ValueError(

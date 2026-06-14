@@ -25,7 +25,7 @@ from difflib import SequenceMatcher
 from typing import Any, Literal
 
 from semql.catalog import Catalog
-from semql.model import Lookup, LookupEnricher, MultiFieldEnricher, ResolutionContext
+from semql.model import Lookup, MultiFieldEnricher, ResolutionContext
 
 # ---------------------------------------------------------------------------
 # Materialization — turn a Lookup into a concrete (values, labels) tuple
@@ -141,7 +141,11 @@ def enrich_result(
 ) -> list[dict[str, object]]:
     """Attach reference fields to each row via the lookup's enricher.
 
-    Two enricher shapes, checked in this order:
+    Reads ``lookup.enricher`` only — the post-query slot. The vocabulary
+    (``values`` / ``loader``) is never touched here, so a lookup's
+    prompt-time vocabulary and its result-time enrichment stay decoupled:
+    an enricher-only lookup attaches labels without ever surfacing ids to
+    the planner. Two enricher shapes, checked in this order:
 
     - :class:`~semql.model.MultiFieldEnricher` (``enrich_fields``) attaches
       *several* columns per id — one ``<dim_name>__<field>`` column per
@@ -152,19 +156,22 @@ def enrich_result(
       ``<dim_name>__label`` column. Missing ids echo the raw id as the
       label.
 
-    A loader implementing neither (or no loader at all) leaves rows
-    unchanged. Rows whose dimension value is ``None`` are always skipped.
-    When a loader implements both protocols the multi-field path wins.
+    A lookup with no ``enricher`` leaves rows unchanged (the model validator
+    guarantees any ``enricher`` satisfies one of the two protocols, so there
+    is no "implements neither" case to handle here). Rows whose dimension
+    value is ``None`` are always skipped. When the enricher implements both
+    protocols the multi-field path wins. Mutates the row dicts in place — the
+    enriched columns are a guaranteed attachment, not an alternative view.
     """
-    loader = lookup.loader
-    if loader is None:
+    enricher = lookup.enricher
+    if enricher is None:
         return rows
     ids = list({str(r[dim_name]) for r in rows if r.get(dim_name) is not None})
     if not ids:
         return rows
 
-    if isinstance(loader, MultiFieldEnricher):
-        field_map = loader.enrich_fields(ids, ctx)
+    if isinstance(enricher, MultiFieldEnricher):
+        field_map = enricher.enrich_fields(ids, ctx)
         for row in rows:
             raw = row.get(dim_name)
             if raw is None:
@@ -176,17 +183,15 @@ def enrich_result(
                 row[f"{dim_name}__{field_name}"] = value
         return rows
 
-    if isinstance(loader, LookupEnricher):
-        mapping = loader.enrich(ids, ctx)
-        label_col = f"{dim_name}__label"
-        for row in rows:
-            raw = row.get(dim_name)
-            if raw is None:
-                continue
-            raw_str = str(raw)
-            row[label_col] = mapping.get(raw_str, raw_str)
-        return rows
-
+    # The only remaining union member is LookupEnricher (single-label path).
+    mapping = enricher.enrich(ids, ctx)
+    label_col = f"{dim_name}__label"
+    for row in rows:
+        raw = row.get(dim_name)
+        if raw is None:
+            continue
+        raw_str = str(raw)
+        row[label_col] = mapping.get(raw_str, raw_str)
     return rows
 
 
@@ -199,7 +204,7 @@ def enrich_all(
 
     For each :class:`~semql.model.Lookup` whose dimension column is present
     in the result, delegates to :func:`enrich_result` (which no-ops when the
-    lookup has no enricher). Saves callers hand-rolling the per-lookup loop:
+    lookup has no ``enricher``). Saves callers hand-rolling the per-lookup loop:
 
         rows = enrich_all(rows, catalog, ctx)
 
@@ -232,33 +237,21 @@ class _SafeFormat(dict):  # type: ignore[type-arg]
 
 @dataclass(frozen=True)
 class _SqlEnricher:
-    """A :class:`~semql.model.MultiFieldEnricher` (and plan-time loader) that
-    reads its values/fields from a reference table via a caller-supplied
-    ``execute``. Built by :func:`sql_enricher`; see it for the contract."""
+    """A :class:`~semql.model.MultiFieldEnricher` that reads its fields from a
+    reference table via a caller-supplied ``execute``. Post-query only — it
+    is not a vocabulary loader and never feeds the prompt. Built by
+    :func:`sql_enricher`; see it for the contract."""
 
     table: str
     key: str
     fields: tuple[str, ...]
     execute: Callable[[str, list[Any]], Sequence[Mapping[str, Any]]]
-    label: str | None = None
     paramstyle: Literal["qmark", "format"] = "qmark"
 
     def _table_for(self, ctx: ResolutionContext | None) -> str:
         if ctx is not None and "{" in self.table:
             return self.table.format_map(_SafeFormat(ctx.context))
         return self.table
-
-    def _label_col(self) -> str:
-        return self.label or (self.fields[0] if self.fields else self.key)
-
-    def __call__(self, ctx: ResolutionContext) -> dict[str, str]:
-        # Plan-time values: ``{key: label}`` so the planner sees both the
-        # canonical id and a human label. ``max_inline`` on the Lookup caps
-        # how many reach the prompt.
-        label = self._label_col()
-        sql = f"SELECT {self.key}, {label} FROM {self._table_for(ctx)}"  # noqa: S608
-        rows = self.execute(sql, [])
-        return {str(r[self.key]): str(r[label]) for r in rows}
 
     def enrich_fields(self, ids: list[str], ctx: ResolutionContext) -> dict[str, dict[str, str]]:
         if not ids:
@@ -281,17 +274,18 @@ def sql_enricher(
     key: str,
     fields: Sequence[str],
     execute: Callable[[str, list[Any]], Sequence[Mapping[str, Any]]],
-    label: str | None = None,
     paramstyle: Literal["qmark", "format"] = "qmark",
 ) -> _SqlEnricher:
-    """Build a multi-field enricher for the common "reference table" case
-    without hand-writing a class.
+    """Build a post-query multi-field enricher for the common "reference
+    table" case without hand-writing a class.
 
-    The enricher both surfaces plan-time values and enriches result rows::
+    The enricher attaches reference columns to result rows *after* the query
+    runs. It is **not** a vocabulary loader — assign it to ``enricher=``, and
+    the reference table's ids never reach the planner prompt::
 
         Lookup(
             dimension="orders.region_id",
-            loader=sql_enricher(
+            enricher=sql_enricher(
                 table="{schema}.regions", key="id",
                 fields=["name", "manager", "currency"],
                 execute=db.execute,        # (sql, params) -> list[dict]
@@ -306,8 +300,7 @@ def sql_enricher(
       ``ctx.context`` per request (multi-tenant); unknown keys stay literal.
     - ``execute(sql, params)`` is your DB driver returning a list of row
       mappings — the only I/O, kept at the edge so the catalog stays sans-io.
-    - ``label`` is the plan-time display column (defaults to the first
-      field). ``paramstyle`` picks the placeholder: ``"qmark"`` (``?``, the
+    - ``paramstyle`` picks the placeholder: ``"qmark"`` (``?``, the
       default — sqlite/duckdb) or ``"format"`` (``%s`` — psycopg/mysql).
     """
     return _SqlEnricher(
@@ -315,7 +308,6 @@ def sql_enricher(
         key=key,
         fields=tuple(fields),
         execute=execute,
-        label=label,
         paramstyle=paramstyle,
     )
 

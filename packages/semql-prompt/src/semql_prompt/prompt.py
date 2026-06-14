@@ -74,6 +74,12 @@ def _render_lookup_line(dim_ref: str, lookup: Lookup, ctx: ResolutionContext | N
     when the lookup contributes nothing (dynamic with no context)."""
     from semql.lookups import materialize  # local import: avoid module cycle at import time
 
+    # Enricher-only lookups carry no prompt vocabulary: they attach reference
+    # columns post-query (enrich_result) and must never surface their keyspace
+    # to the planner. Render nothing.
+    if lookup.values is None and lookup.loader is None:
+        return None
+
     materialized = materialize(lookup, ctx)
     cube_name, dim_name = dim_ref.split(".", 1)
     if materialized is None:

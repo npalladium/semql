@@ -6,11 +6,16 @@ lookups resolve via a ``loader(ResolutionContext)`` at prompt-render
 time. The compiler never fires loaders — they're a presentation-layer
 concern.
 
+A ``Lookup`` also carries an orthogonal ``enricher`` — a post-query
+slot that attaches reference columns to result rows and never feeds the
+prompt (so a large/sensitive keyspace is labelled silently).
+
 Coverage here:
 - Model validators (mutual exclusion of ``values`` / ``loader``,
-  qualified dimension required, max_inline bounds).
+  enricher orthogonal, qualified dimension required, max_inline bounds).
 - Catalog wiring: dimension reference must resolve to a real
   string-typed dimension; duplicates rejected.
+- Enricher decoupling: enricher-only lookups render no prompt line.
 """
 
 from __future__ import annotations
@@ -34,8 +39,8 @@ from semql_prompt import planner_prompt
 # ---------------------------------------------------------------------------
 
 
-def test_lookup_requires_values_or_loader() -> None:
-    with pytest.raises(ValidationError, match=r"(?i)must declare either"):
+def test_lookup_requires_values_loader_or_enricher() -> None:
+    with pytest.raises(ValidationError, match=r"(?i)must declare a vocabulary"):
         Lookup(dimension="orders.region")
 
 
@@ -448,9 +453,9 @@ def test_enrich_result_adds_label_column_for_known_ids() -> None:
         def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
             return {i: f"Name:{i}" for i in ids}
 
-    loader = EnrichingLoader()
-    assert isinstance(loader, LookupEnricher)
-    lk = Lookup(dimension="orders.customer_id", loader=loader)
+    enricher = EnrichingLoader()
+    assert isinstance(enricher, LookupEnricher)
+    lk = Lookup(dimension="orders.customer_id", enricher=enricher)
     rows: list[dict[str, object]] = [
         {"customer_id": "u1", "revenue": 100},
         {"customer_id": "u2", "revenue": 200},
@@ -472,7 +477,7 @@ def test_enrich_result_echoes_raw_id_for_unknown_ids() -> None:
         def enrich(self, ids: list[str], ctx: ResolutionContext) -> dict[str, str]:
             return {}  # nothing known
 
-    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    lk = Lookup(dimension="orders.customer_id", enricher=EnrichingLoader())
     rows: list[dict[str, object]] = [{"customer_id": "u99", "revenue": 5}]
     out = enrich_result(rows, "customer_id", lk, ResolutionContext())
     assert out[0]["customer_id__label"] == "u99"
@@ -493,7 +498,7 @@ def test_enrich_result_skips_none_ids() -> None:
             enriched.append(ids)
             return {}
 
-    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    lk = Lookup(dimension="orders.customer_id", enricher=EnrichingLoader())
     rows: list[dict[str, object]] = [{"customer_id": None, "revenue": 5}]
     out = enrich_result(rows, "customer_id", lk, ResolutionContext())
     # None rows should not contribute an id to the enricher call.
@@ -528,7 +533,7 @@ def test_enrich_result_only_calls_enricher_with_unique_non_null_ids() -> None:
             seen.append(list(ids))
             return {i: f"L:{i}" for i in ids}
 
-    lk = Lookup(dimension="orders.customer_id", loader=EnrichingLoader())
+    lk = Lookup(dimension="orders.customer_id", enricher=EnrichingLoader())
     rows: list[dict[str, object]] = [
         {"customer_id": "u1"},
         {"customer_id": "u1"},  # duplicate
@@ -577,7 +582,7 @@ def test_enrich_result_adds_one_column_per_field() -> None:
             }
             return {i: data[i] for i in ids if i in data}
 
-    lk = Lookup(dimension="orders.region_id", loader=RegionEnricher())
+    lk = Lookup(dimension="orders.region_id", enricher=RegionEnricher())
     rows: list[dict[str, object]] = [
         {"region_id": "r1", "revenue": 100},
         {"region_id": "r2", "revenue": 200},
@@ -606,7 +611,7 @@ def test_enrich_result_multi_field_omits_unknown_ids_and_missing_fields() -> Non
             # r1 known (only "name"); r9 unknown.
             return {"r1": {"name": "EMEA"}} if "r1" in ids else {}
 
-    lk = Lookup(dimension="orders.region_id", loader=PartialEnricher())
+    lk = Lookup(dimension="orders.region_id", enricher=PartialEnricher())
     rows: list[dict[str, object]] = [
         {"region_id": "r1"},
         {"region_id": "r9"},
@@ -634,7 +639,7 @@ def test_enrich_result_prefers_multi_field_when_both_protocols_present() -> None
         ) -> dict[str, dict[str, str]]:
             return {i: {"name": f"name:{i}"} for i in ids}
 
-    lk = Lookup(dimension="orders.region_id", loader=BothEnricher())
+    lk = Lookup(dimension="orders.region_id", enricher=BothEnricher())
     rows: list[dict[str, object]] = [{"region_id": "r1"}]
     out = enrich_result(rows, "region_id", lk, ResolutionContext())
     assert out[0]["region_id__name"] == "name:r1"
@@ -663,7 +668,9 @@ def test_sql_enricher_builds_parameterized_in_query() -> None:
 
     lk = Lookup(
         dimension="orders.region_id",
-        loader=sql_enricher(table="regions", key="id", fields=["name", "manager"], execute=execute),
+        enricher=sql_enricher(
+            table="regions", key="id", fields=["name", "manager"], execute=execute
+        ),
     )
     rows: list[dict[str, object]] = [{"region_id": "r1"}, {"region_id": "r2"}]
     out = enrich_result(rows, "region_id", lk, ResolutionContext())
@@ -711,17 +718,105 @@ def test_sql_enricher_format_paramstyle() -> None:
     assert "IN (%s, %s)" in seen[-1]
 
 
-def test_sql_enricher_call_returns_plan_time_values() -> None:
-    """The loader __call__ returns {id: label} for the planner block."""
+def test_sql_enricher_is_not_a_vocabulary_loader() -> None:
+    """The enricher is post-query only — it is not callable as a vocabulary
+    loader, so its reference table can never be dumped into the prompt."""
     from semql.lookups import sql_enricher
-    from semql.model import ResolutionContext
 
     def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
-        assert "WHERE" not in sql  # plan-time SELECT is unfiltered
-        return [{"id": "r1", "name": "EMEA"}, {"id": "r2", "name": "APAC"}]
+        raise AssertionError("enricher must not fire at vocabulary/prompt time")
 
     enr = sql_enricher(table="regions", key="id", fields=["name"], execute=execute)
-    assert enr(ResolutionContext()) == {"r1": "EMEA", "r2": "APAC"}
+    assert not callable(enr)
+
+
+# ---------------------------------------------------------------------------
+# Enricher / vocabulary decoupling — the enricher never feeds the prompt
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_accepts_enricher_only() -> None:
+    """A lookup may carry only an enricher (no values, no loader) — the
+    canonical id→label case where the planner must never see the keyspace."""
+    from semql.lookups import sql_enricher
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        return []
+
+    lk = Lookup(
+        dimension="orders.customer_id",
+        enricher=sql_enricher(table="users", key="id", fields=["name"], execute=execute),
+    )
+    assert lk.values is None
+    assert lk.loader is None
+    assert lk.enricher is not None
+
+
+def test_lookup_accepts_vocabulary_and_enricher_together() -> None:
+    """``values`` (vocabulary) and ``enricher`` (post-query) are orthogonal."""
+    from semql.lookups import sql_enricher
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        return []
+
+    lk = Lookup(
+        dimension="orders.region",
+        values=("EMEA", "APAC"),
+        enricher=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
+    )
+    assert lk.values == ("EMEA", "APAC")
+    assert lk.enricher is not None
+
+
+def test_enricher_only_lookup_renders_no_prompt_line() -> None:
+    """The headline guarantee: an enricher-only lookup contributes NOTHING
+    to the planner prompt — no ids, no labels, not even a tool hint."""
+    from semql.lookups import sql_enricher
+
+    fired = False
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        nonlocal fired
+        fired = True
+        return [{"id": "u1", "name": "Nikhil"}]
+
+    cat = Catalog(
+        [
+            Cube(
+                name="orders",
+                dialect=Dialect.POSTGRES,
+                table="orders",
+                alias="o",
+                measures=[Measure(name="revenue", sql="{o}.amount", agg="sum")],
+                dimensions=[Dimension(name="customer_id", sql="{o}.customer_id", type="string")],
+            )
+        ],
+        lookups=[
+            Lookup(
+                dimension="orders.customer_id",
+                enricher=sql_enricher(table="users", key="id", fields=["name"], execute=execute),
+            )
+        ],
+    )
+    out = planner_prompt(cat)
+    assert "Lookup" not in out
+    assert "customer_id" in out  # the dimension still appears, just no Lookup line
+    assert not fired  # the enricher never ran at prompt-render time
+
+
+def test_materialize_ignores_enricher() -> None:
+    """``materialize`` reads only the vocabulary (values/loader); an
+    enricher-only lookup materialises to ``None``."""
+    from semql.lookups import materialize, sql_enricher
+
+    def execute(sql: str, params: list[object]) -> list[dict[str, object]]:
+        raise AssertionError("materialize must not touch the enricher")
+
+    lk = Lookup(
+        dimension="orders.customer_id",
+        enricher=sql_enricher(table="users", key="id", fields=["name"], execute=execute),
+    )
+    assert materialize(lk, ResolutionContext()) is None
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +846,7 @@ def test_enrich_all_applies_matching_lookups() -> None:
         lookups=[
             Lookup(
                 dimension="orders.region_id",
-                loader=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
+                enricher=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
             )
         ],
     )
@@ -782,7 +877,7 @@ def test_enrich_all_skips_lookups_not_in_result() -> None:
         lookups=[
             Lookup(
                 dimension="orders.region_id",
-                loader=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
+                enricher=sql_enricher(table="regions", key="id", fields=["name"], execute=execute),
             )
         ],
     )
