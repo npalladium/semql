@@ -1560,6 +1560,19 @@ class _CompileEnv:
         ]
         self.root: Cube = self.cubes_in_from[0]
 
+        # Bridge-cube dialect guard. ``self.dialect`` was picked from the
+        # *referenced* cubes (``self.touched``) above, but the join graph
+        # may have pulled in bridge cubes to connect two referenced cubes
+        # that share no direct edge. If a bridge cube lives on a different
+        # backend, the FROM clause would emit that cube's table in its own
+        # dialect inside this query's SQL (e.g. a Postgres table inside a
+        # ClickHouse query) — invalid SQL that only fails at execution.
+        # ``_pick_single_dialect`` can't catch this: it runs before the
+        # plan exists and never sees the bridge. Re-run the single-backend
+        # gate over the full plan now. Cross-backend queries route through
+        # ``compile_federated_query`` (which splits per backend) instead.
+        _pick_single_dialect(self.cubes_in_from)
+
         # Now that the query's join graph is resolved, refuse additive
         # measures that the joins would fan out (silently inflated SUM /
         # COUNT). Needs the edges, so it runs here rather than in the

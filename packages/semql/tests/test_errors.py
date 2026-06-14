@@ -95,6 +95,61 @@ def test_cross_backend_raises_structured_error(catalog: dict[str, Cube]) -> None
     assert set(err.backends) == {"postgres", "clickhouse"}
 
 
+def _bridge_catalog() -> dict[str, Cube]:
+    """Two same-dialect (ClickHouse) cubes with no direct join, joined
+    only through a different-dialect (Postgres) bridge cube.
+
+    ``app_events`` and ``user_events`` are both ClickHouse and share no
+    edge; the only join path between them runs through ``users``
+    (Postgres). A naive single-backend compile picks ClickHouse from the
+    two *referenced* cubes, then silently pulls the Postgres ``users``
+    table onto the resolved join path — emitting a Postgres table inside
+    ClickHouse SQL that only fails at execution."""
+    app_events = Cube(
+        name="app_events",
+        dialect=Dialect.CLICKHOUSE,
+        table="{schema}.app_stat",
+        alias="ae",
+        measures=[Measure(name="productive_time", sql="{ae}.duration", agg="sum", unit="duration")],
+        dimensions=[Dimension(name="identity_id", sql="{ae}.identity_id", type="string")],
+        joins=[Join(to="users", relationship="many_to_one", on="{ae}.identity_id = {u}.id")],
+    )
+    user_events = Cube(
+        name="user_events",
+        dialect=Dialect.CLICKHOUSE,
+        table="{schema}.app_stat",
+        alias="ue",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="identity_id", sql="{ue}.identity_id", type="string")],
+        joins=[Join(to="users", relationship="many_to_one", on="{ue}.identity_id = {u}.id")],
+    )
+    users = Cube(
+        name="users",
+        dialect=Dialect.POSTGRES,
+        table="{schema}.identity",
+        alias="u",
+        measures=[Measure(name="count", sql="*", agg="count", unit="count")],
+        dimensions=[Dimension(name="id", sql="{u}.id", type="string")],
+    )
+    return {c.name: c for c in (app_events, user_events, users)}
+
+
+def test_join_path_through_foreign_dialect_bridge_raises() -> None:
+    # Both referenced cubes are ClickHouse, so the single-backend dialect
+    # gate (which inspects only the referenced cubes) passes. The join
+    # path between them, however, bridges through the Postgres ``users``
+    # cube. Without the bridge-cube guard this compiles to ClickHouse SQL
+    # containing a Postgres table; with it, compile refuses up front.
+    q = SemanticQuery(
+        measures=["app_events.productive_time"],
+        dimensions=["user_events.identity_id"],
+    )
+    with pytest.raises(CrossDialectError) as exc_info:
+        compile_query(q, _bridge_catalog(), context={"schema": "demo"})
+    err = exc_info.value
+    assert set(err.backends) == {"postgres", "clickhouse"}
+
+
 def test_filter_type_mismatch_raises_filter_type_error(catalog: dict[str, Cube]) -> None:
     # is_paid is bool; pass a string
     q = SemanticQuery(
