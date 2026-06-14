@@ -34,12 +34,20 @@ log/report the drops; we don't silently drop without record.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, Field
 
 # Rough heuristic. Matches OpenAI's "1 token ~ 4 chars of English
 # text" rule of thumb. Good enough for guardrail use; do not rely on
 # this for model-specific BPE.
 _CHARS_PER_TOKEN = 4
+
+# Trim-pass patterns. Compiled once at import rather than per
+# ``apply()`` call — the trim path can run several passes over a large
+# prompt, and re-compiling these on each pass was pure waste.
+_DESCRIPTION_LINE_RE = re.compile(r"^[ \t]*description:[ \t].*$", re.MULTILINE)
+_CUBE_HEADER_RE = re.compile(r"\n### (\w+)\b")
 
 
 def _estimate_tokens(text: str) -> int:
@@ -86,11 +94,8 @@ def _drop_descriptions(text: str) -> tuple[str, int]:
     drop everything after the colon to the end of the line, but
     only inside the catalog block (not inside ``## Glossary`` etc.).
     Returns ``(trimmed, count)``."""
-    import re
-
-    pattern = re.compile(r"^[ \t]*description:[ \t].*$", re.MULTILINE)
-    matches = pattern.findall(text)
-    return pattern.sub("", text), len(matches)
+    matches = _DESCRIPTION_LINE_RE.findall(text)
+    return _DESCRIPTION_LINE_RE.sub("", text), len(matches)
 
 
 def _drop_lowest_priority_cube(text: str) -> tuple[str, str | None]:
@@ -108,10 +113,7 @@ def _drop_lowest_priority_cube(text: str) -> tuple[str, str | None]:
     one the prompt builder appended last, so the rest of the
     ordering is preserved.
     """
-    import re
-
-    pattern = re.compile(r"\n### (\w+)\b")
-    matches = list(pattern.finditer(text))
+    matches = list(_CUBE_HEADER_RE.finditer(text))
     if not matches:
         return text, None
     # Take the last cube block.
