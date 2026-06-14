@@ -315,6 +315,12 @@ class JWKSVerifier:
         self._ttl = ttl
         self._cached_jwks: dict[str, Any] | None = None
         self._cached_at: float = 0.0
+        # kid -> parsed public-key object. Deriving a key from its JWK
+        # (json.dumps + RSAAlgorithm.from_jwk) is deterministic per kid
+        # but non-trivial, and the old code redid it on every verify().
+        # Cleared whenever the JWKS is actually refetched, so a key
+        # rotation can never serve a stale derived key.
+        self._key_cache: dict[str, Any] = {}
 
     def _fetch_jwks(self) -> dict[str, Any]:
         import httpx
@@ -328,21 +334,25 @@ class JWKSVerifier:
         new_jwks: dict[str, Any] = response.json()
         self._cached_jwks = new_jwks
         self._cached_at = now
+        # The JWKS document changed — any derived public keys may now be
+        # stale (rotated kid reusing an old id, rolled key material).
+        self._key_cache = {}
         return new_jwks
 
-    def verify(self, token: str) -> AuthContext:
+    def _public_key_for(self, kid: str) -> object:
+        """Return the parsed public key for ``kid``, deriving it at most
+        once per JWKS document.
+
+        On a cache miss the JWKS is consulted; if the kid still isn't
+        present the document is refetched once (key rotations land
+        between TTL windows) before giving up. The derived key is then
+        memoised until the next refetch clears the cache."""
         import jwt
 
-        try:
-            unverified_header = jwt.get_unverified_header(token)
-        except jwt.DecodeError as exc:
-            raise AuthError("Token header is malformed.", reason="malformed") from exc
-        kid = unverified_header.get("kid")
-        if not kid:
-            raise AuthError(
-                "Token header is missing 'kid' (key id).",
-                reason="missing_kid",
-            )
+        cached_key = self._key_cache.get(kid)
+        if cached_key is not None:
+            return cached_key
+
         jwks = self._fetch_jwks()
         key = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
         if key is None:
@@ -362,6 +372,23 @@ class JWKSVerifier:
         public_key: Any = jwt.algorithms.RSAAlgorithm.from_jwk(  # type: ignore[attr-defined]
             json.dumps(key)
         )
+        self._key_cache[kid] = public_key
+        return public_key
+
+    def verify(self, token: str) -> AuthContext:
+        import jwt
+
+        try:
+            unverified_header = jwt.get_unverified_header(token)
+        except jwt.DecodeError as exc:
+            raise AuthError("Token header is malformed.", reason="malformed") from exc
+        kid = unverified_header.get("kid")
+        if not kid:
+            raise AuthError(
+                "Token header is missing 'kid' (key id).",
+                reason="missing_kid",
+            )
+        public_key = self._public_key_for(kid)
 
         decode_kwargs: dict[str, Any] = {
             "key": public_key,

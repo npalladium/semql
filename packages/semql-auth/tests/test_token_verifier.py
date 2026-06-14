@@ -342,3 +342,84 @@ def test_jwks_verifier_refetches_on_cache_miss() -> None:
     # On cache miss (no matching kid) it clears the cache and refetches —
     # the lambda fires once, returning the rotated JWKS.
     assert call_count["n"] == 1
+
+
+def test_jwks_verifier_caches_public_key_across_verifies() -> None:
+    """The public key for a kid is derived once and reused: a second
+    verify of the same kid is served from the key cache without
+    re-consulting the JWKS."""
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_numbers = private_key.public_key().public_numbers()
+
+    def _b64uint(n: int) -> str:
+        import base64
+
+        byte_length = (n.bit_length() + 7) // 8
+        return base64.urlsafe_b64encode(n.to_bytes(byte_length, "big")).rstrip(b"=").decode("ascii")
+
+    kid = "cache-kid-1"
+    jwks: dict[str, object] = {
+        "keys": [
+            {
+                "kty": "RSA",
+                "kid": kid,
+                "use": "sig",
+                "alg": "RS256",
+                "n": _b64uint(public_numbers.n),
+                "e": _b64uint(public_numbers.e),
+            }
+        ]
+    }
+    token = jwt.encode({"sub": "alice"}, private_pem, algorithm="RS256", headers={"kid": kid})
+
+    fetch_count = {"n": 0}
+
+    def _fetch() -> dict[str, object]:
+        fetch_count["n"] += 1
+        return jwks
+
+    verifier = JWKSVerifier(jwks_url="https://example.invalid/jwks.json")
+    verifier._fetch_jwks = _fetch  # type: ignore[method-assign]
+
+    verifier.verify(token)
+    verifier.verify(token)
+    # First verify derives + caches the key (one fetch); the second is
+    # served from _key_cache and never reaches _fetch_jwks.
+    assert fetch_count["n"] == 1
+    assert kid in verifier._key_cache
+
+
+def test_jwks_verifier_clears_key_cache_on_refetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real JWKS refetch drops every derived public key, so a rotated
+    kid can never be served a stale key (security invariant)."""
+    import httpx
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"keys": []}
+
+    def _fake_get(*args: object, **kwargs: object) -> _FakeResponse:
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+
+    # ttl=0 disables the TTL short-circuit, so _fetch_jwks always does a
+    # real fetch — the path that must invalidate the derived-key cache.
+    verifier = JWKSVerifier(jwks_url="https://example.invalid/jwks.json", ttl=0)
+    sentinel = object()
+    verifier._key_cache["stale-kid"] = sentinel
+
+    verifier._fetch_jwks()
+    assert verifier._key_cache == {}
