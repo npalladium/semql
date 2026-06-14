@@ -40,3 +40,19 @@ Issues = "https://github.com/npalladium/semql/issues"
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.mutmut]
+# Run from this directory: `cd packages/semql && uv run mutmut run`.
+# mutmut copies the package into ./mutants and, per its
+# ``setup_source_paths``, only makes ``mutants/.``|``src``|``source``
+# importable while deleting ``.``|``src``|``source`` from sys.path — so
+# it must run from the package root with a ``src/`` layout. ``src``
+# resolves equal to the editable-install .pth path, so the real package
+# is removed and the mutated copy under ./mutants/src wins on import.
+source_paths = ["src/semql/"]
+# Tests live beside src; mutmut chdir's into ./mutants before pytest, so
+# the selection is ../tests relative to that.
+pytest_add_cli_args_test_selection = ["../tests/"]
+# Clear the repo's coverage addopts (--cov breaks mutmut's in-process
+# pytest); -x stops at the first surviving/failing case per mutant.
+pytest_add_cli_args = ["-o", "addopts=", "-x", "-q", "-p", "no:cacheprovider"]
