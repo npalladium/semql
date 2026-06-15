@@ -48,6 +48,15 @@ Registered when the catalog carries ``SavedQuery`` entries:
   configured) runs it. Documentation comes from
   ``SavedQuery.description``.
 
+Always registered, marked **BETA** (see :data:`semql_mcp.viz.VIZ_BETA_NOTICE`):
+- ``query_visualize(spec, n_rows=0, shape_stats=None, supported_charts=None, context=None)`` —
+  compile a ``SemanticQuery``, run it through the visualiser
+  (optionally executing against the configured executor), and
+  return a :class:`semql.VizDecision` payload the
+  ``ui://semql/chart`` iframe renders. Registered with
+  ``AppConfig(visibility=["app"])`` so only MCP Apps-aware hosts
+  see it; a plain chat client doesn't get the affordance.
+
 Transports: stdio (FastMCP default) plus anything FastMCP supports
 out of the box. Use ``server.run(transport="stdio")`` for a
 CLI-launched process, or pass ``server.mcp`` to a custom transport.
@@ -141,6 +150,7 @@ class MCPServer:
         self._register_lookup_tools()
         self._register_saved_query_tools()
         self._register_entity_tools()
+        self._register_visualization_tools()
 
     def _resolve_viewer(
         self,
@@ -294,6 +304,30 @@ class MCPServer:
                     "column_meta": [asdict(m) for m in compiled.column_meta],
                     "rows": rows,
                 }
+
+    def _register_visualization_tools(self) -> None:
+        """Wire ``query_visualize`` + the ``ui://semql/chart`` iframe.
+
+        Both are registered via :func:`semql_mcp.viz.register_visualization_tools`
+        to keep the MCP Apps integration in one place; the tool
+        advertises ``app=AppConfig(resource_uri=CHART_RESOURCE_URI,
+        visibility=["app"])`` so an MCP Apps-aware host pairs the tool
+        with the iframe and a plain chat client (model-only) doesn't
+        see the affordance.
+
+        Marked **BETA** in the tool description and on the resource —
+        the recommendation logic is stable, but the rendered shape
+        and the per-host protocol details are still settling, so we
+        want consumers to see the lifecycle state at a glance."""
+        from semql_mcp.viz import register_visualization_tools
+
+        register_visualization_tools(
+            self.mcp,
+            self.catalog,
+            self._resolve_viewer,
+            debug=self.debug,
+            executor=self.executor,
+        )
 
     def _register_lookup_tools(self) -> None:
         """Register ``resolve_lookup`` + ``list_lookup_values`` when the

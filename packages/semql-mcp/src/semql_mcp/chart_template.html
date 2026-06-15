@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>semql chart</title>
+  <style>
+    body { font: 13px/1.4 system-ui, -apple-system, sans-serif; margin: 0; padding: 12px; color: #1f2328; background: #fff; }
+    h1 { font-size: 14px; margin: 0 0 8px 0; font-weight: 600; }
+    .meta { color: #656d76; font-size: 11px; margin-bottom: 8px; }
+    .beta { background: #fff8c5; color: #4d3800; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-left: 6px; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #d0d7de; }
+    th { background: #f6f8fa; font-weight: 600; }
+    .empty { color: #656d76; padding: 24px; text-align: center; }
+    .reason { color: #656d76; font-size: 10px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="empty">Waiting for tool output&hellip;</div>
+  </div>
+  <script>
+    // MCP Apps data channel: the host streams the latest tool
+    // result onto ``window.openai.toolOutput`` after the call
+    // completes. Fall back to ``toolResult`` (alternate name
+    // some hosts use) and to a manual postMessage listener
+    // for hosts that don't push the value proactively.
+    function readOutput() {
+      if (typeof window.openai !== 'undefined' && window.openai && window.openai.toolOutput) {
+        return window.openai.toolOutput;
+      }
+      if (typeof window !== 'undefined' && window.toolResult) {
+        return window.toolResult;
+      }
+      return null;
+    }
+    window.addEventListener('message', function(ev) {
+      if (ev && ev.data && (ev.data.toolOutput || ev.data.toolResult)) {
+        window.toolResult = ev.data.toolOutput || ev.data.toolResult;
+        render();
+      }
+    });
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+    }
+    function renderTable(d) {
+      var cols = d.columns || [];
+      var html = '<table><thead><tr>';
+      cols.forEach(function(c){ html += '<th>' + escapeHtml(c.display_name) + '</th>'; });
+      html += '</tr></thead><tbody>';
+      (d.rows || []).forEach(function(row){
+        html += '<tr>';
+        cols.forEach(function(c){
+          var v = row[c.name];
+          html += '<td>' + escapeHtml(v == null ? '' : v) + '</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      return html;
+    }
+    function renderBarOrLine(d, kind) {
+      // ``rows`` is expected alongside the VizDecision in this
+      // iframe (the caller is expected to have run the SQL and
+      // attached the rows to the response). When rows are
+      // missing, we fall back to a table.
+      var rows = d.rows || [];
+      if (!rows.length) return renderTable(d);
+      var yAxes = d.y_axes || [];
+      var w = 600, h = 220, pad = 32;
+      var maxY = 0;
+      rows.forEach(function(r){
+        yAxes.forEach(function(y){
+          var v = Number(r[y]); if (isFinite(v) && v > maxY) maxY = v;
+        });
+      });
+      if (maxY === 0) maxY = 1;
+      var slot = (w - pad*2) / Math.max(rows.length, 1);
+      var barW = Math.max(2, slot * 0.6);
+      var html = '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+(h+8)+'">';
+      // axes
+      html += '<line x1="'+pad+'" y1="'+(h-pad)+'" x2="'+(w-pad)+'" y2="'+(h-pad)+'" stroke="#d0d7de"/>';
+      html += '<line x1="'+pad+'" y1="'+pad+'" x2="'+pad+'" y2="'+(h-pad)+'" stroke="#d0d7de"/>';
+      // bars or polyline
+      if (kind === 'line_chart' || kind === 'area_chart' || kind === 'compare_line_chart') {
+        yAxes.forEach(function(y, yi){
+          var pts = rows.map(function(r, i){
+            var v = Number(r[y]); if (!isFinite(v)) v = 0;
+            var x = pad + slot * i + slot / 2;
+            var yy = h - pad - (v / maxY) * (h - pad*2);
+            return x+','+yy;
+          }).join(' ');
+          var color = ['#0969da','#1a7f37','#bf3989','#9a6700','#cf222e'][yi % 5];
+          html += '<polyline fill="none" stroke="'+color+'" stroke-width="2" points="'+pts+'"/>';
+          if (kind === 'area_chart') {
+            var first = pts.split(' ')[0].split(',');
+            var last = pts.split(' ').slice(-1)[0].split(',');
+            var area = 'M '+first[0]+' '+(h-pad)+' L '+pts.replace(/ /g,' L ')+' L '+last[0]+' '+(h-pad)+' Z';
+            html += '<path d="'+area+'" fill="'+color+'" fill-opacity="0.2"/>';
+          }
+        });
+      } else {
+        yAxes.forEach(function(y, yi){
+          var color = ['#0969da','#1a7f37','#bf3989','#9a6700','#cf222e'][yi % 5];
+          rows.forEach(function(r, i){
+            var v = Number(r[y]); if (!isFinite(v)) v = 0;
+            var x = pad + slot * i + (slot - barW) / 2;
+            var yy = h - pad - (v / maxY) * (h - pad*2);
+            html += '<rect x="'+x+'" y="'+yy+'" width="'+barW+'" height="'+(h-pad-yy)+'" fill="'+color+'"/>';
+          });
+        });
+      }
+      html += '</svg>';
+      return html;
+    }
+    function renderPie(d) {
+      var rows = d.rows || [];
+      if (!rows.length) return renderTable(d);
+      var y = (d.y_axes && d.y_axes[0]);
+      var x = d.x_axis;
+      var total = rows.reduce(function(s,r){ return s + (Number(r[y])||0); }, 0);
+      if (total <= 0) return renderTable(d);
+      var w = 280, h = 200, r = 80, cx = w/2, cy = h/2;
+      var html = '<svg viewBox="0 0 '+w+' '+h+'" width="100%" height="'+(h+8)+'">';
+      var ang = -Math.PI/2;
+      var colors = ['#0969da','#1a7f37','#bf3989','#9a6700','#cf222e','#8250df','#218bff','#0c8a45','#bc4c00','#5e6a72'];
+      rows.forEach(function(row, i){
+        var v = Number(row[y])||0;
+        if (v <= 0) return;
+        var slice = (v/total) * Math.PI*2;
+        var a2 = ang + slice;
+        var large = slice > Math.PI ? 1 : 0;
+        var x1 = cx + r*Math.cos(ang), y1 = cy + r*Math.sin(ang);
+        var x2 = cx + r*Math.cos(a2), y2 = cy + r*Math.sin(a2);
+        var dPath = 'M '+cx+' '+cy+' L '+x1+' '+y1+' A '+r+' '+r+' 0 '+large+' 1 '+x2+' '+y2+' Z';
+        html += '<path d="'+dPath+'" fill="'+colors[i % colors.length]+'"><title>'+escapeHtml(row[x])+': '+v+'</title></path>';
+        ang = a2;
+      });
+      html += '</svg>';
+      return html;
+    }
+    function render() {
+      var d = readOutput();
+      var root = document.getElementById('root');
+      if (!d) { root.innerHTML = '<div class="empty">Waiting for tool output&hellip;</div>'; return; }
+      var ct = d.chart_type || 'data_table';
+      var body = '';
+      if (ct === 'bar_chart') body = renderBarOrLine(d, 'bar_chart');
+      else if (ct === 'line_chart' || ct === 'compare_line_chart') body = renderBarOrLine(d, 'line_chart');
+      else if (ct === 'area_chart') body = renderBarOrLine(d, 'area_chart');
+      else if (ct === 'pie_chart') body = renderPie(d);
+      else body = renderTable(d);
+      var title = d.title ? '<h1>'+escapeHtml(d.title)+'<span class="beta">BETA</span></h1>' : '';
+      var meta = d.chart_type ? '<div class="meta">'+escapeHtml(d.chart_type)+'</div>' : '';
+      var reason = d.reason && d.reason.note ? '<div class="reason">'+escapeHtml(d.reason.note)+'</div>' : '';
+      root.innerHTML = title + meta + body + reason;
+    }
+    render();
+    // Re-render when the host swaps in new tool output.
+    setInterval(render, 500);
+  </script>
+</body>
+</html>

@@ -47,6 +47,8 @@ def test_public_surface_includes_core_types() -> None:
         "decide_visualization",
         "VizDecision",
         "VizColumn",
+        "DecisionReason",
+        "ShapeStats",
         # catalog
         "Catalog",
     }

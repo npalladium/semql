@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import pytest
 from semql.model import Cube, Dialect, Dimension, Join, Measure, TimeDimension
-from semql.spec import SemanticQuery, TimeWindow
+from semql.spec import CompareWindow, SemanticQuery, TimeWindow
 from semql.visualize import (
     BAR_MAX_BARS,
     PIE_MAX_SLICES,
+    DecisionReason,
+    ShapeStats,
     VizColumn,
     VizDecision,
     decide_visualization,
@@ -89,6 +91,7 @@ def _decide(
     *,
     catalog: dict[str, Cube],
     supported_charts: frozenset | None = None,
+    shape_stats: ShapeStats | None = None,
 ) -> VizDecision:
     """Compile the query against the catalog and feed the resulting
     ``CompiledQuery`` bundle to ``decide_visualization``. Tests pass through
@@ -105,6 +108,7 @@ def _decide(
         n_rows=n_rows,
         catalog=catalog,
         supported_charts=supported_charts,
+        shape_stats=shape_stats,
     )
 
 
@@ -121,7 +125,7 @@ def test_single_override_wins_regardless_of_shape() -> None:
         catalog=_catalog(cube),
     )
     assert decision.chart_type == "data_table"
-    assert "default_chart_type" in decision.reason
+    assert "default_chart_type" in decision.reason.note
 
 
 def test_conflicting_overrides_fall_through_to_normal_logic() -> None:
@@ -188,7 +192,7 @@ def test_ungrouped_always_data_table() -> None:
         catalog=_catalog(_orders()),
     )
     assert decision.chart_type == "data_table"
-    assert "ungrouped" in decision.reason
+    assert "ungrouped" in decision.reason.note
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +689,7 @@ def test_supported_charts_falls_back_when_pick_unsupported() -> None:
         supported_charts=frozenset({"bar_chart", "data_table"}),
     )
     assert decision.chart_type == "data_table"
-    assert "unsupported" in decision.reason
+    assert "unsupported" in decision.reason.note
 
 
 def test_supported_charts_respected_when_available() -> None:
@@ -772,3 +776,204 @@ def test_xy_heatmap_for_two_dim_grid() -> None:
     assert decision.x_axis == "Region"
     assert decision.series == "Status"
     assert decision.y_axes == ["Revenue"]
+
+
+# ---------------------------------------------------------------------------
+# Compare queries — the time-series branch would mis-classify as area_chart
+# ---------------------------------------------------------------------------
+
+
+def test_compare_with_time_picks_compare_line_chart() -> None:
+    """A compare query with a time breakdown emits current/prior/delta
+    columns. The cardinality-only branch would call that "more measures"
+    and pick area_chart; compare_line_chart is the explicit shape."""
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            time_dimension=TimeWindow(
+                dimension="orders.created_at",
+                granularity="month",
+                range=("2026-01-01", "2026-04-01"),
+            ),
+            compare=CompareWindow(mode="previous_period"),
+        ),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+    )
+    assert decision.chart_type == "compare_line_chart"
+    assert decision.reason.kind == "compare_current_prior"
+    assert decision.x_axis is not None and "Created At" in decision.x_axis
+    # The y-axes are the synthetic per-measure compare columns the
+    # compiler emitted (current / prior / delta / pct_change).
+    y_names = " | ".join(decision.y_axes)
+    for needle in ("current", "prior", "delta", "% change"):
+        assert needle in y_names, f"missing {needle!r} in y_axes={decision.y_axes}"
+
+
+# Note: the "compare without time" case is unreachable through the real
+# compiler — the compile-time check in ``_validate_compare_shape`` raises
+# before the visualiser runs. The visualiser's defensive branch stays
+# in the code as a future-proofing default in case the validation
+# order ever changes.
+
+
+# ---------------------------------------------------------------------------
+# DecisionReason — typed alternative to the old reason: str
+# ---------------------------------------------------------------------------
+
+
+def test_reason_is_typed_decision_reason_with_kind() -> None:
+    """The decision's reason is a structured value, not a debug string."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+    )
+    assert isinstance(decision.reason, DecisionReason)
+    assert decision.reason.kind == "pie_small"
+    assert "1 dim, 1 measure" in decision.reason.note
+    # Pie is the natural pick — no rejection, alternatives stays empty.
+    assert decision.reason.alternatives == []
+
+
+def test_reason_alternatives_record_rejected_pie() -> None:
+    """When ShapeStats says "negatives" we reject the natural pie and
+    record the rejection in ``alternatives`` for audit surfaces."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+        shape_stats=ShapeStats(has_negatives=True),
+    )
+    assert decision.chart_type == "bar_chart"
+    assert decision.reason.kind == "shape_stats_fallback"
+    assert "pie_chart" in decision.reason.alternatives
+    assert "negatives" in decision.reason.note
+
+
+def test_reason_client_capability_fallback_records_rejected() -> None:
+    """When the renderer can't draw the natural pick, the rejected
+    type is recorded alongside the fallback."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+        supported_charts=frozenset({"bar_chart", "data_table"}),
+    )
+    assert decision.chart_type == "data_table"
+    assert decision.reason.kind == "client_capability_fallback"
+    assert "pie_chart" in decision.reason.alternatives
+
+
+def test_reason_str_round_trip_for_debug_print() -> None:
+    """``str(reason)`` is the human-readable note, so the old
+    ``assert "x" in decision.reason`` pattern still works through the
+    note field for ad-hoc debugging without parsing ``kind``."""
+    decision = _decide(
+        SemanticQuery(dimensions=["orders.region"], ungrouped=True, limit=5),
+        n_rows=5,
+        catalog=_catalog(_orders()),
+    )
+    assert "ungrouped" in str(decision.reason)
+
+
+# ---------------------------------------------------------------------------
+# ShapeStats — post-execute override hook
+# ---------------------------------------------------------------------------
+
+
+def test_shape_stats_has_negatives_downgrades_pie_to_bar() -> None:
+    """A pie of negative values is meaningless — caller-known negatives
+    downgrade the natural pie to a bar."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+        shape_stats=ShapeStats(has_negatives=True),
+    )
+    assert decision.chart_type == "bar_chart"
+    assert decision.reason.kind == "shape_stats_fallback"
+
+
+def test_shape_stats_single_category_falls_to_text_only() -> None:
+    """One distinct category is degenerate for a pie/bar — fall to
+    text_only so the caller surfaces the single value, not a chart."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+        shape_stats=ShapeStats(n_distinct_categories=1),
+    )
+    assert decision.chart_type == "text_only"
+    assert "n_distinct_categories=1" in decision.reason.note
+
+
+def test_shape_stats_sparse_skips_calendar_heatmap() -> None:
+    """A daily series with mostly-empty days shouldn't be a calendar
+    heatmap — caller-known sparsity keeps the line branch."""
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            time_dimension=TimeWindow(
+                dimension="orders.created_at",
+                granularity="day",
+                range=("2026-01-01", "2026-12-31"),
+            ),
+        ),
+        n_rows=200,
+        catalog=_catalog(_orders()),
+        shape_stats=ShapeStats(is_sparse=True),
+    )
+    assert decision.chart_type == "line_chart"
+
+
+def test_shape_stats_none_keeps_cardinality_decision() -> None:
+    """``shape_stats=None`` (the default) is no-op — the cardinality
+    decision stands."""
+    decision = _decide(
+        SemanticQuery(measures=["orders.revenue"], dimensions=["orders.region"]),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+        shape_stats=None,
+    )
+    assert decision.chart_type == "pie_chart"
+
+
+def test_shape_stats_is_flat_helper() -> None:
+    """``ShapeStats.is_flat`` is True when min == max, None when either
+    bound is missing."""
+    assert ShapeStats(measure_min=5.0, measure_max=5.0).is_flat is True
+    assert ShapeStats(measure_min=5.0, measure_max=7.0).is_flat is False
+    assert ShapeStats(measure_min=5.0).is_flat is None
+    assert ShapeStats().is_flat is None
+
+
+# ---------------------------------------------------------------------------
+# Compare-line chart axis handling
+# ---------------------------------------------------------------------------
+
+
+def test_compare_line_chart_x_axis_is_time_axis() -> None:
+    """Compare-line follows the same x-axis rule as line/area: the
+    first non-measure column (the time bucket) is the x axis; all
+    measures (now including _current / _prior / _delta / _pct_change
+    variants) ride on y_axes."""
+    decision = _decide(
+        SemanticQuery(
+            measures=["orders.revenue"],
+            time_dimension=TimeWindow(
+                dimension="orders.created_at",
+                granularity="month",
+                range=("2026-01-01", "2026-04-01"),
+            ),
+            compare=CompareWindow(mode="previous_period"),
+        ),
+        n_rows=3,
+        catalog=_catalog(_orders()),
+    )
+    assert decision.chart_type == "compare_line_chart"
+    assert decision.x_axis is not None and "Created At" in decision.x_axis
+    # All four per-measure compare columns show up as y series.
+    y_names = " | ".join(decision.y_axes)
+    for needle in ("current", "prior", "delta", "% change"):
+        assert needle in y_names, f"missing {needle!r} in y_axes={decision.y_axes}"

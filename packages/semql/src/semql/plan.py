@@ -26,6 +26,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from semql.spec import SemanticQuery
+from semql.visualize import VizDecision
 
 # Router output ----------------------------------------------------------------
 
@@ -119,17 +120,29 @@ class Presentation(BaseModel):
     bullet lists for "what's interesting" and "what to be careful
     about" (small-sample warnings, missing data, etc.).
 
-    Chart shape lives separately in ``VizDecision`` from
-    ``semql.visualize`` — the Presenter narrates results; the
-    visualiser picks the chart. Keep them decoupled so a text-only
-    surface (chat, email) can render ``Presentation`` without
-    fabricating a chart.
+    ``chart`` is the optional chart shape from
+    :func:`semql.visualize.decide_visualization`. The Presenter
+    narrates results; the visualiser picks the chart. ``chart`` is
+    ``None`` on text-only surfaces (chat, email) so a chat renderer
+    never has to fabricate a chart. On a chart-capable surface the
+    caller runs ``decide_visualization`` after compile and sets the
+    field; on a text-only surface the caller leaves it ``None`` and
+    the prose carries the load. The two surfaces stay decoupled at
+    the data level even though the value type is one.
+
+    Kept as ``VizDecision | None`` (not a different Pydantic model)
+    so the contract stays small and so a single ``Presentation`` can
+    carry both — a chat-with-chart-link UI surfaces the summary plus
+    a "see chart" affordance backed by the same value. See
+    ``docs/specs/lookup-enrichment-critique-2026-06.md:288-294`` for
+    the design rationale.
     """
 
     model_config = ConfigDict(frozen=True)
     summary: str
     highlights: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
+    chart: VizDecision | None = None
 
 
 # Drilldown output -------------------------------------------------------------

@@ -191,7 +191,15 @@ from semql.units import (
     UnknownUnit,
 )
 from semql.validate import ValidationError, ValidationWarning, validate
-from semql.visualize import VizColumn, VizDecision, decide_visualization
+from semql.visualize import (
+    DecisionReason,
+    DecisionReasonKind,
+    ShapeStats,
+    VizChartType,
+    VizColumn,
+    VizDecision,
+    decide_visualization,
+)
 
 __all__ = [
     "AggLiteral",
@@ -333,8 +341,12 @@ __all__ = [
     "ValidationError",
     "ValidationWarning",
     "View",
+    "VizChartType",
     "VizColumn",
     "VizDecision",
+    "DecisionReason",
+    "DecisionReasonKind",
+    "ShapeStats",
     "build_default_retriever",
     "compile_federated_query",
     "compile_query",

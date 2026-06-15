@@ -36,7 +36,7 @@ def render_image(
     from the bindings) if the ``dot`` binary isn't on PATH.
     """
     try:
-        from graphviz import Source  # type: ignore[import-not-found]
+        from graphviz import Source  # type: ignore[import-untyped,unused-ignore]
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "render_image requires the ``image`` extra. Install with "

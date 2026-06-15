@@ -36,6 +36,7 @@ from semql import (
     View,
 )
 from semql.introspect import iter_cubes
+from semql.visualize import ShapeStats, decide_visualization
 from semql_prompt import (
     build_drilldown_prompt_fragment,
     build_presenter_prompt_fragment,
@@ -301,6 +302,34 @@ def stage_presenter(
     """).rstrip()
     print(textwrap.indent(summary, "  "))
 
+    section("Chart decision (semql.visualize.decide_visualization)")
+    # The headline step is a 3-row time series of one measure — small
+    # enough that the cardinality-only branch alone is enough, but we
+    # show the ShapeStats path for the compare step (the caller knows
+    # the current/prior values are all positive, so no negatives
+    # override fires).
+    headline = next(step for step, _, _ in results if step.intent == "headline")
+    headline_compiled = CATALOG.compile(
+        headline.query, viewer=VIEWER, context={"ctx.viewer_team": "EMEA-East"}
+    )
+    headline_chart = decide_visualization(
+        headline.query,
+        headline_compiled,
+        n_rows=3,
+        catalog=CATALOG.as_dict(),
+        shape_stats=ShapeStats(has_negatives=False, n_distinct_categories=3),
+    )
+    print(
+        textwrap.indent(
+            f"  chart_type = {headline_chart.chart_type}\n"
+            f"  title      = {headline_chart.title!r}\n"
+            f"  x_axis     = {headline_chart.x_axis!r}\n"
+            f"  y_axes     = {headline_chart.y_axes}\n"
+            f"  reason     = {headline_chart.reason.kind}: {headline_chart.reason.note}",
+            "  ",
+        )
+    )
+
     section("Presenter prompt fragment")
     fragment = build_presenter_prompt_fragment(
         query_labels=[step.label or "" for step, _, _ in results],
@@ -310,7 +339,7 @@ def stage_presenter(
     print(textwrap.indent(head.rstrip(), "  "))
     print("  ... [output schema follows]")
 
-    section("Stubbed LLM output (Presentation)")
+    section("Stubbed LLM output (Presentation) — chart field fed by visualiser")
     presentation = Presentation(
         summary=(
             "Revenue grew 29% quarter over quarter, reaching $633.8K in Q1 2026 "
@@ -325,6 +354,7 @@ def stage_presenter(
             "Numbers are scoped to your team (EMEA-East).",
             "March's spike was concentrated in three large deals; check sustainability.",
         ],
+        chart=headline_chart,
     )
     print(presentation.model_dump_json(indent=2))
     return presentation
