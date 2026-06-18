@@ -10,9 +10,27 @@ CREATE / DROP / ALTER / TRUNCATE / GRANT) all fail.
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
+
+# A context-sourced ``{key}`` substitution (e.g. ``{tenant_schema}``) lands in
+# an *identifier* position — a schema / table name — where SQL has no
+# bind-parameter form (you cannot parameterise an identifier). Splicing the raw
+# value is therefore an injection vector. Restrict such values to a safe,
+# optionally dot-qualified SQL identifier and refuse anything else. Shared by
+# the compiler's ``security_sql`` placeholder path and the lookup enricher's
+# ``table`` template so the two can't drift.
+SAFE_SQL_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def is_safe_sql_identifier(value: str) -> bool:
+    """Return True iff ``value`` is a safe (optionally dot-qualified) SQL
+    identifier and can be spliced into an identifier position without
+    injection risk. Values failing this must never be interpolated raw."""
+    return SAFE_SQL_IDENTIFIER_RE.fullmatch(value) is not None
 
 
 def is_read_only_statement(sql: str, *, dialect: str = "postgres") -> bool:

@@ -428,6 +428,33 @@ class CatalogPrompt:
         return base + ep
 
 
+# A roleless identity used to render the viewer-invariant static segment.
+# ``_field_visible_to(field, None)`` returns True (no filtering), which would
+# splice a public cube's role-protected fields into the cross-viewer cache.
+# Rendering against an empty-role viewer instead fails closed: any field with
+# non-empty ``required_roles`` is dropped, so only universally-public fields
+# reach the static segment (SEMQL-PROMPT-CACHE-FIELD-ROLES). The viewer's
+# authorised protected fields are re-added per-viewer in the overlay.
+_ANON_VIEWER = AuthContext(viewer_id="")
+
+
+def _field_is_public(field: BaseField) -> bool:
+    """A field is universally public when it carries no ``required_roles``."""
+    return not field.required_roles
+
+
+def _cube_has_viewer_only_fields(cube: Cube, viewer: AuthContext | None) -> bool:
+    """Does ``cube`` carry a role-protected field this viewer is allowed to
+    see? Such fields are dropped from the anon-rendered static segment, so the
+    overlay must re-render the cube to surface them to an authorised viewer."""
+    if viewer is None:
+        return False
+    return any(
+        not _field_is_public(f) and _field_visible_to(f, viewer)
+        for f in (*cube.measures, *cube.dimensions, *cube.time_dimensions)
+    )
+
+
 def _is_public(cube: Cube) -> bool:
     """A cube is *publicly visible* when its ``required_roles`` is empty.
 
@@ -458,18 +485,21 @@ def render_catalog_segments(
 ) -> CatalogPrompt:
     """Split the catalog into a static + per-viewer overlay rendering.
 
-    Static segment: cubes with empty ``required_roles`` (publicly
-    visible). Stable across viewer changes — cache it.
+    Static segment: public cubes (empty ``required_roles``), rendered
+    against an empty-role viewer so role-protected *fields* on those cubes
+    are dropped too. Stable across viewer changes — cache it.
 
-    Overlay segment: cubes the viewer is authorised to see that are
-    *not* in the static set (role-gated cubes the viewer holds a role
-    for). Preceded by a one-line "Cubes visible to you" note so the
-    planner knows which extras showed up.
+    Overlay segment: the per-viewer additions — role-gated cubes the viewer
+    holds a role for, plus public cubes carrying role-protected fields the
+    viewer may see (re-rendered so those fields, dropped from the anon static
+    segment, surface for the authorised viewer). Preceded by a one-line note
+    so the planner knows which extras showed up.
 
-    The auth invariant — "viewers should not learn names of cubes they
-    cannot access" — is preserved: role-gated cubes only appear when
-    ``viewer_sees`` passes for that viewer, and they live in the
-    overlay segment, never the static one.
+    The auth invariant — "viewers should not learn cubes or fields they
+    cannot access" — is preserved: role-gated cubes and role-protected
+    fields only appear when ``viewer_sees`` / ``_field_visible_to`` passes
+    for that viewer, and they live in the overlay segment, never the static
+    one.
     """
     lookups_by_dim = dict(lookups or {})
     all_cubes = _drop_deprecated(
@@ -515,8 +545,12 @@ def render_catalog_segments(
         ctx,
         header=header,
         preamble=preamble,
-        # static segment is viewer-invariant; field filtering for public cubes kept off
-        viewer=None,
+        # Render against an empty-role viewer, not ``None``: a public cube can
+        # still carry role-protected fields, and ``viewer=None`` would emit
+        # them into this cross-viewer cached segment. The anon viewer drops
+        # them; the overlay below re-adds those the real viewer may see
+        # (SEMQL-PROMPT-CACHE-FIELD-ROLES).
+        viewer=_ANON_VIEWER,
         cube_prompt_hooks=cube_prompt_hooks,
     )
     # Domain context (glossary + cross-cube relations) is viewer-
@@ -529,8 +563,17 @@ def render_catalog_segments(
     # as empty — the static segment is the whole prompt.
     overlay = ""
     if viewer is not None:
+        # Two kinds of cube belong in the per-viewer overlay:
+        #  - role-gated cubes the viewer is authorised to see (never in the
+        #    static segment, which only carries public cubes), and
+        #  - public cubes carrying role-protected fields the viewer may see —
+        #    the static segment rendered those cubes with the anon viewer, so
+        #    the protected fields were dropped and must be re-added here.
         overlay_cubes = [
-            c for c in all_cubes if not _is_public(c) and viewer_sees(c, viewer, policy)
+            c
+            for c in all_cubes
+            if viewer_sees(c, viewer, policy)
+            and (not _is_public(c) or _cube_has_viewer_only_fields(c, viewer))
         ]
         if overlay_cubes:
             names = ", ".join(f"`{c.name}`" for c in overlay_cubes)
@@ -540,7 +583,7 @@ def render_catalog_segments(
                 ctx,
                 header="## CUBES VISIBLE TO YOU",
                 preamble=(
-                    "Role-gated cubes you can access beyond the public "
+                    "Cubes and fields you can access beyond the public "
                     f"catalog above: {names}. Reference them the same "
                     "way (`cube.field`)."
                 ),
@@ -748,13 +791,17 @@ def project_tool_descriptions(
     )
 
 
-def to_openai_function(cube: Cube) -> dict[str, Any]:
+def to_openai_function(cube: Cube, *, viewer: AuthContext | None = None) -> dict[str, Any]:
     """Return the OpenAI function-calling dict for one cube.
 
     The returned dict can be passed directly as an element of the
     ``tools=`` list in ``client.chat.completions.create()``,
     ``ChatOpenAI`` / ``ChatAnthropic`` tool-calling, and
     LlamaIndex / pydantic-ai raw function specs.
+
+    Pass ``viewer`` so role-protected fields on an otherwise-visible cube
+    are filtered out of the rendered description; omitting it (the default)
+    renders every field (SEMQL-PROMPT-FIELD-ROLES-001).
     """
     from semql.spec import SemanticQuery
 
@@ -762,7 +809,7 @@ def to_openai_function(cube: Cube) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": f"query_{cube.name}",
-            "description": render_tool_description(cube),
+            "description": render_tool_description(cube, viewer=viewer),
             "parameters": SemanticQuery.tool_json_schema(),
         },
     }
@@ -992,10 +1039,37 @@ Use these when the user asks meta questions like "what measures are
 available?" or "list available cubes" — same `SemanticQuery` shape."""
 
 
-def _render_view_block(views: dict[str, View]) -> str:
+def _view_target_is_public(catalog: dict[str, Cube], target: str) -> bool:
+    """Is a view's underlying ``cube.field`` target safe to disclose in the
+    viewer-invariant (cacheable) view block?
+
+    ``View`` has no ``required_roles`` of its own, so a view that aliases a
+    role-protected field would otherwise leak both the alias and the hidden
+    backing ``cube.field`` to every viewer. Views live in the static segment,
+    which must be viewer-invariant, so we fail closed: a target is public only
+    when its owning cube AND the backing field carry no ``required_roles``
+    (SEMQL-PROMPT-VIEW-FIELD-ROLES). Unresolvable targets (computed refs with
+    no matching field) are left visible — there's no role to gate on."""
+    cube_name, _, field_name = target.partition(".")
+    cube = catalog.get(cube_name)
+    if cube is None:
+        return True
+    if cube.required_roles:
+        return False
+    for fld in (*cube.measures, *cube.dimensions, *cube.time_dimensions, *cube.segments):
+        if fld.name == field_name:
+            return not fld.required_roles
+    return True
+
+
+def _render_view_block(views: dict[str, View], *, catalog: dict[str, Cube]) -> str:
     """Per-view markdown — each view lists its exposed field names and
     the underlying ``cube.field`` targets. Planners can address fields
-    via the view; the compiler rewrites the references at compile time."""
+    via the view; the compiler rewrites the references at compile time.
+
+    Fields whose backing target is role-protected are dropped (see
+    :func:`_view_target_is_public`); a view with no disclosable fields is
+    omitted entirely so a hidden backing schema never reaches the prompt."""
     if not views:
         return ""
     lines: list[str] = ["## VIEWS"]
@@ -1004,7 +1078,16 @@ def _render_view_block(views: dict[str, View]) -> str:
         "as `view.field`; the compiler maps them to the underlying cube."
     )
     lines.append("")
+    rendered_any = False
     for v in views.values():
+        visible_fields = [
+            (local, target)
+            for local, target in v.fields.items()
+            if _view_target_is_public(catalog, target)
+        ]
+        if not visible_fields:
+            continue
+        rendered_any = True
         header = f"### {v.name}"
         if v.display_name:
             header += f" (human: {v.display_name})"
@@ -1013,9 +1096,11 @@ def _render_view_block(views: dict[str, View]) -> str:
             lines.append(v.description)
         lines.append("")
         lines.append("**Fields:**")
-        for local, target in v.fields.items():
+        for local, target in visible_fields:
             lines.append(f"  - `{v.name}.{local}` → `{target}`")
         lines.append("")
+    if not rendered_any:
+        return ""
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1073,7 +1158,9 @@ def build_planner_prompt_fragment(
         ).rstrip(),
     ]
     if views:
-        parts.append(_render_view_block(views).rstrip())
+        view_block = _render_view_block(views, catalog=catalog).rstrip()
+        if view_block:
+            parts.append(view_block)
     parts.append(_RAW_FALLBACK)
     if include_introspection:
         parts.append(_INTROSPECTION)
@@ -1111,9 +1198,11 @@ def build_planner_prompt_segments(
     Overlay = role-gated cubes the viewer is authorised to see (plus a
     short visibility note). Empty when ``viewer is None``.
 
-    Views currently have no per-viewer surface (no ``required_roles``)
-    so they live in the static segment. If view-level auth lands later
-    this contract gains a per-viewer view block in the overlay.
+    Views have no ``required_roles`` of their own, so they live in the
+    static segment; fields whose backing ``cube.field`` is role-protected
+    are dropped from the view block (fail closed) rather than leaked into
+    the shared cache. If view-level auth lands later this contract can gain
+    a per-viewer view block in the overlay.
     """
     segments = render_catalog_segments(
         catalog,
@@ -1134,7 +1223,9 @@ def build_planner_prompt_segments(
 
     static_parts: list[str] = [_SPEC_CONTRACT, _DATA_FENCE_PREAMBLE, segments.static.rstrip()]
     if views:
-        static_parts.append(_render_view_block(views).rstrip())
+        view_block = _render_view_block(views, catalog=catalog).rstrip()
+        if view_block:
+            static_parts.append(view_block)
     static_parts.append(_RAW_FALLBACK)
     if include_introspection:
         static_parts.append(_INTROSPECTION)
@@ -1312,7 +1403,12 @@ def build_query_generator_prompt_fragment(
         ).rstrip(),
     ]
     if scoped_views:
-        parts.append(_render_view_block(scoped_views).rstrip())
+        # Resolve backing-field roles against the full catalog, not the
+        # scoped subset — a view may back onto an out-of-scope cube and we
+        # still must gate its role-protected targets.
+        view_block = _render_view_block(scoped_views, catalog=catalog).rstrip()
+        if view_block:
+            parts.append(view_block)
     parts.append(_RAW_FALLBACK)
     if include_introspection:
         parts.append(_INTROSPECTION)
@@ -1378,7 +1474,9 @@ def build_presenter_prompt_fragment(
         bullet_block = "\n".join(f"  - {label}" for label in query_labels)
         parts.append("## Queries in this plan\n" + bullet_block)
     if result_summary:
-        parts.append("## Result snapshot\n" + result_summary)
+        # Runtime row-derived data — fence it like lookup/retrieved data so a
+        # poisoned cell can't splice planner directives (SEMQL-PROMPT-ROW-FENCE).
+        parts.append("## Result snapshot\n" + _fence(result_summary))
     parts.append(_PRESENTER_OUTPUT_SCHEMA.rstrip())
     return "\n\n".join(parts) + "\n"
 
@@ -1438,8 +1536,11 @@ def build_drilldown_prompt_fragment(
         parts.append(f"### Cube: {cube.description}")
 
     if focused_row:
+        # Row values are runtime data; fence the block so an embedded closing
+        # delimiter is neutralised (``{v!r}`` quotes but does not neutralise a
+        # ``</untrusted-data>`` tag) (SEMQL-PROMPT-ROW-FENCE).
         row_block = "\n".join(f"  - `{k}`: {v!r}" for k, v in focused_row.items())
-        parts.append("## Focused row\n" + row_block)
+        parts.append("## Focused row\n" + _fence(row_block))
 
     if drill_paths_hint and cube.drill_paths:
         path_block = "\n".join(f"  - {' → '.join(path)}" for path in cube.drill_paths)

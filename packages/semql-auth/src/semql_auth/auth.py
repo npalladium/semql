@@ -49,7 +49,7 @@ actionable message — install the matching extras group to enable it.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from semql.errors import AuthError
@@ -486,6 +486,20 @@ class IntrospectMapper:
             ``httpx``. Tests inject a fake with the shape
             ``post(url, *, data, auth, timeout) -> Any``.
         timeout: HTTP request timeout in seconds. Default 5.0.
+        audience: Optional ``aud`` claim to enforce. When set, the
+            introspection response's ``aud`` must contain it, else the
+            token is rejected — without this an active token minted for a
+            *different* resource is accepted as long as it's active. Match
+            the JWT verifiers' ``audience`` for parity.
+        issuer: Optional ``iss`` claim to enforce, same contract as
+            ``audience``.
+        scope_to_role: Optional allowlist mapping OAuth scopes to SemQL
+            roles. ``None`` (default) keeps the documented behavior — scope
+            tokens become roles verbatim. A ``Mapping`` translates each scope
+            and drops unmapped ones; a callable receives the scope list and
+            returns the roles. Use it to keep OAuth scopes distinct from
+            SemQL roles so a scope like ``admin`` minted elsewhere can't
+            become a SemQL ``admin`` role.
     """
 
     def __init__(
@@ -496,11 +510,17 @@ class IntrospectMapper:
         client_secret: str,
         http_client: _IntrospectHttpClient | None = None,
         timeout: float = 5.0,
+        audience: str | None = None,
+        issuer: str | None = None,
+        scope_to_role: Mapping[str, str] | Callable[[list[str]], list[str]] | None = None,
     ) -> None:
         self._introspect_url = introspect_url
         self._client_id = client_id
         self._client_secret = client_secret
         self._timeout = timeout
+        self._audience = audience
+        self._issuer = issuer
+        self._scope_to_role = scope_to_role
         self._http_client: _IntrospectHttpClient = (
             http_client if http_client is not None else _default_introspect_client()
         )
@@ -549,6 +569,18 @@ class IntrospectMapper:
                 "Introspection reported token inactive (expired, revoked, or unknown).",
                 reason="inactive",
             )
+        # Bind the token to this resource when configured. RFC 7662 returns
+        # ``aud``/``iss`` for active tokens; without these checks an active
+        # token minted for a *different* audience is accepted as long as it's
+        # active — the role-confusion path the audit flagged. Mirror the JWT
+        # verifiers' ``audience``/``issuer`` contract (off by default).
+        if self._audience is not None:
+            aud = response.get("aud")
+            aud_values = aud if isinstance(aud, (list, tuple)) else [aud]
+            if self._audience not in aud_values:
+                raise AuthError("Token audience is invalid.", reason="bad_audience")
+        if self._issuer is not None and response.get("iss") != self._issuer:
+            raise AuthError("Token issuer is invalid.", reason="bad_issuer")
         # Build a payload shaped like the JWT claims dict, then
         # re-use ``_payload_to_auth_context`` so claim mapping
         # is identical to the JWT path.
@@ -575,8 +607,17 @@ class IntrospectMapper:
         # authorisation grants).
         scope_value = response.get("scope")
         if isinstance(scope_value, str):
+            scopes = scope_value.split()
+            if self._scope_to_role is None:
+                roles = scopes
+            elif callable(self._scope_to_role):
+                roles = self._scope_to_role(scopes)
+            else:
+                # Mapping: translate known scopes to roles, drop the rest so
+                # an unmapped OAuth scope can never become a SemQL role.
+                roles = [self._scope_to_role[s] for s in scopes if s in self._scope_to_role]
             response = dict(response)
-            response["roles"] = scope_value.split()
+            response["roles"] = roles
         return _payload_to_auth_context(dict(response))
 
 

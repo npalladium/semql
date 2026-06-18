@@ -224,7 +224,11 @@ def test_catalog_prompt_returns_planner_fragment() -> None:
     assert "orders.revenue" in text
 
 
-def test_catalog_prompt_respects_only_exposed_flag() -> None:
+def test_catalog_prompt_never_exposes_unexposed_cubes() -> None:
+    """``catalog_prompt`` must not let an MCP client retrieve catalog content
+    the author marked ``expose_in_prompt=False``. ``only_exposed`` is pinned
+    True server-side and is not a caller-controllable knob
+    (SEMQL-MCP-CATALOG-PROMPT-VIEWER)."""
     hidden = Cube(
         name="internal",
         dialect=Dialect.POSTGRES,
@@ -236,15 +240,18 @@ def test_catalog_prompt_respects_only_exposed_flag() -> None:
     cat = Catalog([_orders_catalog().as_dict()["orders"], hidden])
     s = MCPServer(cat)
 
-    async def call(only_exposed: bool) -> str:
+    async def call(args: dict[str, object]) -> Any:  # noqa: ANN401
         async with _client(s) as c:
-            result = await c.call_tool("catalog_prompt", {"only_exposed": only_exposed})
-            return result.data  # type: ignore[no-any-return]
+            return await c.call_tool("catalog_prompt", args, raise_on_error=False)
 
-    exposed_only = _run(call(True))
-    full = _run(call(False))
-    assert "### internal" not in exposed_only
-    assert "### internal" in full
+    # Default call never includes the unexposed cube.
+    default = _run(call({}))
+    assert "### internal" not in default.data
+
+    # The widening knob is gone: passing ``only_exposed`` is rejected rather
+    # than honoured, so a client can't flip it to surface hidden content.
+    widened = _run(call({"only_exposed": False}))
+    assert widened.is_error
 
 
 # ---------------------------------------------------------------------------

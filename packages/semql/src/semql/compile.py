@@ -103,6 +103,7 @@ from semql.model import (
 )
 from semql.partition import emit_physical_sources, select_physical_sources
 from semql.rollup import apply_rollup, pick_rollup
+from semql.safe import SAFE_SQL_IDENTIFIER_RE
 from semql.spec import BoolExpr, CompareWindow, Filter, InlineDerived, SemanticQuery
 
 MAX_UNGROUPED_ROWS = 1000
@@ -529,8 +530,9 @@ _CTX_PLACEHOLDER_RE = re.compile(r"\{ctx\.([a-z_][a-z0-9_]*)\}")
 # verbatim, and under schema-tenancy it is also a cross-tenant read. Restrict
 # such values to a safe, optionally dot-qualified SQL identifier and refuse
 # anything else. Cube aliases bypass this — they are compiler-internal and
-# already validated.
-_SAFE_SUBST_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# already validated. The regex is shared from ``semql.safe`` so the lookup
+# enricher's ``table`` template validates identically.
+_SAFE_SUBST_RE = SAFE_SQL_IDENTIFIER_RE
 
 
 def _resolve_sql(
@@ -3222,6 +3224,30 @@ def compile_plan(
             for j in plan.joins
         ]
         plan = _dc_replace(plan, scans=canonical_scans, joins=canonical_joins)
+
+    # Re-authorize every projected field against the viewer
+    # (SEMQL-COMPILEPLAN-PROJECTION-AUTH). The field-hide gate
+    # (``_check_field_visibility``) runs on the reconstructed ``SemanticQuery``,
+    # whose dimensions/measures come from the ``Aggregate`` node — but emission
+    # projects ``plan.project.columns`` verbatim. A forged or inconsistent plan
+    # whose projection diverges from its aggregate (e.g. ``group_by`` lists an
+    # authorized dimension while ``project.columns`` carries a role-gated one)
+    # could otherwise emit a field the gate never saw. Mirror ``_sees``: with no
+    # viewer the gate is open; otherwise the viewer must hold a required role,
+    # and the refusal is indistinguishable from "field doesn't exist".
+    if viewer is not None:
+        for col in plan.project.columns:
+            field = col.field
+            if field is None or not field.required_roles:
+                continue
+            if not any(r in viewer.roles for r in field.required_roles):
+                raise UnknownIdentifierError(
+                    f"Unknown field {col.field_name!r} on cube {col.cube.name!r}.",
+                    kind="field",
+                    name=col.field_name,
+                    cube=col.cube.name,
+                    hint=None,
+                )
 
     env = _CompileEnv(
         q,

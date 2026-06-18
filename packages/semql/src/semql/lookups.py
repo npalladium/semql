@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 from semql.catalog import Catalog
 from semql.model import Lookup, MultiFieldEnricher, ResolutionContext
+from semql.safe import is_safe_sql_identifier
 
 # ---------------------------------------------------------------------------
 # Materialization — turn a Lookup into a concrete (values, labels) tuple
@@ -250,6 +251,20 @@ class _SqlEnricher:
 
     def _table_for(self, ctx: ResolutionContext | None) -> str:
         if ctx is not None and "{" in self.table:
+            # ``table`` is catalog-author-controlled, but the values that fill
+            # its ``{placeholders}`` come from ``ctx.context`` — which a host
+            # may populate from request data. They land in an identifier
+            # position (a schema / table name) with no bind-parameter form, so
+            # validate each substituted value as a safe SQL identifier before
+            # splicing, exactly as the compiler's ``security_sql`` path does
+            # (SEMQL-LOOKUP-ENRICHER-IDENT). Refuse rather than emit raw.
+            for key, value in ctx.context.items():
+                if "{" + key + "}" in self.table and not is_safe_sql_identifier(value):
+                    raise ValueError(
+                        f"Lookup enricher table placeholder {{{key}}} resolved "
+                        f"to {value!r}, which is not a safe SQL identifier; "
+                        "refusing to splice it into the FROM clause."
+                    )
             return self.table.format_map(_SafeFormat(ctx.context))
         return self.table
 

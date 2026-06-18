@@ -27,8 +27,9 @@ Tools always registered:
   of ``ValidationError`` records.
 - ``explain(spec, context?)`` — same as ``query_semantic`` but returns
   just the SQL string.
-- ``catalog_prompt(only_exposed=True, include_introspection=False)`` —
-  planner prompt fragment.
+- ``catalog_prompt(include_introspection=False)`` — planner prompt
+  fragment, rendered for the resolved viewer's authorized surface
+  (``only_exposed`` is pinned True; not caller-controllable).
 
 Registered only when ``executor`` is supplied:
 - ``query_execute(spec, context?)`` — compile + run; returns the
@@ -225,7 +226,16 @@ class MCPServer:
             ),
         )
         def validate(spec: SemanticQuery) -> list[dict[str, Any]]:
-            errors: list[ValidationError] = validate_query(spec, catalog)
+            # Thread the resolved viewer/policy so validation filters the
+            # catalog to the viewer's authorized surface, exactly like
+            # ``query_semantic``/``explain``. Without it this entry point
+            # fails *open* where ``compile`` fails closed, turning validate
+            # into a hidden-catalog oracle: a low-role viewer validating a
+            # spec against a role-gated cube would get ``[]`` (clean) instead
+            # of an unknown-identifier error (SEMQL-MCP-VALIDATE-VIEWER).
+            errors: list[ValidationError] = validate_query(
+                spec, catalog, viewer=resolve_viewer(), policy=catalog.policy
+            )
             return [asdict(e) for e in errors]
 
         @self.mcp.tool(
@@ -256,15 +266,21 @@ class MCPServer:
             ),
         )
         def catalog_prompt(
-            only_exposed: bool = True,
             include_introspection: bool = False,
         ) -> str:
             from semql_prompt import planner_prompt
 
+            # ``only_exposed`` is pinned True and not caller-controllable:
+            # letting an MCP client pass ``only_exposed=False`` would render
+            # cubes/fields the catalog author marked ``expose_in_prompt=False``
+            # into the prompt. ``viewer`` is threaded so the prompt shrinks to
+            # the viewer's authorized surface instead of failing open
+            # (SEMQL-MCP-CATALOG-PROMPT-VIEWER).
             return planner_prompt(
                 catalog,
-                only_exposed=only_exposed,
+                only_exposed=True,
                 include_introspection=include_introspection,
+                viewer=resolve_viewer(),
             )
 
         if executor is not None:
@@ -335,6 +351,8 @@ class MCPServer:
 
         Skipped on empty-lookup catalogs so a server with no resolvable
         dimensions doesn't advertise misleading tools."""
+        from semql.introspect import viewer_sees
+
         catalog = self.catalog
         resolve_viewer = self._resolve_viewer
         debug = self.debug
@@ -343,6 +361,24 @@ class MCPServer:
 
         dim_keys = tuple(sorted(catalog.lookups))
         dim_t = Literal[dim_keys]  # type: ignore[valid-type]
+
+        def _check_lookup_visible(dimension: str, viewer: AuthContext | None) -> None:
+            """Refuse a lookup whose owning cube the viewer can't see.
+
+            ``catalog.lookups`` keys (and ``Lookup.dimension``) are
+            qualified ``cube.dim``; the lookup tools otherwise enumerate
+            every dimension name and materialize every value regardless
+            of the viewer, skipping the ``viewer_sees`` gate the per-cube
+            and prompt surfaces enforce. Fail closed so a low-role viewer
+            can't read a hidden cube's dimension vocabulary
+            (SEMQL-MCP-LOOKUP-VIEWER)."""
+            cube_name = dimension.split(".", 1)[0]
+            cube = catalog.as_dict().get(cube_name)
+            if cube is not None and not viewer_sees(cube, viewer, catalog.policy):
+                raise AuthError(
+                    f"Dimension {dimension!r} is not visible to this viewer.",
+                    reason="hidden_dimension",
+                )
 
         def resolve_lookup_fn(  # type: ignore[no-untyped-def]  # noqa: ANN202 — signature attached via __annotations__ below
             dimension,  # noqa: ANN001
@@ -353,7 +389,9 @@ class MCPServer:
             max_candidates=5,  # noqa: ANN001
         ):
             try:
-                ctx = _build_resolution_ctx(resolve_viewer(viewer_id, roles), context)
+                viewer = resolve_viewer(viewer_id, roles)
+                _check_lookup_visible(dimension, viewer)
+                ctx = _build_resolution_ctx(viewer, context)
                 values = resolve_lookup(
                     catalog,
                     dimension,
@@ -392,8 +430,10 @@ class MCPServer:
             roles=None,  # noqa: ANN001
         ):
             try:
+                viewer = resolve_viewer(viewer_id, roles)
+                _check_lookup_visible(dimension, viewer)
                 lookup = catalog.lookups[dimension]
-                ctx = _build_resolution_ctx(resolve_viewer(viewer_id, roles), context)
+                ctx = _build_resolution_ctx(viewer, context)
                 materialized = materialize_lookup(lookup, ctx)
             except Exception as exc:
                 return _error_payload(exc, debug=debug)

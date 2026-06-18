@@ -184,7 +184,9 @@ def to_openai_tools(
     from semql.spec import SemanticQuery
 
     cubes, saved = _visible_tool_targets(catalog, viewer=viewer, only_exposed=only_exposed)
-    tools: list[dict[str, Any]] = [to_openai_function(c) for c in cubes]
+    # Thread the viewer so role-protected fields are filtered from the tool
+    # description, not just from cube visibility (SEMQL-PROMPT-FIELD-ROLES-001).
+    tools: list[dict[str, Any]] = [to_openai_function(c, viewer=viewer) for c in cubes]
     for sq in saved:
         tools.append(
             {
@@ -236,7 +238,9 @@ def to_langchain_tools(
             structured_tool_cls.from_function(
                 func=_run,
                 name=f"query_{cube.name}",
-                description=render_tool_description(cube),
+                # viewer-filtered so role-protected fields don't leak into the
+                # LangChain tool description (SEMQL-PROMPT-FIELD-ROLES-001).
+                description=render_tool_description(cube, viewer=viewer),
                 args_schema=SemanticQuery,
             )
         )
