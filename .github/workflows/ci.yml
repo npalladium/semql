@@ -60,6 +60,7 @@ jobs:
         run: |
           uv run tach check
           uv run python scripts/check_core_boundary.py
+          uv run python scripts/check_frozen_models.py
 
       - name: pytest
         run: uv run pytest packages

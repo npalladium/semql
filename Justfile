@@ -10,11 +10,12 @@ typecheck:
     uv run mypy packages/
     uv run pyright packages/
 
-# Module-boundary enforcement: tach (layers within core) +
-# the cross-package guard (core imports no sibling packages).
+# Structural lints: tach (layers within core), the cross-package guard
+# (core imports no sibling packages), and the frozen value-object check.
 boundaries:
     uv run tach check
     uv run python scripts/check_core_boundary.py
+    uv run python scripts/check_frozen_models.py
 
 test *args:
     uv run pytest {{args}}

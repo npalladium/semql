@@ -32,3 +32,9 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: frozen-models
+        name: pydantic models are frozen
+        entry: uv run python scripts/check_frozen_models.py
+        language: system
+        types: [python]
+        pass_filenames: false
