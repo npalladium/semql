@@ -133,6 +133,7 @@ from semql.plan import (
     RouterDecision,
     RouteTo,
 )
+from semql.refs import QualifiedRef
 from semql.retrieve import (
     EmbeddingProvider,
     HybridRetriever,
@@ -310,6 +311,7 @@ __all__ = [
     "Registry",
     "ResolutionContext",
     "SavedQuery",
+    "QualifiedRef",
     "ResolveError",
     "ResolvedQuery",
     "Retriever",

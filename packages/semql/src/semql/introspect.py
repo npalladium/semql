@@ -40,6 +40,7 @@ from semql.model import (
     TimeDimension,
     View,
 )
+from semql.refs import is_qualified, parse_qualified_ref
 from semql.spec import SemanticQuery
 
 PolicyFn = Callable[[Cube, AuthContext], bool]
@@ -339,8 +340,9 @@ def resolve_field(
     from ``semql.errors``.
     """
     by_name: dict[str, Cube] = {c.name: c for c in _iter_all_cubes(catalog)}
-    if views and "." in qualified:
-        prefix, local = qualified.split(".", 1)
+    if views and is_qualified(qualified):
+        ref = parse_qualified_ref(qualified)
+        prefix, local = ref.cube, ref.field
         if prefix in views:
             view = views[prefix]
             if local not in view.fields:

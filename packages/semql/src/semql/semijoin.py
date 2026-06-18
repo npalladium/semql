@@ -36,6 +36,7 @@ from semql.federate import (
     _accepted_types,  # pyright: ignore[reportPrivateUsage]
     compile_federated_query,
 )
+from semql.refs import field_of, is_qualified, parse_qualified_ref
 from semql.spec import Filter, SemanticQuery
 
 if TYPE_CHECKING:
@@ -89,12 +90,13 @@ class SemiJoinPlan:
 
 def _resolve_dimension(catalog: dict[str, Cube], ref: str, role: str) -> tuple[Cube, Dimension]:
     """Resolve a qualified ``cube.field`` ref to its (cube, dimension)."""
-    if "." not in ref:
+    if not is_qualified(ref):
         raise FederationError(
             f"SemiJoin {role} reference {ref!r} must be qualified as ``cube.field``.",
             reason="unqualified_or_unknown_reference",
         )
-    cube_name, fld = ref.split(".", 1)
+    parsed = parse_qualified_ref(ref)
+    cube_name, fld = parsed.cube, parsed.field
     cube = catalog.get(cube_name)
     if cube is None:
         raise FederationError(
@@ -134,7 +136,7 @@ def _resolve_select_column(select: str, inner: FederatedPlan) -> str:
     Dimensions project under their bare field name (``employees.id`` ->
     ``id``). Refuse unless that name appears exactly once in the inner
     plan's columns."""
-    col = select.split(".", 1)[1]
+    col = field_of(select)
     if inner.columns.count(col) != 1:
         raise FederationError(
             f"Semi-join inner query must project {select!r} as exactly one output column "

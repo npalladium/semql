@@ -15,7 +15,6 @@ without raising.
 from __future__ import annotations
 
 import difflib
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -29,24 +28,21 @@ from semql.errors import (
     closest_match,
 )
 from semql.model import Cube, Dimension, Measure, Segment, TimeDimension, View
+from semql.refs import parse_qualified_ref
 from semql.spec import BoolExpr, Filter, SemanticQuery
 
 if TYPE_CHECKING:
     pass
 
-_QUALIFIED_RE = re.compile(r"^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$", re.IGNORECASE)
-
 
 def split(qualified: str) -> tuple[str, str]:
-    """Parse a ``"cube.field"`` qualified reference.
+    """Parse a ``"cube.field"`` qualified reference into its two halves.
 
     >>> split("orders.revenue")
     ('orders', 'revenue')
     """
-    m = _QUALIFIED_RE.match(qualified)
-    if not m:
-        raise ResolveError(f"Field reference must be 'cube.field', got: {qualified!r}")
-    return m.group(1), m.group(2)
+    ref = parse_qualified_ref(qualified)
+    return ref.cube, ref.field
 
 
 def resolve_field(

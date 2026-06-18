@@ -1,3 +1,8 @@
+# DIALECT CONVENTION: this module is the SemQL ``Dialect`` →
+# sqlglot dialect-name map (``dialect_for``) plus per-dialect render
+# overrides. The compiler emits one dialect-agnostic AST and renders it per
+# target; per-backend specifics live behind ``DialectStrategy`` in
+# ``backend.py`` (see the full convention block there).
 """sqlglot adapters — the seam Commit 2 of the sqlglot migration drops into.
 
 This module is *additive*: it ships a SemQL ``Dialect`` → sqlglot

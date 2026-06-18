@@ -35,6 +35,7 @@ from semql.model import (
     Rollup,
     TimeDimension,
 )
+from semql.refs import cube_of, field_of, is_qualified, local_name
 from semql.spec import BoolExpr, Filter, SemanticQuery
 
 
@@ -48,8 +49,8 @@ def _referenced_cubes(query: SemanticQuery) -> set[str]:
     cubes: set[str] = set()
 
     def _add(ref: str) -> None:
-        if "." in ref:
-            cubes.add(ref.split(".", 1)[0])
+        if is_qualified(ref):
+            cubes.add(cube_of(ref))
 
     for m in query.measures:
         _add(m)
@@ -74,8 +75,8 @@ def _referenced_cubes(query: SemanticQuery) -> set[str]:
 
 def _walk_bool_expr(node: BoolExpr | Filter, cubes: set[str]) -> None:
     if isinstance(node, Filter):
-        if "." in node.dimension:
-            cubes.add(node.dimension.split(".", 1)[0])
+        if is_qualified(node.dimension):
+            cubes.add(cube_of(node.dimension))
         return
     for child in node.children:
         _walk_bool_expr(child, cubes)
@@ -90,7 +91,7 @@ def _filter_dims(query: SemanticQuery) -> set[str]:
     dims: set[str] = set()
 
     def _add(ref: str) -> None:
-        dims.add(ref.split(".", 1)[1] if "." in ref else ref)
+        dims.add(local_name(ref))
 
     for f in query.filters:
         _add(f.dimension)
@@ -145,17 +146,17 @@ def _matches(
         return False
 
     for m_ref in query.measures:
-        local = m_ref.split(".", 1)[1] if "." in m_ref else m_ref
+        local = local_name(m_ref)
         if local not in rollup_measures:
             return False
 
     for d_ref in query.dimensions:
-        local = d_ref.split(".", 1)[1] if "." in d_ref else d_ref
+        local = local_name(d_ref)
         if local not in rollup_dims:
             return False
 
     if query.time_dimension is not None:
-        td_local = query.time_dimension.dimension.split(".", 1)[1]
+        td_local = field_of(query.time_dimension.dimension)
         if rollup.time_dimension != td_local:
             return False
         if rollup.granularity != query.time_dimension.granularity:
@@ -172,32 +173,28 @@ def _matches(
         return False
 
     for having_filter in query.having:
-        local = (
-            having_filter.dimension.split(".", 1)[1]
-            if "." in having_filter.dimension
-            else having_filter.dimension
-        )
+        local = local_name(having_filter.dimension)
         # Bare names (derived measure aliases) — accept iff the named
         # derived measure's operands all map to rollup measures.
-        if "." not in having_filter.dimension:
+        if not is_qualified(having_filter.dimension):
             inline = next(
                 (im for im in query.derived_measures if im.name == local),
                 None,
             )
             if inline is None:
                 return False
-            if not all(op.split(".", 1)[1] in rollup_measures for op in inline.operands):
+            if not all(field_of(op) in rollup_measures for op in inline.operands):
                 return False
         else:
             if local not in rollup_measures:
                 return False
 
     for inline in query.derived_measures:
-        if not all(op.split(".", 1)[1] in rollup_measures for op in inline.operands):
+        if not all(field_of(op) in rollup_measures for op in inline.operands):
             return False
 
     for order_key, _ in query.order:
-        local = order_key.split(".", 1)[1] if "." in order_key else order_key
+        local = local_name(order_key)
         if local in rollup_measures or local in rollup_dims:
             continue
         if rollup.time_dimension is not None and local == rollup.time_dimension:

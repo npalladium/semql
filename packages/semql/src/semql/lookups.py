@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 from semql.catalog import Catalog
 from semql.model import Lookup, MultiFieldEnricher, ResolutionContext
+from semql.refs import field_of
 from semql.safe import is_safe_sql_identifier
 
 # ---------------------------------------------------------------------------
@@ -217,7 +218,7 @@ def enrich_all(
     present = set(rows[0].keys())
     # ``Catalog.lookups`` is a ``{dimension: Lookup}`` map.
     for lk in catalog.lookups.values():
-        col = lk.dimension.rsplit(".", 1)[-1]
+        col = field_of(lk.dimension)
         if col in present:
             rows = enrich_result(rows, col, lk, ctx)
     return rows

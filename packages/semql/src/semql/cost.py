@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from semql.errors import CompileError
 from semql.model import Cube
+from semql.refs import cube_of, is_qualified
 from semql.spec import SemanticQuery
 
 
@@ -135,16 +136,16 @@ def estimate_cost(query: SemanticQuery, catalog: dict[str, Cube]) -> CostEstimat
 
     touched: set[str] = set()
     for ref in list(query.measures) + list(query.dimensions):
-        if "." in ref:
-            touched.add(ref.split(".", 1)[0])
-    if query.time_dimension is not None and "." in query.time_dimension.dimension:
-        touched.add(query.time_dimension.dimension.split(".", 1)[0])
+        if is_qualified(ref):
+            touched.add(cube_of(ref))
+    if query.time_dimension is not None and is_qualified(query.time_dimension.dimension):
+        touched.add(cube_of(query.time_dimension.dimension))
     for seg in query.segments:
-        if "." in seg:
-            touched.add(seg.split(".", 1)[0])
+        if is_qualified(seg):
+            touched.add(cube_of(seg))
     for f in query.filters:
-        if "." in f.dimension:
-            touched.add(f.dimension.split(".", 1)[0])
+        if is_qualified(f.dimension):
+            touched.add(cube_of(f.dimension))
 
     cubes_estimated: dict[str, int] = {}
     rows_unknown = False

@@ -1,4 +1,9 @@
 # pyright: reportPrivateImportUsage=false, reportUnusedImport=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportArgumentType=false
+#
+# DIALECT CONVENTION: parsing reads SQL under a target
+# sqlglot dialect (``dialect_for`` in ``dialect.py``); per-backend specifics
+# live behind ``DialectStrategy`` in ``backend.py``. See the full convention
+# block at the top of ``backend.py``.
 """SQL → SemanticQuery parser.
 
 Converts a SQL-like statement (typically emitted by an LLM agent)
@@ -66,6 +71,7 @@ from sqlglot import exp
 
 from semql.errors import SemQLError
 from semql.model import Cube
+from semql.refs import local_name
 from semql.spec import (
     BoolExpr,
     CompareWindow,
@@ -542,7 +548,7 @@ def parse_sql_statement(
                     # COUNT(*) → the row-count measure of the participating cube.
                     ref = _count_measure_ref(catalog, ctx)
                 if ref:
-                    field_name = ref.rsplit(".", 1)[-1]
+                    field_name = local_name(ref)
                     resolved_refs[field_name] = ref
                     if ref not in measures:
                         measures.append(ref)
@@ -552,7 +558,7 @@ def parse_sql_statement(
             # Plain column — dimension.
             ref = ctx.resolve(expr)
             if ref:
-                field_name = ref.rsplit(".", 1)[-1]
+                field_name = local_name(ref)
                 resolved_refs[field_name] = ref
                 if ref not in dimensions:
                     dimensions.append(ref)
@@ -699,7 +705,7 @@ def _classify_predicate(
             return None, [], None
         low = _literal_value(pred.args["low"])
         high = _literal_value(pred.args["high"])
-        resolved[ref.rsplit(".", 1)[-1]] = ref
+        resolved[local_name(ref)] = ref
         td = TimeWindow(dimension=ref, range=(str(low), str(high)))
         return td, [], None
     if isinstance(pred, exp.Paren):
@@ -782,7 +788,7 @@ def _comparison_to_filter(
         dim = _count_measure_ref(ctx.catalog, ctx)
     if dim is None:
         return None, [], None
-    resolved[dim.rsplit(".", 1)[-1]] = dim
+    resolved[local_name(dim)] = dim
     if op_str is None:
         return None, [], None
     if negate:
@@ -945,7 +951,7 @@ def _parse_order(
                 continue
             ref = ctx.resolve(col)
             if ref is not None:
-                resolved[ref.rsplit(".", 1)[-1]] = ref
+                resolved[local_name(ref)] = ref
                 out.append((ref, direction))
         elif isinstance(col, (exp.AggFunc, exp.Anonymous)):
             # ORDER BY SUM(amount) DESC — strip the aggregate wrapper
@@ -956,7 +962,7 @@ def _parse_order(
                 # ORDER BY COUNT(*) — inner is ``*``; use the row-count measure.
                 ref = _count_measure_ref(ctx.catalog, ctx)
             if ref is not None:
-                resolved[ref.rsplit(".", 1)[-1]] = ref
+                resolved[local_name(ref)] = ref
                 out.append((ref, direction))
     return out
 

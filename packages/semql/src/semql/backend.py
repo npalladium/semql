@@ -2,6 +2,17 @@
 # sqlglot's ``Expression`` and friends live in ``sqlglot.expressions``
 # but aren't re-exported via ``__all__``. They're public by convention
 # and by sqlglot's own type stubs.
+#
+# ─── DIALECT CONVENTION ─────────────────────────────────────────────────
+# SemQL compiles to ONE dialect-agnostic sqlglot AST and renders it per
+# target with ``Expression.sql(dialect=...)``. The SemQL ``Dialect`` enum
+# maps to sqlglot dialect names in ``dialect.py`` (``dialect_for``). Every
+# per-backend specific — bound-param placeholder syntax, type names,
+# identifier quoting — lives behind ``DialectStrategy`` here in
+# ``backend.py``. Never hand-write dialect-specific SQL strings elsewhere;
+# add a ``DialectStrategy`` method (or a sqlglot dialect override in
+# ``dialect.py``) instead, so one AST keeps emitting valid SQL everywhere.
+# ────────────────────────────────────────────────────────────────────────
 """Per-backend dialect objects — the dialect-specific seam.
 
 The compiler stays dialect-agnostic for the parts it can: identifier

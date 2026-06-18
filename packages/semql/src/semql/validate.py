@@ -29,6 +29,7 @@ from semql._resolve import ResolutionDiagnostic, walk_query_fields
 from semql.errors import closest_match
 from semql.introspect import PolicyFn, viewer_sees
 from semql.model import AuthContext, Cube
+from semql.refs import local_name
 from semql.spec import SemanticQuery
 
 if TYPE_CHECKING:
@@ -188,12 +189,9 @@ def validate(
 
     query_measure_short_names: set[str] = set()
     for ref in query.measures:
-        if "." in ref:
-            query_measure_short_names.add(ref.rsplit(".", 1)[-1])
-        else:
-            query_measure_short_names.add(ref)
+        query_measure_short_names.add(local_name(ref))
     for hf in query.having:
-        short = hf.dimension.rsplit(".", 1)[-1] if "." in hf.dimension else hf.dimension
+        short = local_name(hf.dimension)
         if short not in query_measure_short_names:
             hint = (
                 closest_match(short, query_measure_short_names)

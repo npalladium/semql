@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from semql.hooks import CubePromptHook
 from semql.introspect import PolicyFn, iter_cubes, viewer_sees
 from semql.model import AuthContext, BaseField, Cube, GlossaryEntry, Lookup, ResolutionContext, View
+from semql.refs import cube_of, parse_qualified_ref
 
 if TYPE_CHECKING:
     from semql.retrieve import Retriever
@@ -81,7 +82,8 @@ def _render_lookup_line(dim_ref: str, lookup: Lookup, ctx: ResolutionContext | N
         return None
 
     materialized = materialize(lookup, ctx)
-    cube_name, dim_name = dim_ref.split(".", 1)
+    parsed = parse_qualified_ref(dim_ref)
+    cube_name, dim_name = parsed.cube, parsed.field
     if materialized is None:
         # Dynamic lookup with no context — surface the tool hint anyway
         # so the planner knows resolution is available.
@@ -1388,7 +1390,7 @@ def build_query_generator_prompt_fragment(
         if views is not None:
             scoped_views = {n: v for n, v in views.items() if n in wanted}
         if lookups is not None:
-            scoped_lookups = {d: lk for d, lk in lookups.items() if d.split(".", 1)[0] in wanted}
+            scoped_lookups = {d: lk for d, lk in lookups.items() if cube_of(d) in wanted}
 
     parts: list[str] = [
         _SPEC_CONTRACT,

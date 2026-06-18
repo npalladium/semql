@@ -2,6 +2,11 @@
 # sqlglot's AST types (Expression, Placeholder, ...) are imported via
 # ``from sqlglot import exp``; they aren't in ``sqlglot.expressions.__all__``
 # but are public by convention and by sqlglot's type stubs.
+#
+# DIALECT CONVENTION: emit one dialect-agnostic sqlglot AST,
+# rendered per target via ``Expression.sql(dialect=...)``; every per-backend
+# specific lives behind ``DialectStrategy`` in ``backend.py``. See the full
+# convention block at the top of ``backend.py``.
 """Pure compiler from `SemanticQuery` to backend SQL.
 
 The compiler has no I/O. It reads the catalog, resolves identifiers,
@@ -102,6 +107,7 @@ from semql.model import (
     View,
 )
 from semql.partition import emit_physical_sources, select_physical_sources
+from semql.refs import field_of, is_qualified
 from semql.rollup import apply_rollup, pick_rollup
 from semql.safe import SAFE_SQL_IDENTIFIER_RE
 from semql.spec import BoolExpr, CompareWindow, Filter, InlineDerived, SemanticQuery
@@ -2852,8 +2858,8 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
     alias_to_measure: dict[str, str] = {}
     for alias_key, alias_ref in q.aliases.items():
         # ``alias_ref`` is ``cube.field`` — extract the field name.
-        if "." in alias_ref:
-            alias_to_measure[alias_key] = alias_ref.rsplit(".", 1)[-1]
+        if is_qualified(alias_ref):
+            alias_to_measure[alias_key] = field_of(alias_ref)
 
     for hf in q.having:
         if hf.dimension.startswith("compare."):
@@ -2866,8 +2872,8 @@ def _emit_simple_query(env: _CompileEnv) -> CompiledQuery:
         # Alias key → underlying measure name.
         if lookup_name in alias_to_measure:
             lookup_name = alias_to_measure[lookup_name]
-        if lookup_name not in measure_alias_map and "." in lookup_name:
-            lookup_name = lookup_name.rsplit(".", 1)[-1]
+        if lookup_name not in measure_alias_map and is_qualified(lookup_name):
+            lookup_name = field_of(lookup_name)
         if lookup_name not in measure_alias_map:
             raise CompileError(
                 f"HAVING references {hf.dimension!r}, which is not a measure in this query."

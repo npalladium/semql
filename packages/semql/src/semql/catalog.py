@@ -58,6 +58,7 @@ from semql.model import (
     MutableEntity,
     View,
 )
+from semql.refs import is_qualified, parse_qualified_ref
 from semql.retrieve import EmbeddingProvider, Retriever, build_default_retriever
 from semql.spec import SavedQuery, SemanticQuery, SemanticQueryDefaults, _apply_query_defaults
 
@@ -237,7 +238,7 @@ def _run_catalog_validations(
                 view_name=v.name,
             )
         for local, target_ref in v.fields.items():
-            if "." not in target_ref:
+            if not is_qualified(target_ref):
                 emit(
                     "unknown_view_target_field",
                     f"View {v.name!r}, field {local!r}: target "
@@ -246,7 +247,8 @@ def _run_catalog_validations(
                     field=local,
                 )
                 continue
-            cube_name, field_name = target_ref.split(".", 1)
+            target = parse_qualified_ref(target_ref)
+            cube_name, field_name = target.cube, target.field
             if cube_name not in by_name:
                 emit(
                     "unknown_view_target_cube",
@@ -288,14 +290,15 @@ def _run_catalog_validations(
                 dimension=lk.dimension,
             )
         seen_lookup_dims.add(lk.dimension)
-        if "." not in lk.dimension:
+        if not is_qualified(lk.dimension):
             emit(
                 "unknown_lookup_dimension",
                 f"Lookup({lk.dimension!r}): dimension must be qualified as 'cube.dim'.",
                 dimension=lk.dimension,
             )
             continue
-        cube_name, dim_name = lk.dimension.split(".", 1)
+        lk_ref = parse_qualified_ref(lk.dimension)
+        cube_name, dim_name = lk_ref.cube, lk_ref.field
         if cube_name not in by_name:
             emit(
                 "unknown_lookup_cube",

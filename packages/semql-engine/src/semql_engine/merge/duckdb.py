@@ -25,6 +25,7 @@ from semql.federate import (
     MeasureOutput,
     MergeSpec,
 )
+from semql.refs import field_of, local_name
 from sqlglot import exp
 
 # Structural mirror of ``semql.federate``'s resolved cross-partition
@@ -231,13 +232,13 @@ def render_merge_sql(spec: MergeSpec) -> tuple[str, dict[str, object]]:
 
     selected = {m.output_name for m in spec.measures}
     for hf in spec.having:
-        alias = hf.dimension.rsplit(".", 1)[1]
+        alias = field_of(hf.dimension)
         if alias not in selected:
             raise ValueError(f"HAVING references {hf.dimension!r}, not a selected measure.")
         select = select.having(_having_term(alias, hf.op, tuple(hf.values), binder))
 
     for ref, direction in spec.order_by:
-        alias = ref.rsplit(".", 1)[-1] if "." in ref else ref
+        alias = local_name(ref)
         select = select.order_by(
             exp.Ordered(this=exp.column(alias, quoted=True), desc=direction == "desc")
         )

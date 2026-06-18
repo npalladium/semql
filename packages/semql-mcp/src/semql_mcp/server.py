@@ -78,6 +78,7 @@ from semql.lookups import materialize as materialize_lookup
 from semql.lookups import resolve as resolve_lookup
 from semql.model import AuthContext, Cube, Entity, MutableEntity, Op, ResolutionContext
 from semql.mutate import SemanticMutation
+from semql.refs import cube_of
 from semql.rows import EntityFetch, EntityList
 from semql.safe import is_read_only_statement
 from semql.spec import Filter, SemanticQuery, TimeWindow
@@ -372,7 +373,7 @@ class MCPServer:
             and prompt surfaces enforce. Fail closed so a low-role viewer
             can't read a hidden cube's dimension vocabulary
             (SEMQL-MCP-LOOKUP-VIEWER)."""
-            cube_name = dimension.split(".", 1)[0]
+            cube_name = cube_of(dimension)
             cube = catalog.as_dict().get(cube_name)
             if cube is not None and not viewer_sees(cube, viewer, catalog.policy):
                 raise AuthError(

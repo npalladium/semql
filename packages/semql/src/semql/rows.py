@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from semql.errors import CompileError
 from semql.model import AuthContext, Cube, Entity
+from semql.refs import field_of
 from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
 
 if TYPE_CHECKING:
@@ -309,7 +310,7 @@ def compile_fetch(
         )
 
     assert entity.key is not None  # _resolve_entity guarantees it
-    key_pred = RowPred(column=entity.key.split(".")[1], op="eq", params=["key"])
+    key_pred = RowPred(column=field_of(entity.key), op="eq", params=["key"])
     scope_preds, scope_params = _scope_predicates(entity, catalog, viewer)
     plan = RowPlan(
         source=_source_ref(entity, catalog),
@@ -371,11 +372,11 @@ def compile_list(
         pname = f"w{i}"
         if isinstance(value, list):
             where_filters.append(Filter(dimension=ref, op="in", values=value))
-            row_preds.append(RowPred(column=ref.split(".")[1], op="in", params=[pname]))
+            row_preds.append(RowPred(column=field_of(ref), op="in", params=[pname]))
             plan_params[pname] = value
         else:
             where_filters.append(Filter(dimension=ref, op="eq", values=[value]))
-            row_preds.append(RowPred(column=ref.split(".")[1], op="eq", params=[pname]))
+            row_preds.append(RowPred(column=field_of(ref), op="eq", params=[pname]))
             plan_params[pname] = value
 
     time_window: TimeWindow | None = None
@@ -388,7 +389,7 @@ def compile_list(
             )
         time_window = TimeWindow(dimension=tdim, range=(start, end))
         row_preds.append(
-            RowPred(column=tdim.split(".")[1], op="time_range", params=["t_start", "t_end"])
+            RowPred(column=field_of(tdim), op="time_range", params=["t_start", "t_end"])
         )
         plan_params["t_start"] = start
         plan_params["t_end"] = end
@@ -410,7 +411,7 @@ def compile_list(
         columns=list(outputs),
         predicates=row_preds,
         scope_predicates=scope_preds,
-        order=[(c.split(".")[1], d) for c, d in order_pairs],
+        order=[(field_of(c), d) for c, d in order_pairs],
         limit=limit,
         cursor=spec.cursor if entity.custom_backend else None,
         params={**plan_params, **scope_params},
@@ -459,7 +460,7 @@ def _alias_map(outputs: dict[str, str], selected: list[str]) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for local in selected:
         qualified = outputs[local]
-        if qualified.split(".")[-1] != local:
+        if field_of(qualified) != local:
             aliases[local] = qualified
     return aliases
 

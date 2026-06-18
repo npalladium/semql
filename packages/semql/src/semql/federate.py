@@ -53,6 +53,7 @@ from semql.compile import ColumnMeta, CompiledQuery, compile_query
 from semql.errors import FederationError
 from semql.introspect import resolve_query
 from semql.model import Cube, Dialect, Dimension, Join, Measure
+from semql.refs import cube_of, field_of, is_qualified, parse_qualified_ref
 from semql.spec import BoolExpr, Filter, SemanticQuery, TimeWindow
 
 FederationMode = Literal["distributive", "raw_rows"]
@@ -412,11 +413,11 @@ def _filter_where_cube_names(q: SemanticQuery) -> list[str]:
     Filter dimensions are qualified ``cube.field`` refs; the where-tree is
     flattened to its ``Filter`` leaves. Order-preserving, may contain
     duplicates (the caller de-dups)."""
-    names: list[str] = [f.dimension.split(".", 1)[0] for f in q.filters]
+    names: list[str] = [cube_of(f.dimension) for f in q.filters]
     if q.where is not None:
         for clause in _to_cnf(q.where):
             for _negated, lit in clause:
-                names.append(lit.dimension.split(".", 1)[0])
+                names.append(cube_of(lit.dimension))
     return names
 
 
@@ -452,8 +453,8 @@ def _resolve_field_to_cube(ref: str, catalog: dict[str, Cube]) -> Cube:
 
     ``ref`` is the qualified ``cube.field`` form used in
     ``SemanticQuery.measures`` / ``dimensions`` / ``filters``."""
-    if "." in ref:
-        cube_name = ref.split(".", 1)[0]
+    if is_qualified(ref):
+        cube_name = cube_of(ref)
         if cube_name in catalog:
             return catalog[cube_name]
     raise FederationError(
@@ -571,7 +572,7 @@ def _build_partition_sub_query(
                 )
             continue
         # ref belongs to this partition.
-        m_name = ref.rsplit(".", 1)[1]
+        m_name = field_of(ref)
         m = next(x for x in owner.measures if x.name == m_name)
         if m.agg in ("sum", "count"):
             sub_measures.append(ref)
@@ -597,7 +598,7 @@ def _build_partition_sub_query(
         owner = _resolve_field_to_cube(ref, catalog)
         if owner.name in partition_names:
             sub_dimensions.append(ref)
-            dim_columns[ref] = ref.rsplit(".", 1)[1]
+            dim_columns[ref] = field_of(ref)
 
     # Time dimension: include if it resolves to this partition. The
     # time window itself stays on the fragment that owns the time dim
@@ -611,7 +612,7 @@ def _build_partition_sub_query(
             # step can group by it. The compiler aliases it
             # ``<td_name>_<granularity>`` when granularity is set, else
             # ``<td_name>``.
-            td_name = q.time_dimension.dimension.rsplit(".", 1)[1]
+            td_name = field_of(q.time_dimension.dimension)
             if q.time_dimension.granularity is not None:
                 td_col = f"{td_name}_{q.time_dimension.granularity}"
             else:
@@ -629,7 +630,7 @@ def _build_partition_sub_query(
     # segment's SQL references a single cube's alias, so it always
     # belongs to exactly one partition — the compiler applies it
     # inside that fragment; the merge step never re-applies it.
-    sub_segments = [s for s in q.segments if s.split(".", 1)[0] in partition_names]
+    sub_segments = [s for s in q.segments if cube_of(s) in partition_names]
 
     # Bridge keys. For every bridge that touches a cube in this
     # partition, expose the appropriate side as a dimension.
@@ -804,7 +805,7 @@ def _build_merge_spec(
     for ref in q.dimensions:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         col = partitions[idx].dim_columns[ref]
-        alias = ref.rsplit(".", 1)[1]
+        alias = field_of(ref)
         meta = next(m for m in output_column_meta if m.name == alias)
         dimension_outputs.append(
             DimensionOutput(output_name=alias, sources=[FragmentColumn(idx, col)], column_meta=meta)
@@ -830,7 +831,7 @@ def _build_merge_spec(
     if q.having:
         selected = {m.output_name for m in measure_outputs}
         for hf in q.having:
-            alias = hf.dimension.rsplit(".", 1)[1]
+            alias = field_of(hf.dimension)
             if alias not in selected:
                 raise FederationError(
                     f"HAVING references {hf.dimension!r}, which is not in query.measures.",
@@ -879,7 +880,7 @@ def _build_distributive_spec(
     for ref in q.measures:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         plan = partitions[idx]
-        m_name = ref.rsplit(".", 1)[1]
+        m_name = field_of(ref)
         meta = next(m for m in output_column_meta if m.name == m_name)
         if ref in plan.avg_columns:
             sum_col, count_col = plan.avg_columns[ref]
@@ -935,7 +936,8 @@ def _resolve_cross_clauses(
     for clause in clauses:
         resolved: list[_ResolvedCrossLiteral] = []
         for neg, f in clause:
-            cube_name, dim_name = f.dimension.split(".", 1)
+            parsed = parse_qualified_ref(f.dimension)
+            cube_name, dim_name = parsed.cube, parsed.field
             resolved.append((neg, cube_to_idx[cube_name], dim_name, f.op, tuple(f.values)))
         out.append(tuple(resolved))
     return tuple(out)
@@ -1033,7 +1035,7 @@ def _partition_for_dim(
     dim_ref: str,
     cube_to_partition: dict[str, int],
 ) -> int | None:
-    cube_name = dim_ref.split(".", 1)[0]
+    cube_name = cube_of(dim_ref)
     return cube_to_partition.get(cube_name)
 
 
@@ -1084,7 +1086,7 @@ def _route_where_clauses(
         else:
             cross.append(clause)
             for _negated, lit in clause:
-                idx = cube_to_idx[lit.dimension.split(".", 1)[0]]
+                idx = cube_to_idx[cube_of(lit.dimension)]
                 already = dim_columns_per_partition[idx]
                 pending = extra_dims.setdefault(idx, [])
                 if lit.dimension not in already and lit.dimension not in pending:
@@ -1121,7 +1123,7 @@ def _route_where_tree(
             to_add = [d for d in dims_for_p if d not in existing_dims]
             sub_q_updates["dimensions"] = existing_dims + to_add
             for d in to_add:
-                new_dim_columns[d] = d.rsplit(".", 1)[1]
+                new_dim_columns[d] = field_of(d)
         new_sub_q = sub_q.model_copy(update=sub_q_updates)
         out.append(
             _RawRowPartitionPlan(
@@ -1179,7 +1181,7 @@ def _route_where_distributive(
             to_add = [d for d in dims_for_p if d not in existing_dims]
             sub_q_updates["dimensions"] = existing_dims + to_add
             for d in to_add:
-                new_dim_columns[d] = d.rsplit(".", 1)[1]
+                new_dim_columns[d] = field_of(d)
         new_sub_q = sub_q.model_copy(update=sub_q_updates)
         out.append(
             _PartitionPlan(
@@ -1245,7 +1247,7 @@ def _build_partition_sub_query_raw_rows(
                     f"Measure {ref!r} non-primary partition.", reason="measure_non_primary"
                 )
             continue
-        m_name = ref.rsplit(".", 1)[1]
+        m_name = field_of(ref)
         m = next(x for x in owner.measures if x.name == m_name)
         if m.agg == "ratio":
             assert m.numerator is not None and m.denominator is not None
@@ -1269,7 +1271,7 @@ def _build_partition_sub_query_raw_rows(
         owner = _resolve_field_to_cube(ref, catalog)
         if owner.name in partition_names:
             sub_dimensions.append(ref)
-            dim_columns[ref] = ref.rsplit(".", 1)[1]
+            dim_columns[ref] = field_of(ref)
 
     time_col: str | None = None
     time_grain: str | None = None
@@ -1278,7 +1280,7 @@ def _build_partition_sub_query_raw_rows(
     if q.time_dimension is not None:
         td_cube = _resolve_field_to_cube(q.time_dimension.dimension, catalog)
         if td_cube.name in partition_names:
-            td_name = q.time_dimension.dimension.rsplit(".", 1)[1]
+            td_name = field_of(q.time_dimension.dimension)
             td_field = next(t for t in td_cube.time_dimensions if t.name == td_name)
             raw_name = _raw_time_col(td_name)
             synthetic_dims.setdefault(td_cube.name, []).append(
@@ -1305,7 +1307,7 @@ def _build_partition_sub_query_raw_rows(
     sub_filters: list[Filter] = [
         f for f in q.filters if _resolve_field_to_cube(f.dimension, catalog).name in partition_names
     ] + extra_filters
-    sub_segments = [s for s in q.segments if s.split(".", 1)[0] in partition_names]
+    sub_segments = [s for s in q.segments if cube_of(s) in partition_names]
     bridge_columns: dict[str, str] = {}
     for b in bridges:
         if b.left_cube.name in partition_names:
@@ -1373,7 +1375,7 @@ def _build_raw_rows_spec(
         idx = cube_to_idx[_resolve_field_to_cube(q.time_dimension.dimension, catalog).name]
         plan = partitions[idx]
         assert plan.time_col is not None
-        td_name = q.time_dimension.dimension.rsplit(".", 1)[1]
+        td_name = field_of(q.time_dimension.dimension)
         # The merge buckets raw timestamps; the output alias carries the
         # grain (e.g. ``created_at_day``) when one is set.
         time_alias = f"{td_name}_{plan.time_grain}" if plan.time_grain else td_name
@@ -1383,7 +1385,7 @@ def _build_raw_rows_spec(
     for ref in q.measures:
         idx = cube_to_idx[_resolve_field_to_cube(ref, catalog).name]
         plan = partitions[idx]
-        m_name = ref.rsplit(".", 1)[1]
+        m_name = field_of(ref)
         meta = next(m for m in output_column_meta if m.name == m_name)
         if ref in plan.ratio_measure_columns:
             num_col, num_agg, den_col, den_agg = plan.ratio_measure_columns[ref]
@@ -1431,26 +1433,26 @@ def _merge_meta_for_dim(
 ) -> ColumnMeta:
     """Output ColumnMeta for a merged dimension — inherits the fragment's
     column meta (kind/unit/display) under the unqualified output name."""
-    idx = cube_to_idx[ref.split(".", 1)[0]]
+    idx = cube_to_idx[cube_of(ref)]
     col = partitions[idx].dim_columns[ref]
     for cm in fragments[idx].column_meta:
         if cm.name == col:
             return ColumnMeta(
-                name=ref.rsplit(".", 1)[1],
+                name=field_of(ref),
                 kind=cm.kind,
                 display_name=cm.display_name,
                 unit=cm.unit,
                 display_unit=cm.display_unit,
                 format=cm.format,
             )
-    return ColumnMeta(name=ref.rsplit(".", 1)[1], kind="dimension")
+    return ColumnMeta(name=field_of(ref), kind="dimension")
 
 
 def _merge_meta_for_measure(ref: str, catalog: dict[str, Cube]) -> ColumnMeta:
     """Output ColumnMeta for a merged measure — carries the cube measure's
     unit/format so the merged result presents like a single-source query."""
     owner = _resolve_field_to_cube(ref, catalog)
-    m_name = ref.rsplit(".", 1)[1]
+    m_name = field_of(ref)
     m = next(x for x in owner.measures if x.name == m_name)
     return ColumnMeta(
         name=m_name,
@@ -1474,14 +1476,14 @@ def _merge_output_columns(
     the (mode-specific) time column, then measures. Shared by both
     pipelines — only ``time_output`` differs (raw-rows buckets the name)."""
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
-    columns = [r.rsplit(".", 1)[1] for r in q.dimensions]
+    columns = [field_of(r) for r in q.dimensions]
     meta = [_merge_meta_for_dim(r, partitions, fragments, cube_to_idx) for r in q.dimensions]
     if time_output is not None:
         col, cm = time_output
         columns.append(col)
         meta.append(cm)
     for r in q.measures:
-        columns.append(r.rsplit(".", 1)[1])
+        columns.append(field_of(r))
         meta.append(_merge_meta_for_measure(r, catalog))
     return columns, meta
 
@@ -1531,8 +1533,8 @@ def _compile_raw_rows(
     cube_to_idx = {c.name: i for i, p in enumerate(partitions) for c in p.cubes}
     time_output: tuple[str, ColumnMeta] | None = None
     if q.time_dimension:
-        td_name = q.time_dimension.dimension.rsplit(".", 1)[1]
-        plan = partitions[cube_to_idx[q.time_dimension.dimension.split(".", 1)[0]]]
+        td_name = field_of(q.time_dimension.dimension)
+        plan = partitions[cube_to_idx[cube_of(q.time_dimension.dimension)]]
         # Raw-rows buckets at merge, so the output column carries the grain.
         td_col = f"{td_name}_{plan.time_grain}" if plan.time_grain else td_name
         time_output = (td_col, ColumnMeta(name=td_col, kind="time", display_name=td_col))
@@ -1625,7 +1627,7 @@ def _detect_cross_backend_symmetric(
     measures_by_fact: dict[str, list[str]] = {}
     for ref in q.measures:
         owner = _resolve_field_to_cube(ref, catalog)
-        m_name = ref.rsplit(".", 1)[1]
+        m_name = field_of(ref)
         m = next((x for x in owner.measures if x.name == m_name), None)
         if m is None or m.agg not in ("sum", "count"):
             return None
@@ -1763,7 +1765,7 @@ def _compile_cross_backend_symmetric(
             )
         )
         for ref in fact.measure_refs:
-            m_name = ref.rsplit(".", 1)[1]
+            m_name = field_of(ref)
             meta = next(m for m in frag.column_meta if m.name == m_name)
             # Each fragment already aggregated to the conformed key; the merge
             # sums per group (identity when grouping by the key, a real fold
@@ -1780,7 +1782,7 @@ def _compile_cross_backend_symmetric(
 
     dimension_outputs: list[DimensionOutput] = []
     for ref in q.dimensions:
-        alias = ref.rsplit(".", 1)[1]
+        alias = field_of(ref)
         meta = next(m for m in bridge_frag.column_meta if m.name == alias)
         dimension_outputs.append(
             DimensionOutput(output_name=alias, sources=[FragmentColumn(0, alias)], column_meta=meta)
@@ -1980,7 +1982,7 @@ def compile_federated_query(
         # for the bare dimension, so rename it to the bucketed output
         # column — otherwise the SELECT-list alias and its meta disagree
         # and the assembler can't find the meta (granularity != None).
-        td_col = partitions[cube_to_idx[ref.split(".", 1)[0]]].dim_columns[ref]
+        td_col = partitions[cube_to_idx[cube_of(ref)]].dim_columns[ref]
         td_meta = _merge_meta_for_dim(ref, partitions, fragments, cube_to_idx)
         time_output = (td_col, dc_replace(td_meta, name=td_col))
     output_columns, output_column_meta = _merge_output_columns(

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from semql.dialect import dialect_for as sqlglot_dialect_for
+from semql.refs import cube_of, is_qualified, local_name
 
 if TYPE_CHECKING:
     from semql.compile import CompiledQuery
@@ -124,29 +125,23 @@ class AuditHook(BaseCompileHook):
     def _extract_cubes(self, query: SemanticQuery) -> list[str]:
         cubes: set[str] = set()
         for ref in query.measures + query.dimensions:
-            if "." in ref:
-                cubes.add(ref.split(".")[0])
+            if is_qualified(ref):
+                cubes.add(cube_of(ref))
         for f in query.filters:
-            if "." in f.dimension:
-                cubes.add(f.dimension.split(".")[0])
+            if is_qualified(f.dimension):
+                cubes.add(cube_of(f.dimension))
         return sorted(list(cubes))
 
     def _extract_measures(self, query: SemanticQuery) -> list[str]:
         measures: set[str] = set()
         for ref in query.measures:
-            if "." in ref:
-                measures.add(ref.split(".")[1])
-            else:
-                measures.add(ref)
+            measures.add(local_name(ref))
         return sorted(list(measures))
 
     def _extract_filter_dims(self, query: SemanticQuery) -> list[str]:
         dims: set[str] = set()
         for f in query.filters:
-            if "." in f.dimension:
-                dims.add(f.dimension.split(".")[1])
-            else:
-                dims.add(f.dimension)
+            dims.add(local_name(f.dimension))
         return sorted(list(dims))
 
     def _query_hash(self, query: SemanticQuery) -> str:
@@ -156,14 +151,14 @@ class AuditHook(BaseCompileHook):
         return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
     def _extract_dimensions(self, query: SemanticQuery) -> list[str]:
-        dims = {ref.split(".", 1)[1] if "." in ref else ref for ref in query.dimensions}
+        dims = {local_name(ref) for ref in query.dimensions}
         if query.time_dimension is not None:
             ref = query.time_dimension.dimension
-            dims.add(ref.split(".", 1)[1] if "." in ref else ref)
+            dims.add(local_name(ref))
         return sorted(dims)
 
     def _extract_segments(self, query: SemanticQuery) -> list[str]:
-        return sorted(ref.split(".", 1)[1] if "." in ref else ref for ref in query.segments)
+        return sorted(local_name(ref) for ref in query.segments)
 
     def post_compile(
         self,
