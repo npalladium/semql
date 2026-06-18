@@ -57,7 +57,40 @@ def _parse_context(pairs: list[str]) -> dict[str, str]:
     return out
 
 
+def _codegen_main(argv: list[str]) -> int:
+    """``python -m semql codegen`` — emit a module of typed field refs."""
+    from semql.codegen import generate_refs_module
+
+    parser = argparse.ArgumentParser(
+        prog="python -m semql codegen",
+        description="Emit a Python module of typed QualifiedRef constants from a catalog.",
+    )
+    parser.add_argument(
+        "--catalog",
+        required=True,
+        help="Catalog locator: module.path:attr (e.g. mypkg.catalogs:default).",
+    )
+    parser.add_argument(
+        "--out",
+        help="Write the generated module to this path; prints to stdout if omitted.",
+    )
+    args = parser.parse_args(argv)
+
+    source = generate_refs_module(_load_catalog(args.catalog))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        print(f"Wrote {args.out}", file=sys.stderr)
+    else:
+        print(source, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "codegen":
+        return _codegen_main(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="python -m semql",
         description="Compile a SemanticQuery JSON spec to SQL.",
