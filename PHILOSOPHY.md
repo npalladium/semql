@@ -44,9 +44,12 @@ cross a process boundary can't serve a real system.
 
 ## Growth
 
-One package per concern. Core stays minimal — `CompiledQuery` in,
-`CompiledQuery` out. Executors, enrichers, MCP, prompt fragments,
-and call-site opinions live in sibling packages and stay swappable.
+One package per concern. Core is Pareto optimal — include a feature
+if nearly every caller needs it and omitting it forces redundant
+reimplementation; exclude if it only serves a small subset of callers.
+`CompiledQuery` in, `CompiledQuery` out. Executors, enrichers, MCP,
+prompt fragments, and call-site opinions live in sibling packages
+and stay swappable.
 
 Federation belongs out of core SemQL, declared by the caller.
 

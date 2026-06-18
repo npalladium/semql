@@ -81,7 +81,7 @@ Protected assets:
 
 ### High
 
-- Hidden cubes, fields, saved queries, lookup values, or metadata leak through prompts, tool schemas, introspection APIs, MCP errors, or validation paths despite viewer restrictions.
+- Hidden cubes or fields leak through prompts, tool schemas, introspection APIs, MCP errors, or validation paths despite viewer restrictions.
 - Scope predicates are applied outside a subquery or omitted for derived/federated/semijoin/time-spine paths, enabling semantic bypass for some query shapes.
 - Parameter binding is inconsistent in a dialect or merge adapter, allowing injection or parameter confusion for a material subset of supported backends.
 - Auth helper token validation accepts wrong issuer/audience/algorithm or confuses roles in a way likely to grant privileged catalog access when used as documented.
@@ -89,6 +89,7 @@ Protected assets:
 ### Medium
 
 - Catalog or database identifiers break generated SQL, generated Python catalogs, Graphviz DOT, HTML visualization, or prompt/tool text in ways that cause denial of service, misleading output, or limited injection without data exfiltration.
+- Catalog metadata — cube/field descriptions, lookup value lists, saved query names and descriptions — leaks to unauthorized viewers through prompts, tool schemas, MCP tool enumeration, or error responses. No direct data access results, but content may be business-sensitive.
 - Read-only guards reject common writes but miss a less-common backend-specific write form in a path normally used by trusted operators rather than public users.
 - Prompt injection through catalog text can influence an LLM planner but does not itself bypass compiler/MCP authorization or SQL parameterization.
 - Resource-exhaustion issues allow untrusted callers to generate very large prompts, query plans, joins, time spines, or merge workloads without configured limits.
