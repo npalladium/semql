@@ -27,6 +27,7 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast
 
+import sqlglot
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from semql._grounding import (
@@ -719,6 +720,42 @@ class DerivedTable(_HashableModel):
                     "have a unique name."
                 )
             seen.add(cte.name)
+        return self
+
+    @model_validator(mode="after")
+    def _reject_top_level_with(self) -> DerivedTable:
+        """Refuse a top-level ``WITH`` in ``sql``.
+
+        The catalog hoists every cube's CTEs into one outer ``WITH`` at
+        compile time, so a ``DerivedTable`` whose ``sql`` *is* a
+        ``WITH ... SELECT`` would produce an illegal nested ``WITH`` after
+        hoisting (and silently shadow sibling cubes' CTE names). The
+        explicit ``with_ctes`` field is the supported mechanism. A ``WITH``
+        nested *inside a subquery* is self-contained and stays allowed.
+
+        Parsed dialect-lessly: ``WITH`` is standard across every supported
+        dialect, and catalog SQL is trusted, so a fragment we cannot parse
+        (e.g. a ``{placeholder}`` before substitution) is left for the
+        compiler to surface rather than blocked here."""
+        try:
+            parsed = sqlglot.parse_one(self.sql)
+        except Exception:  # noqa: BLE001 — unparseable trusted SQL is not our error to raise
+            return self
+        # ``Expression.ctes`` is the top-level statement's own WITH clause
+        # (empty for a subquery-nested WITH), which is exactly the scope we
+        # forbid; ``find_all(With)`` would over-reach into subqueries. Read it
+        # through the Any cast: ``ctes`` lives on Select/Union (not the base
+        # stub type), and the stub also types ``parse_one`` as non-None while
+        # it can return None for trivial input — the cast keeps both safe.
+        top = cast("Any", parsed)
+        if top is not None and top.ctes:
+            raise ValueError(
+                "DerivedTable.sql may not begin with a top-level WITH "
+                "clause; the compiler hoists CTEs into a single outer WITH "
+                "and a nested WITH would be illegal. Lift the inner CTEs "
+                "into the with_ctes field (each as a NamedCTE) and have sql "
+                "reference them by bare name."
+            )
         return self
 
 
